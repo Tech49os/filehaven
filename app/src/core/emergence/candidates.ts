@@ -9,7 +9,7 @@
  * 用纯统计手段区分不出来，但人一眼就知道。
  */
 import { segments } from './normalize'
-import { DOC_KIND_WORDS, GENERIC_WORDS, isOrgName } from './lexicon'
+import { DOC_KIND_WORDS, GENERIC_WORDS, isDocKindPhrase, isOrgName } from './lexicon'
 
 export interface FileRef {
   name: string
@@ -22,6 +22,14 @@ export interface Candidate {
   /** 出现在多少份不同文件里 */
   df: number
   isOrg: boolean
+  /**
+   * 「只是文种」的候选（演讲稿 / 操作手册 / 进展汇报）。
+   *
+   * 不直接删掉它们：实测直接删会让原本归在这里的文件被塞进邻近的真事项，
+   * 比如 `ppt修改.pptx` 因为内文反复提到「人工智能推进会」而被吸过去。
+   * 正确做法是降级——只有其他事项都不要的文件才落到这一类。
+   */
+  weak: boolean
   /** 送去给模型看的原始文件名，最多 3 个 */
   samples: string[]
   score: number
@@ -137,6 +145,9 @@ export function collectCandidates(files: FileRef[], opts: CandidateOptions = {})
     survivors.push({ term, st })
   }
 
+  // 「进展汇报」「演讲稿」「操作手册」这类整体就是文种的说法，不是一件事。
+  // 真实 450 份数据里这类能占到五六个，标成 weak 交给提案阶段降级处理
+  // （见 Candidate.weak 的注释：不能简单删掉）。
   const kept = survivors.filter(({ term }) => !STOP.has(term) && !isAllStopWords(term))
   const keptTerms = kept.map((k) => k.term)
 
@@ -242,12 +253,15 @@ export function collectCandidates(files: FileRef[], opts: CandidateOptions = {})
     // 超过 12 字的整段只用来判碎片，当类目名太长（用户没法用）
     if (term.length > 12) continue
     const isOrg = isOrgName(term)
+    const weak = isDocKindPhrase(term)
     result.push({
       term,
       df: st.df,
       isOrg,
+      weak,
       samples: st.samples,
-      score: st.df * (isOrg ? 0.4 : 1) * st.bestPos,
+      // 文种词排在后面：它不该在候选池里抢前排位置
+      score: st.df * (isOrg ? 0.4 : 1) * (weak ? 0.5 : 1) * st.bestPos,
     })
   }
 

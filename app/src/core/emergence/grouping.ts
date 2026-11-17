@@ -18,6 +18,8 @@ export interface TopicGroup {
   aliases: string[]
   /** 组内所有候选的 df 之和，用于判断这组有多少文件 */
   weight: number
+  /** 整组都只是文种词（见 Candidate.weak）→ 提案阶段降级为兜底类 */
+  weak: boolean
 }
 
 /** 长度差超过这个值就不认为是同一件事的简写/全称 */
@@ -32,17 +34,24 @@ function related(a: string, b: string): boolean {
 export function groupBySurface(cands: Candidate[]): TopicGroup[] {
   // 先放长词：组名直接取最具体的那个写法
   const sorted = [...cands].filter((c) => !c.isOrg).sort((a, b) => b.term.length - a.term.length)
-  const groups: { name: string; aliases: string[]; weight: number }[] = []
+  const groups: TopicGroup[] = []
+  const weakCount = new Map<TopicGroup, number>()
 
   for (const c of sorted) {
     const hit = groups.find((g) => g.aliases.some((a) => related(a, c.term)))
     if (hit) {
       hit.aliases.push(c.term)
       hit.weight += c.df
+      if (c.weak) weakCount.set(hit, (weakCount.get(hit) ?? 0) + 1)
     } else {
-      groups.push({ name: c.term, aliases: [c.term], weight: c.df })
+      const g: TopicGroup = { name: c.term, aliases: [c.term], weight: c.df, weak: false }
+      groups.push(g)
+      if (c.weak) weakCount.set(g, 1)
     }
   }
+
+  // 「整组都是文种词」才算兜底类；只要混进一个真专名，它就是正经事项
+  for (const g of groups) g.weak = (weakCount.get(g) ?? 0) === g.aliases.length
 
   groups.sort((a, b) => b.weight - a.weight)
   return groups

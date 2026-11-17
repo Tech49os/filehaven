@@ -113,3 +113,43 @@ describe('确认后再算：改名 / 删除 / 合并', () => {
     expect(p.topics[0].fileIds.sort()).toEqual(['1', '2', '3'])
   })
 })
+
+describe('兜底类（只是文种的说法）只捡剩下的文件', () => {
+  it('真事项认领的文件不会被文种类抢走', () => {
+    const files = [
+      F('1', '人工智能推进会-会议材料.pptx'),
+      F('2', '演讲稿(1).docx'),
+    ]
+    const groups: TopicGroup[] = [
+      { name: '人工智能推进会', aliases: ['人工智能推进会'], weight: 10, weak: false },
+      { name: '演讲稿', aliases: ['演讲稿'], weight: 5, weak: true },
+    ]
+    const p = buildProposal(files, groups)
+    expect(p.topics.find((t) => t.name === '人工智能推进会')!.fileIds).toEqual(['1'])
+    expect(p.topics.find((t) => t.name === '演讲稿')!.fileIds).toEqual(['2'])
+  })
+
+  it('文种类内文提到真事项时，仍然留在文种类，不被吸走', () => {
+    const files = [
+      F('1', 'ppt修改.pptx', '人工智能推进会 汇报内容 人工智能推进会 后续安排'),
+      F('2', '人工智能推进会纪要.docx'),
+    ]
+    const groups: TopicGroup[] = [
+      { name: '人工智能推进会', aliases: ['人工智能推进会'], weight: 10, weak: false },
+      { name: '修改', aliases: ['修改'], weight: 5, weak: true },
+    ]
+    const p = buildProposal(files, groups)
+    // 文件名命中 > 正文命中，所以 ppt修改 不会被正文拽走
+    expect(p.topics.find((t) => t.name === '修改')!.fileIds).toEqual(['1'])
+  })
+
+  it('文种类没有独有文件时自动消失', () => {
+    const files = [F('1', '人工智能推进会纪要.docx')]
+    const groups: TopicGroup[] = [
+      { name: '人工智能推进会', aliases: ['人工智能推进会'], weight: 10, weak: false },
+      { name: '进展汇报', aliases: ['进展汇报'], weight: 5, weak: true },
+    ]
+    const p = buildProposal(files, groups)
+    expect(p.topics.map((t) => t.name)).toEqual(['人工智能推进会'])
+  })
+})

@@ -296,6 +296,33 @@ export const useWizardStore = defineStore('wizard', {
       )
     },
 
+    /** 批量删除：确认页上一次性清掉扫出来的垃圾类 */
+    removeTopics(ids: string[]) {
+      if (!this.proposal || ids.length === 0) return
+      const drop = new Set(ids)
+      this.proposal = reassign(
+        rawFiles,
+        this.proposal.topics.filter((t) => !drop.has(t.id))
+      )
+    },
+
+    /**
+     * 用户手动补一个分类。
+     *
+     * 系统漏掉的事，用户补个名字就能把文件捞回来——这比让用户去逐个文件指定省事得多。
+     * 名字同时进文件名和正文匹配，所以像「XX 验收」这种只在正文出现的也能捞到。
+     */
+    addTopic(name: string) {
+      const n = name.trim()
+      if (!this.proposal || !n) return
+      if (this.proposal.topics.some((t) => t.name === n)) return
+      const id = `u${Date.now().toString(36)}`
+      this.proposal = reassign(rawFiles, [
+        ...this.proposal.topics,
+        { id, name: n, aliases: [n], fileIds: [], samples: [], weak: false },
+      ])
+    },
+
     /** 合并：把 from 的别名并入 to，文件随之并过去 */
     mergeTopics(fromId: string, toId: string) {
       if (!this.proposal || fromId === toId) return

@@ -32,6 +32,45 @@ export const GENERIC_WORDS = new Set([
 ])
 
 /**
+ * 能当「文种尾巴」的词。
+ *
+ * 在 DOC_KIND_WORDS 之外补了几个单字容器词（稿/单/表/图/册），
+ * 因为真实文件里「演讲稿」「资源申请单」这种两字修饰 + 一个文种字的写法很常见，
+ * 而它们显然不是「一件事」。
+ *
+ * 刻意**不收**『计划』『办法』『制度』『规范』：`逐浪计划`、`考核办法修订`
+ * 这类以它们结尾的名字经常是真的项目名，宁可留着让用户删。
+ */
+export const DOC_KIND_TAILS: string[] = [
+  ...DOC_KIND_WORDS,
+  '稿', '单', '表', '图', '册', '台账', '表格', '正文', '附件', '记录',
+].sort((a, b) => b.length - a.length)
+
+/** 前缀超过这个长度，说明「文种词」前面挂着一个真专名，不能当语气词杀掉 */
+const MAX_DOC_KIND_PREFIX = 4
+
+/**
+ * 判定「这个词就是文种，不是事项」。
+ *
+ * 判据：以文种词结尾，且前面只剩 ≤4 字的修饰。
+ *   `演讲稿`      前缀「演讲」2 字   → 是文种
+ *   `进展汇报`    前缀「进展」2 字   → 是文种
+ *   `ppt修改`     前缀「ppt」 3 字   → 是文种
+ *   `资源申请单`  前缀「资源申请」4 字 → 是文种
+ *   `服务器领用交接单` 前缀 9 字     → 不是，这是具体那件事
+ *   `智能工厂开展汇报` 前缀 6 字     → 不是
+ */
+export function isDocKindPhrase(term: string): boolean {
+  const t = term.trim()
+  for (const tail of DOC_KIND_TAILS) {
+    if (t.length <= tail.length) continue
+    if (!t.endsWith(tail)) continue
+    if (t.length - tail.length <= MAX_DOC_KIND_PREFIX) return true
+  }
+  return false
+}
+
+/**
  * 判断一个词是否是组织名。
  *
  * 反例说明为什么不能一刀切：`油化厂`、`钻采院` 也以组织后缀结尾，

@@ -15,6 +15,11 @@ export interface ProposalTopic {
   fileIds: string[]
   /** 代表文件名（确认页展示，最多 5 个） */
   samples: string[]
+  /**
+   * 兜底类：名字本身只是文种（演讲稿 / 操作手册 / 进展汇报）。
+   * 只有其他事项都不认领的文件才会落进来，界面上单独折叠显示。
+   */
+  weak?: boolean
 }
 
 export interface Proposal {
@@ -94,31 +99,66 @@ export function matchTopic(
 }
 
 function fill(files: FileItem[], topics: ProposalTopic[], keepEmpty = false): Proposal {
-  const byId = new Map(topics.map((t) => [t.id, t]))
   const fresh: ProposalTopic[] = topics.map((t) => ({ ...t, fileIds: [], samples: [] }))
   const freshById = new Map(fresh.map((t) => [t.id, t]))
-  const ungroupedIds: string[] = []
 
-  // 每个事项能覆盖多少文件 —— 用来判断谁更「专指」
-  const scale = new Map<string, number>()
-  for (const t of fresh) {
-    let n = 0
-    for (const f of files) {
-      if (t.aliases.some((a) => hitScore(f, a) > 0)) {
-        n++
-        if (n > files.length) break
+  // 「每个事项能覆盖多少文件」——用来判断谁更专指
+  const scaleOf = (ts: ProposalTopic[]): Map<string, number> => {
+    const scale = new Map<string, number>()
+    for (const t of ts) {
+      let n = 0
+      for (const f of files) {
+        if (t.aliases.some((a) => hitScore(f, a) > 0)) n++
       }
+      scale.set(t.id, n)
     }
-    scale.set(t.id, n)
+    return scale
   }
 
+  // 两轮分配：
+  //   第一轮只让正经事项挑（真专名优先，宁可让文种类空着）
+  //   第二轮才轮到兜底类捡剩下的
+  // 这样删掉/降级文种词不会把文件挤进相邻的真事项——实测过，直接删会把
+  // `ppt修改.pptx` 塞进「人工智能推进会」。
+  //
+  // 但光分两轮还不够：`ppt修改.pptx` 的正文里反复提到「人工智能推进会」，
+  // 第一轮就会被正文匹配拉走。所以再加一条——**文件名只命中兜底类的文件，
+  // 第一轮直接跳过**，留到第二轮按文件名归位。文件名是作者亲手写的，
+  // 比正文里顺带提一句可靠得多。
+  const strong = fresh.filter((t) => !t.weak)
+  const weak = fresh.filter((t) => t.weak)
+  const deferToWeak = new Set<string>()
+  if (weak.length > 0) {
+    const weakAliases = weak.flatMap((t) => t.aliases).map((a) => a.toLowerCase())
+    const strongAliases = strong.flatMap((t) => t.aliases).map((a) => a.toLowerCase())
+    for (const f of files) {
+      const n = f.name.toLowerCase()
+      if (weakAliases.some((a) => n.includes(a)) && !strongAliases.some((a) => n.includes(a))) {
+        deferToWeak.add(f.id)
+      }
+    }
+  }
+
+  const owner = new Map<string, ProposalTopic>()
+  for (const ts of [strong, weak]) {
+    if (ts.length === 0) continue
+    const scale = scaleOf(ts)
+    for (const f of files) {
+      if (owner.has(f.id)) continue
+      if (ts === strong && deferToWeak.has(f.id)) continue
+      const t = matchTopic(f, ts, scale)
+      if (t) owner.set(f.id, t)
+    }
+  }
+
+  const ungroupedIds: string[] = []
   for (const f of files) {
-    const t = matchTopic(f, fresh, scale)
+    const t = owner.get(f.id)
     if (!t) {
       ungroupedIds.push(f.id)
       continue
     }
-    const target = freshById.get(t.id) ?? byId.get(t.id)!
+    const target = freshById.get(t.id)!
     target.fileIds.push(f.id)
     if (target.samples.length < MAX_SAMPLES) target.samples.push(f.name)
   }
@@ -136,6 +176,7 @@ export function buildProposal(files: FileItem[], groups: TopicGroup[]): Proposal
     aliases: [...g.aliases],
     fileIds: [],
     samples: [],
+    weak: g.weak,
   }))
   return fill(files, topics)
 }

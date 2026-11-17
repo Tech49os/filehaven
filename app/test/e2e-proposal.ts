@@ -60,8 +60,11 @@ console.log(`\n扫描 ${files.length} 份 · 候选 ${cands.length} 个 · 事�
 console.log(`已归类 ${files.length - proposal.ungroupedIds.length} 份，未归类 ${proposal.ungroupedIds.length} 份\n`)
 
 const sorted = [...proposal.topics].sort((a, b) => b.fileIds.length - a.fileIds.length)
+const nWeak = sorted.filter((t) => t.weak).length
+console.log(`正经事项 ${sorted.length - nWeak} 个 · 仅文种兜底 ${nWeak} 个\n`)
 sorted.forEach((t, i) => {
-  console.log(`${String(i + 1).padStart(2)}. ${t.name.padEnd(14, ' ')} ${String(t.fileIds.length).padStart(3)} 份  ${t.samples[0]?.slice(0, 40) ?? ''}`)
+  const flag = t.weak ? ' [仅文种]' : ''
+  console.log(`${String(i + 1).padStart(2)}. ${t.name.padEnd(14, ' ')} ${String(t.fileIds.length).padStart(3)} 份${flag}  ${t.samples[0]?.slice(0, 40) ?? ''}`)
 })
 
 // 模拟用户删掉两个最垃圾的类，验证文件回流
