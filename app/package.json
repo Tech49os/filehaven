@@ -1,0 +1,31 @@
+{
+  "name": "filemanager-app",
+  "private": true,
+  "version": "0.2.1",
+  "type": "module",
+  "description": "本地智能文件归档客户端 MVP",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "tauri": "tauri",
+    "app:build": "tauri build",
+    "app:dev": "tauri dev"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "jszip": "^3.10.1",
+    "pinia": "^2.2.6",
+    "vue": "^3.5.13",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.10"
+  }
+}

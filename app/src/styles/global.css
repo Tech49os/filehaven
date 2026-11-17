@@ -1,0 +1,320 @@
+/* ============================================================
+   全局样式 — 桌面舞台、窗口、通用控件
+   ============================================================ */
+@import './tokens.css';
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font);
+  color: var(--c-text);
+  background: var(--c-bg);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  outline: none;
+}
+
+/* ---------- 桌面舞台（让窗口浮起，模拟 macOS 桌面） ---------- */
+.stage {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: radial-gradient(120% 100% at 20% 0%, #eef0f5 0%, #e6e8ef 45%, #dfe2ea 100%);
+  overflow: hidden;
+}
+
+/* ---------- 按钮 ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: var(--r-btn);
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+  white-space: nowrap;
+  user-select: none;
+}
+.btn:active {
+  transform: translateY(0.5px) scale(0.995);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-primary {
+  background: var(--c-primary);
+  color: #fff;
+  box-shadow: var(--sh-primary);
+}
+.btn-primary:hover:not(:disabled) {
+  background: #0a6fdc;
+}
+
+.btn-success {
+  background: var(--c-success);
+  color: #fff;
+  box-shadow: var(--sh-success);
+}
+.btn-success:hover:not(:disabled) {
+  background: #21b638;
+}
+
+.btn-secondary {
+  background: var(--c-surface);
+  color: var(--c-text);
+  border: 0.5px solid var(--c-border-strong);
+  box-shadow: var(--sh-control);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: #fafafb;
+}
+
+.btn-text {
+  color: var(--c-primary);
+  padding: 8px 10px;
+}
+.btn-text:hover {
+  background: var(--c-primary-bg);
+}
+
+.btn-muted {
+  color: var(--c-text-2);
+  padding: 8px 10px;
+}
+.btn-muted:hover {
+  background: var(--c-hover);
+}
+
+.btn-sm {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* ---------- 表单 ---------- */
+.field {
+  width: 100%;
+  background: var(--c-field);
+  border-radius: var(--r-field);
+  padding: 10px 14px;
+  border: 0.5px solid transparent;
+  font-size: 13px;
+  color: var(--c-text);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.field::placeholder {
+  color: var(--c-text-3);
+}
+.field:focus {
+  border-color: var(--c-primary);
+  background: var(--c-surface);
+}
+
+select.field {
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868b' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 30px;
+}
+
+.form-label {
+  display: block;
+  font-size: 12px;
+  color: var(--c-text-2);
+  margin-bottom: 6px;
+}
+
+/* ---------- 标签 ---------- */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: var(--r-badge);
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--c-primary-bg);
+  color: var(--c-primary);
+}
+.tag-neutral {
+  background: rgba(142, 142, 147, 0.12);
+  color: var(--c-text);
+}
+.tag-close {
+  color: var(--c-primary);
+  opacity: 0.55;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+}
+.tag-close:hover {
+  opacity: 1;
+}
+
+/* ---------- 滚动条 ---------- */
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+}
+.scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+  background-clip: content-box;
+}
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 工具类 ---------- */
+.row {
+  display: flex;
+  align-items: center;
+}
+.between {
+  justify-content: space-between;
+}
+.gap-6 {
+  gap: 6px;
+}
+.gap-8 {
+  gap: 8px;
+}
+.gap-12 {
+  gap: 12px;
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.muted {
+  color: var(--c-text-2);
+}
+.tiny {
+  font-size: 12px;
+}
+.page-title {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.3px;
+  margin: 0;
+}
+.page-sub {
+  font-size: 12.5px;
+  color: var(--c-text-2);
+  margin: 5px 0 0;
+}
+
+/* 淡入动画 */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-up {
+  animation: fadeUp 0.28s ease both;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(0, 0, 0, 0.12);
+  border-top-color: var(--c-primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* ---------- 向导步骤通用骨架 ---------- */
+.step {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.step-body {
+  flex: 1;
+  min-height: 0;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+}
+.step-body.scrollable {
+  overflow-y: auto;
+}
+.step-foot {
+  flex: 0 0 auto;
+  padding: 13px 24px;
+  border-top: 0.5px solid var(--c-border);
+  background: var(--c-footerbar);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  backdrop-filter: blur(18px);
+}
+.step-foot .spacer {
+  flex: 1;
+}

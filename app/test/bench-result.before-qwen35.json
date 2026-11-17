@@ -1,0 +1,744 @@
+{
+ "samples_total": 91,
+ "auto": 24,
+ "human": 67,
+ "models": [
+  "qwen2.5:7b",
+  "qwen3:4b-q4_K_M"
+ ],
+ "rule": {
+  "ws_acc": 0.7083333333333334,
+  "dt_acc": 0.875,
+  "ws_correct": 17,
+  "dt_correct": 21,
+  "dt_total": 24,
+  "n": 24,
+  "time": 3.2901763916015625e-05,
+  "details": [
+   {
+    "name": "合同签字版.pdf",
+    "pred_ws": "商务采购",
+    "pred_dt": "合同协议",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "智能工厂三年行动计划产品成果专题报告-1126.pptx",
+    "pred_ws": "智能工厂平台",
+    "pred_dt": "汇报材料",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "人员情况.xlsx",
+    "pred_ws": null,
+    "pred_dt": null,
+    "ws_ok": false,
+    "dt_ok": false
+   },
+   {
+    "name": "智能工厂全量数据入湖成本估算0612.xlsx",
+    "pred_ws": null,
+    "pred_dt": null,
+    "ws_ok": false,
+    "dt_ok": false
+   },
+   {
+    "name": "副本钻采院高温高压项目-工作量-成本20260519V3.1.xlsx",
+    "pred_ws": "钻采院项目",
+    "pred_dt": "成本报价",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "钻采院高温高压项目-工作量-成本20260519V2.0.xlsx",
+    "pred_ws": "钻采院项目",
+    "pred_dt": "成本报价",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "钻采院高温高压项目-工作量-成本20260427V1.0.xlsx",
+    "pred_ws": "钻采院项目",
+    "pred_dt": "成本报价",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "钻采研究院智能化项目方案v2.0.docx",
+    "pred_ws": "钻采院项目",
+    "pred_dt": "方案设计",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "钻采院方案.docx",
+    "pred_ws": "钻采院项目",
+    "pred_dt": "方案设计",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "钻采院高温高压项目-工作量-成本20260519V3.1.xlsx",
+    "pred_ws": "钻采院项目",
+    "pred_dt": "成本报价",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "油田化工智能工厂项目进展情况汇报-2026.11.5.pptx",
+    "pred_ws": "油化厂项目",
+    "pred_dt": "汇报材料",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "中国海油智能工厂梯度培育培训项目项目方案V8.docx",
+    "pred_ws": "人事培训",
+    "pred_dt": "方案设计",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "中海油智能工厂梯度培育培训项目项目方案V1.docx",
+    "pred_ws": "人事培训",
+    "pred_dt": "方案设计",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "中海油智能工厂梯度培育培训项目项目方案V3.docx",
+    "pred_ws": "人事培训",
+    "pred_dt": "方案设计",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "月度质量之星申报表_王一名.docx",
+    "pred_ws": "部门管理",
+    "pred_dt": "考核人事",
+    "ws_ok": false,
+    "dt_ok": true
+   },
+   {
+    "name": "附件1：五项费率清单-设备材料重新梳理20260901-智能工厂技术室.xlsx",
+    "pred_ws": "商务采购",
+    "pred_dt": "成本报价",
+    "ws_ok": false,
+    "dt_ok": true
+   },
+   {
+    "name": "附件2海油发展框架协议服务内容梳理-汇总.xlsx",
+    "pred_ws": "商务采购",
+    "pred_dt": "合同协议",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "境内差旅费单项预算审批单及员工出差申请表-王一名.docx",
+    "pred_ws": "财务报销",
+    "pred_dt": "单据表单",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "专项行动应急预案-平台技术室.docx",
+    "pred_ws": "安全合规",
+    "pred_dt": "检查应急",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "海油发展信科公司网信安全云边协同技战法.docx",
+    "pred_ws": "安全合规",
+    "pred_dt": "检查应急",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "【新上线系统】海油发展智能工厂平台安全检查报告V1.2-20241230.docx",
+    "pred_ws": "安全合规",
+    "pred_dt": "检查应急",
+    "ws_ok": false,
+    "dt_ok": true
+   },
+   {
+    "name": "海油发展信科公司网信安全云边协同技战法v1.docx",
+    "pred_ws": "安全合规",
+    "pred_dt": "检查应急",
+    "ws_ok": true,
+    "dt_ok": true
+   },
+   {
+    "name": "附件2：集团公司信息技术产品及服务采购网络安全预判审查意见-智能工厂产品模块深化建设项目-已审核.docx",
+    "pred_ws": "安全合规",
+    "pred_dt": "检查应急",
+    "ws_ok": false,
+    "dt_ok": true
+   },
+   {
+    "name": "信科公司科技项目立项汇报-海油发展智能工厂产品深化提升关键技术研究 .pptx",
+    "pred_ws": "知识沉淀",
+    "pred_dt": "方案设计",
+    "ws_ok": false,
+    "dt_ok": false
+   }
+  ]
+ },
+ "model_results": {
+  "qwen2.5:7b": {
+   "ws_acc": 0.7916666666666666,
+   "dt_acc": 0.7916666666666666,
+   "ws_correct": 19,
+   "dt_correct": 19,
+   "dt_total": 24,
+   "n": 24,
+   "time": 0.0002472400665283203,
+   "details": [
+    {
+     "name": "合同签字版.pdf",
+     "truth_ws": "商务采购",
+     "truth_dt": "合同协议",
+     "pred_ws": "商务采购",
+     "pred_dt": "合同协议",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"商务采购\",\"dt\":\"合同协议\"}"
+    },
+    {
+     "name": "智能工厂三年行动计划产品成果专题报告-1126.pptx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "汇报材料",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "汇报材料",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"汇报材料\"}"
+    },
+    {
+     "name": "人员情况.xlsx",
+     "truth_ws": "人事培训",
+     "truth_dt": "考核人事",
+     "pred_ws": "人事培训",
+     "pred_dt": "单据表单",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"人事培训\",\"dt\":\"单据表单\"}"
+    },
+    {
+     "name": "智能工厂全量数据入湖成本估算0612.xlsx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "成本报价",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "副本钻采院高温高压项目-工作量-成本20260519V3.1.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "钻采院高温高压项目-工作量-成本20260519V2.0.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "钻采院高温高压项目-工作量-成本20260427V1.0.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "钻采研究院智能化项目方案v2.0.docx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "方案设计",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "方案设计",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "钻采院方案.docx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "方案设计",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "方案设计",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "钻采院高温高压项目-工作量-成本20260519V3.1.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "油田化工智能工厂项目进展情况汇报-2026.11.5.pptx",
+     "truth_ws": "油化厂项目",
+     "truth_dt": "汇报材料",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "汇报材料",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"汇报材料\"}"
+    },
+    {
+     "name": "中国海油智能工厂梯度培育培训项目项目方案V8.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "方案设计",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "中海油智能工厂梯度培育培训项目项目方案V1.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "方案设计",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "中海油智能工厂梯度培育培训项目项目方案V3.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "方案设计",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "月度质量之星申报表_王一名.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "考核人事",
+     "pred_ws": "人事培训",
+     "pred_dt": "单据表单",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"人事培训\",\"dt\":\"单据表单\"}"
+    },
+    {
+     "name": "附件1：五项费率清单-设备材料重新梳理20260901-智能工厂技术室.xlsx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "成本报价",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "附件2海油发展框架协议服务内容梳理-汇总.xlsx",
+     "truth_ws": "商务采购",
+     "truth_dt": "合同协议",
+     "pred_ws": "商务采购",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"商务采购\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "境内差旅费单项预算审批单及员工出差申请表-王一名.docx",
+     "truth_ws": "财务报销",
+     "truth_dt": "单据表单",
+     "pred_ws": "财务报销",
+     "pred_dt": "单据表单",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"财务报销\",\"dt\":\"单据表单\"}"
+    },
+    {
+     "name": "专项行动应急预案-平台技术室.docx",
+     "truth_ws": "安全合规",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "检查应急",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"检查应急\"}"
+    },
+    {
+     "name": "海油发展信科公司网信安全云边协同技战法.docx",
+     "truth_ws": "安全合规",
+     "truth_dt": "检查应急",
+     "pred_ws": "安全合规",
+     "pred_dt": "制度规范",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"安全合规\",\"dt\":\"制度规范\"}"
+    },
+    {
+     "name": "【新上线系统】海油发展智能工厂平台安全检查报告V1.2-20241230.docx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "检查应急",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"检查应急\"}"
+    },
+    {
+     "name": "海油发展信科公司网信安全云边协同技战法v1.docx",
+     "truth_ws": "安全合规",
+     "truth_dt": "检查应急",
+     "pred_ws": "安全合规",
+     "pred_dt": "制度规范",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"安全合规\",\"dt\":\"制度规范\"}"
+    },
+    {
+     "name": "附件2：集团公司信息技术产品及服务采购网络安全预判审查意见-智能工厂产品模块深化建设项目-已审核.docx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "检查应急",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"检查应急\"}"
+    },
+    {
+     "name": "信科公司科技项目立项汇报-海油发展智能工厂产品深化提升关键技术研究 .pptx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "汇报材料",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "汇报材料",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"汇报材料\"}"
+    }
+   ]
+  },
+  "qwen3:4b-q4_K_M": {
+   "ws_acc": 0.6666666666666666,
+   "dt_acc": 0.7916666666666666,
+   "ws_correct": 16,
+   "dt_correct": 19,
+   "dt_total": 24,
+   "n": 24,
+   "time": 0.00014710426330566406,
+   "details": [
+    {
+     "name": "合同签字版.pdf",
+     "truth_ws": "商务采购",
+     "truth_dt": "合同协议",
+     "pred_ws": "商务采购",
+     "pred_dt": "合同协议",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"商务采购\",\"dt\":\"合同协议\"}"
+    },
+    {
+     "name": "智能工厂三年行动计划产品成果专题报告-1126.pptx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "汇报材料",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "汇报材料",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"汇报材料\"}"
+    },
+    {
+     "name": "人员情况.xlsx",
+     "truth_ws": "人事培训",
+     "truth_dt": "考核人事",
+     "pred_ws": "人事培训",
+     "pred_dt": "单据表单",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"人事培训\",\"dt\":\"单据表单\"}"
+    },
+    {
+     "name": "智能工厂全量数据入湖成本估算0612.xlsx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "成本报价",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "副本钻采院高温高压项目-工作量-成本20260519V3.1.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "钻采院高温高压项目-工作量-成本20260519V2.0.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "钻采院高温高压项目-工作量-成本20260427V1.0.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "钻采研究院智能化项目方案v2.0.docx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "方案设计",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "方案设计",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "钻采院方案.docx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "方案设计",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "方案设计",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "钻采院高温高压项目-工作量-成本20260519V3.1.xlsx",
+     "truth_ws": "钻采院项目",
+     "truth_dt": "成本报价",
+     "pred_ws": "钻采院项目",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"钻采院项目\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "油田化工智能工厂项目进展情况汇报-2026.11.5.pptx",
+     "truth_ws": "油化厂项目",
+     "truth_dt": "汇报材料",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "汇报材料",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"汇报材料\"}"
+    },
+    {
+     "name": "中国海油智能工厂梯度培育培训项目项目方案V8.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "方案设计",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "中海油智能工厂梯度培育培训项目项目方案V1.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "方案设计",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "中海油智能工厂梯度培育培训项目项目方案V3.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "方案设计",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "月度质量之星申报表_王一名.docx",
+     "truth_ws": "人事培训",
+     "truth_dt": "考核人事",
+     "pred_ws": "人事培训",
+     "pred_dt": "单据表单",
+     "ws_ok": true,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"人事培训\",\"dt\":\"单据表单\"}"
+    },
+    {
+     "name": "附件1：五项费率清单-设备材料重新梳理20260901-智能工厂技术室.xlsx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "成本报价",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "成本报价",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "附件2海油发展框架协议服务内容梳理-汇总.xlsx",
+     "truth_ws": "商务采购",
+     "truth_dt": "合同协议",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "成本报价",
+     "ws_ok": false,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"成本报价\"}"
+    },
+    {
+     "name": "境内差旅费单项预算审批单及员工出差申请表-王一名.docx",
+     "truth_ws": "财务报销",
+     "truth_dt": "单据表单",
+     "pred_ws": "财务报销",
+     "pred_dt": "单据表单",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"财务报销\",\"dt\":\"单据表单\"}"
+    },
+    {
+     "name": "专项行动应急预案-平台技术室.docx",
+     "truth_ws": "安全合规",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "检查应急",
+     "ws_ok": false,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"检查应急\"}"
+    },
+    {
+     "name": "海油发展信科公司网信安全云边协同技战法.docx",
+     "truth_ws": "安全合规",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "方案设计",
+     "ws_ok": false,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"方案设计\"}"
+    },
+    {
+     "name": "【新上线系统】海油发展智能工厂平台安全检查报告V1.2-20241230.docx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "检查应急",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"检查应急\"}"
+    },
+    {
+     "name": "海油发展信科公司网信安全云边协同技战法v1.docx",
+     "truth_ws": "安全合规",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "制度规范",
+     "ws_ok": false,
+     "dt_ok": false,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"制度规范\"}"
+    },
+    {
+     "name": "附件2：集团公司信息技术产品及服务采购网络安全预判审查意见-智能工厂产品模块深化建设项目-已审核.docx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "检查应急",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "检查应急",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"检查应急\"}"
+    },
+    {
+     "name": "信科公司科技项目立项汇报-海油发展智能工厂产品深化提升关键技术研究 .pptx",
+     "truth_ws": "智能工厂平台",
+     "truth_dt": "汇报材料",
+     "pred_ws": "智能工厂平台",
+     "pred_dt": "汇报材料",
+     "ws_ok": true,
+     "dt_ok": true,
+     "raw": "{\"ws\":\"智能工厂平台\",\"dt\":\"汇报材料\"}"
+    }
+   ]
+  }
+ },
+ "hybrid": {
+  "qwen2.5:7b": {
+   "old_conf_gate": {
+    "ws_acc": 0.8333333333333334,
+    "dt_acc": 0.8333333333333334,
+    "ws_correct": 20,
+    "dt_correct": 20,
+    "dt_total": 24,
+    "n": 24,
+    "used_model": 7
+   },
+   "split": {
+    "ws_acc": 0.7916666666666666,
+    "dt_acc": 0.9166666666666666,
+    "ws_correct": 19,
+    "dt_correct": 22,
+    "dt_total": 24,
+    "n": 24,
+    "dt_from_rule": 22
+   },
+   "agree_gate": {
+    "n": 12,
+    "coverage": 0.5,
+    "auto_acc": 1.0
+   }
+  },
+  "qwen3:4b-q4_K_M": {
+   "old_conf_gate": {
+    "ws_acc": 0.75,
+    "dt_acc": 0.8333333333333334,
+    "ws_correct": 18,
+    "dt_correct": 20,
+    "dt_total": 24,
+    "n": 24,
+    "used_model": 7
+   },
+   "split": {
+    "ws_acc": 0.6666666666666666,
+    "dt_acc": 0.875,
+    "ws_correct": 16,
+    "dt_correct": 21,
+    "dt_total": 24,
+    "n": 24,
+    "dt_from_rule": 21
+   },
+   "agree_gate": {
+    "n": 9,
+    "coverage": 0.375,
+    "auto_acc": 1.0
+   }
+  }
+ }
+}

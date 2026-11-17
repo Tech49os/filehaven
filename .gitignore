@@ -1,0 +1,11 @@
+node_modules/
+dist/
+app/dist/
+app/src-tauri/target/
+发布/*.exe
+发布/*.msi
+*.log
+app/test/*.png
+app/test/*.jpg
+app/test/_pdf_page.png
+.DS_Store

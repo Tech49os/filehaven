@@ -1,0 +1,302 @@
+import { defineStore } from 'pinia'
+import {
+  scanDirectory as scanBrowser,
+  supportsFSA,
+  pickDirectory as pickBrowserDir,
+} from '../core/fs'
+import {
+  isDesktop,
+  pickDirectory as pickDesktopDir,
+  prepareArchiveRoot,
+  scanDirectory as scanDesktop,
+  toFileItems,
+} from '../core/desktop'
+import { demoScan } from '../core/demo'
+import { induceHybrid } from '../core/hybrid'
+import type {
+  AppMode,
+  FileItem,
+  HybridProgress,
+  HybridStats,
+  InductionResult,
+  ScanProgress,
+} from '../core/types'
+import { useDataStore } from './data'
+
+/** 文件句柄不放进响应式容器（Proxy 会破坏句柄方法） */
+let rootHandleRef: FileSystemDirectoryHandle | null = null
+let rawFiles: FileItem[] = []
+
+export function getRootHandle(): FileSystemDirectoryHandle | null {
+  return rootHandleRef
+}
+
+export function getRawFiles(): FileItem[] {
+  return rawFiles
+}
+
+export function fileHandleMap(): Map<string, FileSystemFileHandle> {
+  const m = new Map<string, FileSystemFileHandle>()
+  for (const f of rawFiles) if (f.handle) m.set(f.id, f.handle)
+  return m
+}
+
+/** 归纳过程的实时状态（供进度页展示） */
+export interface AiLiveState {
+  active: boolean
+  phase: HybridProgress['phase'] | ''
+  done: number
+  total: number
+  current: string
+  startedAt: number
+  stats: HybridStats | null
+  /** 最近判完的文件（倒序），边跑边显示 */
+  log: Array<NonNullable<HybridProgress['event']>>
+}
+
+const emptyAi = (): AiLiveState => ({
+  active: false,
+  phase: '',
+  done: 0,
+  total: 0,
+  current: '',
+  startedAt: 0,
+  stats: null,
+  log: [],
+})
+
+/** 默认归档根目录（用户可在欢迎页更改） */
+export const DEFAULT_ARCHIVE = 'D:\\文档归档'
+
+export const useWizardStore = defineStore('wizard', {
+  state: () => ({
+    step: 1,
+    scanning: false,
+    inducing: false,
+    migrating: false,
+    mode: 'demo' as AppMode,
+    /** 要整理的源目录（桌面版为绝对路径） */
+    sourcePath: '',
+    sourceLabel: '未选择目录',
+    archivePath: DEFAULT_ARCHIVE,
+    progress: { processed: 0, total: 0, currentPath: '', skipped: 0 } as ScanProgress,
+    error: '',
+    summary: null as InductionResult | null,
+    /** 本轮归纳的实时进度 */
+    ai: emptyAi(),
+    cancelled: { cancelled: false },
+    scannedCount: 0,
+    skippedCount: 0,
+    /** 是否运行在桌面客户端里 */
+    desktop: isDesktop,
+  }),
+
+  getters: {
+    stepName: (s) =>
+      ['', '设置归档位置', '扫描文件', 'AI 归纳分类', '人工微调', '预览迁移', '安全迁移', '完成'][
+        s.step
+      ] ?? '',
+    canPrev: (s) => s.step > 1 && s.step < 6,
+  },
+
+  actions: {
+    /** 选择要整理的目录（桌面版走系统对话框） */
+    async selectRealRoot() {
+      this.error = ''
+      if (isDesktop) {
+        const dir = await pickDesktopDir('选择要整理的目录', this.sourcePath || undefined)
+        if (!dir) {
+          this.error = '未选择目录'
+          return false
+        }
+        this.mode = 'real'
+        this.sourcePath = dir
+        this.sourceLabel = dir
+        // 归档根不能落在源目录内，否则会自我递归
+        if (this.archivePath && this.archivePath.toLowerCase().startsWith(dir.toLowerCase())) {
+          this.archivePath = DEFAULT_ARCHIVE
+        }
+        return true
+      }
+
+      // 浏览器兜底（开发调试用）
+      const h = await pickBrowserDir('readwrite')
+      if (h) {
+        rootHandleRef = h
+        this.mode = 'real'
+        this.sourceLabel = h.name
+        this.archivePath = `${h.name}\\_已归档`
+        return true
+      }
+      this.mode = 'demo'
+      this.sourceLabel = '未选择目录'
+      this.error = supportsFSA
+        ? '未选择目录，已切换为示例数据模式'
+        : '当前环境不支持访问本地文件，已切换为示例数据模式'
+      return false
+    },
+
+    /** 更改归档根目录 */
+    async pickArchiveRoot() {
+      if (!isDesktop) return false
+      const dir = await pickDesktopDir('选择归档根目录', this.archivePath || undefined)
+      if (!dir) return false
+      this.archivePath = dir
+      return true
+    },
+
+    useDemo() {
+      rootHandleRef = null
+      this.mode = 'demo'
+      this.sourcePath = ''
+      this.sourceLabel = '示例数据'
+      this.archivePath = DEFAULT_ARCHIVE
+      this.error = ''
+    },
+
+    async startScan() {
+      const data = useDataStore()
+      this.scanning = true
+      this.error = ''
+      this.cancelled = { cancelled: false }
+      // 重新扫描意味着上一轮的分类结论作废
+      this.summary = null
+      this.ai = emptyAi()
+      this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }
+      this.skippedCount = 0
+      try {
+        if (this.mode === 'real' && isDesktop && this.sourcePath) {
+          // 桌面版：Rust 侧递归扫描 + 正文抽取
+          const res = await scanDesktop(this.sourcePath, {
+            archiveRoot: this.archivePath,
+            maxSizeMB: data.settings.maxFileSizeMB || 2048,
+            limit: 20000,
+            onProgress: (p) => {
+              this.progress = p
+            },
+          })
+          rawFiles = toFileItems(res.files)
+          this.skippedCount = res.skipped
+        } else if (this.mode === 'real' && rootHandleRef) {
+          rawFiles = await scanBrowser(rootHandleRef, {
+            maxSizeBytes: 2048 * 1024 * 1024,
+            archiveRoot: this.archivePath,
+            onProgress: (p) => {
+              this.progress = p
+            },
+            signal: this.cancelled,
+          })
+        } else {
+          rawFiles = await demoScan((p) => {
+            this.progress = p
+          }, this.cancelled)
+        }
+        this.scannedCount = rawFiles.length
+        if (rawFiles.length === 0) {
+          this.error = '这个位置没有找到可整理的文件'
+        }
+      } catch (e) {
+        this.error = e instanceof Error ? e.message : '扫描失败'
+      } finally {
+        this.scanning = false
+      }
+      return rawFiles.length
+    },
+
+    /**
+     * 归纳：规则引擎先扫一遍，再把规则没把握的文件交给本地大模型复核
+     *
+     * 融合策略见 core/hybrid.ts —— 规则与模型双路一致才给高置信，
+     * 分歧一律进待确认，模型补盲会标注来源。
+     */
+    async runInduction() {
+      const data = useDataStore()
+      this.inducing = true
+      this.error = ''
+      this.summary = null
+      this.cancelled = { cancelled: false }
+      this.ai = {
+        active: true,
+        phase: 'rules',
+        done: 0,
+        total: rawFiles.length,
+        current: '',
+        startedAt: Date.now(),
+        stats: null,
+        log: [],
+      }
+
+      const s = data.settings
+      try {
+        const { result, files, stats } = await induceHybrid(rawFiles, {
+          threshold: s.confidenceThreshold,
+          llm: {
+            enabled: s.llmEnabled,
+            config: {
+              baseUrl: s.llmBaseUrl,
+              model: s.llmModel,
+              apiKey: s.llmApiKey,
+              timeoutMs: 90000,
+            },
+            strategy: s.llmStrategy,
+            concurrency: s.llmConcurrency,
+            maxFiles: s.llmMaxFiles,
+          },
+          signal: this.cancelled,
+          onProgress: (p) => {
+            this.ai.phase = p.phase
+            this.ai.done = p.done
+            if (p.total > 0) this.ai.total = p.total
+            this.ai.current = p.current
+            if (p.event) {
+              this.ai.log.unshift(p.event)
+              if (this.ai.log.length > 80) this.ai.log.length = 80
+            }
+          },
+        })
+        data.setResult(files, result.categories)
+        this.summary = result
+        this.ai.stats = stats
+        if (!stats.llmUsed && stats.fallbackReason) this.error = stats.fallbackReason
+      } catch (e) {
+        this.error = e instanceof Error ? e.message : '归纳失败'
+      } finally {
+        this.inducing = false
+        this.ai.active = false
+      }
+    },
+
+    /** 中止本轮归纳（已判完的保留，剩余按规则结果收尾） */
+    cancelInduction() {
+      this.cancelled.cancelled = true
+    },
+
+    next() {
+      if (this.step < 7) this.step++
+    },
+    back() {
+      if (this.step > 1) this.step--
+    },
+    goto(step: number) {
+      this.step = step
+    },
+
+    reset() {
+      this.step = 1
+      this.scanning = false
+      this.inducing = false
+      this.migrating = false
+      this.summary = null
+      this.error = ''
+      this.ai = emptyAi()
+      this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }
+      rawFiles = []
+      rootHandleRef = null
+    },
+
+    /** 确保归档根存在（桌面版） */
+    async ensureArchive() {
+      if (isDesktop) await prepareArchiveRoot(this.archivePath)
+    },
+  },
+})
