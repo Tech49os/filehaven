@@ -6,6 +6,7 @@ import { useWizardStore } from '../../stores/wizard'
 import WelcomeStep from './WelcomeStep.vue'
 import ScanStep from './ScanStep.vue'
 import InductionStep from './InductionStep.vue'
+import TopicConfirmStep from './TopicConfirmStep.vue'
 import ReviewStep from './ReviewStep.vue'
 import MigrateStep from './MigrateStep.vue'
 import DoneStep from './DoneStep.vue'
@@ -18,6 +19,7 @@ const comp = computed(() => {
     WelcomeStep,
     ScanStep,
     InductionStep,
+    TopicConfirmStep,
     ReviewStep,
     MigrateStep,
     MigrateStep,

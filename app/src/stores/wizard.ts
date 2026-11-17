@@ -12,7 +12,15 @@ import {
   toFileItems,
 } from '../core/desktop'
 import { demoScan } from '../core/demo'
-import { induceHybrid } from '../core/hybrid'
+import { collectCandidates } from '../core/emergence/candidates'
+import { groupBySurface } from '../core/emergence/grouping'
+import { DOC_KIND_WORDS } from '../core/emergence/lexicon'
+import {
+  applyProposal,
+  buildProposal,
+  reassign,
+  type Proposal,
+} from '../core/emergence/proposal'
 import type {
   AppMode,
   FileItem,
@@ -84,6 +92,8 @@ export const useWizardStore = defineStore('wizard', {
     summary: null as InductionResult | null,
     /** 本轮归纳的实时进度 */
     ai: emptyAi(),
+    /** 涌现出的分类方案（确认之前不落盘、不建目录） */
+    proposal: null as Proposal | null,
     cancelled: { cancelled: false },
     scannedCount: 0,
     skippedCount: 0,
@@ -93,10 +103,24 @@ export const useWizardStore = defineStore('wizard', {
 
   getters: {
     stepName: (s) =>
-      ['', '设置归档位置', '扫描文件', 'AI 归纳分类', '人工微调', '预览迁移', '安全迁移', '完成'][
-        s.step
-      ] ?? '',
-    canPrev: (s) => s.step > 1 && s.step < 6,
+      [
+        '',
+        '设置归档位置',
+        '扫描文件',
+        '生成分类方案',
+        '确认分类方案',
+        '人工微调',
+        '预览迁移',
+        '安全迁移',
+        '完成',
+      ][s.step] ?? '',
+    canPrev: (s) => s.step > 1 && s.step < 7,
+    /** 确认页用：按文件数排序的事项 */
+    proposalTopics: (s) =>
+      s.proposal
+        ? [...s.proposal.topics].sort((a, b) => b.fileIds.length - a.fileIds.length)
+        : [],
+    ungroupedCount: (s) => s.proposal?.ungroupedIds.length ?? 0,
   },
 
   actions: {
@@ -204,66 +228,109 @@ export const useWizardStore = defineStore('wizard', {
     },
 
     /**
-     * 归纳：规则引擎先扫一遍，再把规则没把握的文件交给本地大模型复核
+     * 生成分类方案：从文件名里涌现事项 → 保守分组 → 装配归属提案
      *
-     * 融合策略见 core/hybrid.ts —— 规则与模型双路一致才给高置信，
-     * 分歧一律进待确认，模型补盲会标注来源。
+     * 全程纯 CPU（几百毫秒），不调模型、不写文件。产出只是一份「提案」，
+     * 用户在第 4 步确认之后才真正建目录。
      */
-    async runInduction() {
-      const data = useDataStore()
+    async runProposal() {
       this.inducing = true
       this.error = ''
       this.summary = null
+      this.proposal = null
       this.cancelled = { cancelled: false }
       this.ai = {
         active: true,
         phase: 'rules',
         done: 0,
         total: rawFiles.length,
-        current: '',
+        current: '正在从文件名里抽取事项…',
         startedAt: Date.now(),
         stats: null,
         log: [],
       }
-
-      const s = data.settings
       try {
-        const { result, files, stats } = await induceHybrid(rawFiles, {
-          threshold: s.confidenceThreshold,
-          llm: {
-            enabled: s.llmEnabled,
-            config: {
-              baseUrl: s.llmBaseUrl,
-              model: s.llmModel,
-              apiKey: s.llmApiKey,
-              timeoutMs: 90000,
-            },
-            strategy: s.llmStrategy,
-            concurrency: s.llmConcurrency,
-            maxFiles: s.llmMaxFiles,
-          },
-          signal: this.cancelled,
-          onProgress: (p) => {
-            this.ai.phase = p.phase
-            this.ai.done = p.done
-            if (p.total > 0) this.ai.total = p.total
-            this.ai.current = p.current
-            if (p.event) {
-              this.ai.log.unshift(p.event)
-              if (this.ai.log.length > 80) this.ai.log.length = 80
-            }
-          },
-        })
-        data.setResult(files, result.categories)
-        this.summary = result
-        this.ai.stats = stats
-        if (!stats.llmUsed && stats.fallbackReason) this.error = stats.fallbackReason
+        const files = rawFiles
+        if (files.length === 0) {
+          this.error = '没有可归纳的文件'
+          return
+        }
+        const cands = collectCandidates(
+          files.map((f) => ({ name: f.name, path: f.path })),
+          { topK: 60 }
+        )
+        // 纯英文短词（ppt/work）和纯格式词（演讲稿/申请表）不当事项，否则确认页全是垃圾
+        const cn = (s: string) => (s.match(/[\u4e00-\u9fff]/g) ?? []).length
+        const useful = cands.filter((c) => cn(c.term) >= 2 && !DOC_KIND_WORDS.has(c.term))
+        const groups = groupBySurface(useful).filter((g) => g.weight >= 3)
+
+        const p = buildProposal(files, groups)
+        this.proposal = p
+        this.ai.phase = 'done'
+        this.ai.done = files.length
+        this.ai.total = files.length
+        this.ai.current = `归纳出 ${p.topics.length} 个事项，${p.ungroupedIds.length} 份未归类`
       } catch (e) {
-        this.error = e instanceof Error ? e.message : '归纳失败'
+        this.error = e instanceof Error ? e.message : '生成方案失败'
       } finally {
         this.inducing = false
         this.ai.active = false
       }
+    },
+
+    /** 改名：只改展示名，别名不变，归属不变 */
+    renameTopic(id: string, name: string) {
+      if (!this.proposal) return
+      const t = this.proposal.topics.find((x) => x.id === id)
+      if (!t) return
+      t.name = name.trim() || t.name
+      this.refreshProposal()
+    },
+
+    /** 删除：它的文件回到未归类，不会丢 */
+    removeTopic(id: string) {
+      if (!this.proposal) return
+      this.proposal = reassign(
+        rawFiles,
+        this.proposal.topics.filter((t) => t.id !== id)
+      )
+    },
+
+    /** 合并：把 from 的别名并入 to，文件随之并过去 */
+    mergeTopics(fromId: string, toId: string) {
+      if (!this.proposal || fromId === toId) return
+      const from = this.proposal.topics.find((t) => t.id === fromId)
+      const to = this.proposal.topics.find((t) => t.id === toId)
+      if (!from || !to) return
+      to.aliases = Array.from(new Set([...to.aliases, ...from.aliases]))
+      this.proposal = reassign(
+        rawFiles,
+        this.proposal.topics.filter((t) => t.id !== fromId)
+      )
+    },
+
+    /** 改完立刻重算归属（纯 CPU，毫秒级） */
+    refreshProposal() {
+      if (!this.proposal) return
+      this.proposal = reassign(rawFiles, this.proposal.topics)
+    },
+
+    /** 用户点「确认」——此刻才真正落成分类目录 */
+    confirmProposal() {
+      if (!this.proposal) return
+      const data = useDataStore()
+      const applied = applyProposal(rawFiles, this.proposal)
+      data.setResult(applied.files, applied.categories)
+      const byKind: Record<string, number> = {}
+      for (const f of applied.files) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1
+      this.summary = {
+        categories: applied.categories,
+        fileCount: applied.files.length,
+        autoK: applied.categories.length,
+        silhouette: 0,
+        byKind,
+      }
+      this.next()
     },
 
     /** 中止本轮归纳（已判完的保留，剩余按规则结果收尾） */
@@ -272,7 +339,7 @@ export const useWizardStore = defineStore('wizard', {
     },
 
     next() {
-      if (this.step < 7) this.step++
+      if (this.step < 8) this.step++
     },
     back() {
       if (this.step > 1) this.step--
@@ -287,6 +354,7 @@ export const useWizardStore = defineStore('wizard', {
       this.inducing = false
       this.migrating = false
       this.summary = null
+      this.proposal = null
       this.error = ''
       this.ai = emptyAi()
       this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }

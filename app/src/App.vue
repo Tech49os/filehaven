@@ -31,7 +31,8 @@ onMounted(async () => {
   }
 
   await w.startScan()
-  await w.runInduction()
+  await w.runProposal()
+  w.confirmProposal()
 
   if (auto === 'main') {
     const plans: MigrationPlan[] = data.files
