@@ -9,6 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "tauri": "tauri",
     "app:build": "tauri build",
     "app:dev": "tauri dev"
@@ -26,6 +28,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
+    "vitest": "^2.1.9",
     "vue-tsc": "^2.1.10"
   }
 }
