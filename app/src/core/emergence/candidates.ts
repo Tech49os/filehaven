@@ -52,12 +52,19 @@ function isAllStopWords(term: string): boolean {
   return true
 }
 
-/** 一个段能贡献的候选形态：整段 + 段内 3–8 字 n-gram */
+/**
+ * 一个段能贡献的候选形态。
+ *
+ * 整段**不限制长度**：像「中海油信息科技有限公司科技技术谱系」这种 18 字长串
+ * 本身不适合当类目名，但它是判断「中海油信息科技有」「海油信息科技有限」
+ * 这类滑动窗口碎片的唯一依据——不收集它，碎片就永远找不到包含者。
+ * 超长整段只在碎片判定里用，最后不会出现在候选输出里。
+ */
 function forms(seg: string): string[] {
   const chars = [...seg]
   const L = chars.length
   const out: string[] = []
-  if (L >= 2 && L <= 12) out.push(seg)
+  if (L >= 2) out.push(seg)
   // 段本身很短时不要再切，否则只会切出碎片
   if (L > 4) {
     for (let n = 3; n <= Math.min(8, L - 1); n++) {
@@ -131,39 +138,109 @@ export function collectCandidates(files: FileRef[], opts: CandidateOptions = {})
   }
 
   const kept = survivors.filter(({ term }) => !STOP.has(term) && !isAllStopWords(term))
-
-  // 同族去重（原型踩过的坑）：
-  // 一个长词会同时产出它的所有子串，这些子串的 df 与长词完全相同。
-  // 例如「智能工厂技术室」会带出「智能工」「智能工厂」「工厂技术室」……
-  // 若按「短的代表优先」，反而会把完整的词删掉、留下一堆碎片。
-  // 正确做法：同 df 的包含族里只留**最完整的一个**——
-  //   whole=1（曾经作为整段出现）优先，其次取最长。
   const keptTerms = kept.map((k) => k.term)
-  const wholeSet = wholeTerms
-  const byDf = new Map<number, string[]>()
-  for (const t of keptTerms) {
-    const df = stats.get(t)!.df
-    const arr = byDf.get(df)
-    if (arr) arr.push(t)
-    else byDf.set(df, [t])
+
+  // ── 邻接统计（第二遍扫描）─────────────────────────────────
+  //
+  // 光靠 df 抓不住「跨多个父词」的碎片：`化建设` 同时来自「数字化建设」和
+  // 「智能化建设」，没有任何单个长词的出现次数能压过它。
+  //
+  // 真正的碎片有两个可测特征：
+  //  1. 从不在段的开头或结尾出现 → 它必然是某段话的中间片段
+  //  2. 左（或右）邻字永远只有一种，且加上它之后也是候选 → 它是那个词的尾巴/头
+  // 真事项反过来：一定在段首/段尾出现过，且邻字多样
+  // （`技术谱系` 左边可以是「智能感知」「软件开发」或段首，右边可以是 -、汇报）。
+  const wanted = new Set(keptTerms)
+  interface Adj {
+    lefts: Set<string>
+    rights: Set<string>
+    atStart: boolean
+    atEnd: boolean
   }
+  const adj = new Map<string, Adj>()
+  for (const f of files) {
+    for (const seg of segments(f.name)) {
+      const chars = [...seg]
+      for (let i = 0; i < chars.length; i++) {
+        for (let n = 3; n <= 8 && i + n <= chars.length; n++) {
+          const t = chars.slice(i, i + n).join('')
+          if (!wanted.has(t)) continue
+          let a = adj.get(t)
+          if (!a) {
+            a = { lefts: new Set(), rights: new Set(), atStart: false, atEnd: false }
+            adj.set(t, a)
+          }
+          if (i === 0) a.atStart = true
+          else if (a.lefts.size < 8) a.lefts.add(chars[i - 1])
+          if (i + n === chars.length) a.atEnd = true
+          else if (a.rights.size < 8) a.rights.add(chars[i + n])
+        }
+      }
+    }
+  }
+
+  // 碎片剔除（真实 450 份数据暴露的坑）
+  //
+  // 长段会产出大量互相重叠、但**互不为子串**的定长窗口，例如
+  // 「中海油信息科技有限公司科技技术谱系」会切出：
+  //   中海油信息科技有 / 海油信息科技有限 / 油信息科技有限公 ……
+  // 它们长度相同、df 相同，按「包含关系」完全判不出来。
+  //
+  // 但这些碎片有一个共同特征：**总有一个更长的候选包含它，且出现次数几乎一样多**
+  // （说明它从来没有独立出现过）。所以判据是：
+  //   A ⊂ B 且 df(B) ≥ df(A) × 0.8  →  A 只是 B 的一部分，丢掉 A
+  //
+  // 反例保护：`技术谱系`(18) 虽被 `中海油信息科技有限公司科技技术谱系`(8) 包含，
+  // 但 8 < 18×0.8，说明它在别的上下文里独立出现过 10 次——它是真词，必须留。
+  //
+  // 实现从「长词」出发反向标记：枚举长词的所有子串，命中候选就判定为碎片。
+  // 比「每个短词去搜更长词」快得多（后者在 450 份真实文件上会退化成 O(n²)）。
   const dropped = new Set<string>()
-  for (const terms of byDf.values()) {
-    const sorted = [...terms].sort((a, b) => {
-      const wa = wholeSet.has(a) ? 1 : 0
-      const wb = wholeSet.has(b) ? 1 : 0
-      return wb - wa || b.length - a.length
-    })
-    const reps: string[] = []
-    for (const t of sorted) {
-      if (reps.some((r) => r.includes(t))) dropped.add(t)
-      else reps.push(t)
+  for (const t of keptTerms) {
+    const a = adj.get(t)
+    if (!a) continue
+    // 1) 从未出现在段的边界上 → 纯中间片段
+    if (!a.atStart && !a.atEnd) {
+      dropped.add(t)
+      continue
+    }
+    // 2) 左邻唯一，且左邻+自己也是候选 → 自己只是那个词的尾部
+    if (a.lefts.size === 1) {
+      const l = [...a.lefts][0]
+      if (wanted.has(l + t)) {
+        dropped.add(t)
+        continue
+      }
+    }
+    // 3) 右邻唯一，且自己+右邻也是候选 → 自己只是那个词的开头
+    if (a.rights.size === 1) {
+      const r = [...a.rights][0]
+      if (wanted.has(t + r)) {
+        dropped.add(t)
+      }
+    }
+  }
+
+  const byLenDesc = [...keptTerms].sort((a, b) => b.length - a.length)
+  for (const b of byLenDesc) {
+    if (b.length < 4) continue
+    const db = stats.get(b)!.df
+    for (let n = 3; n < b.length; n++) {
+      for (let i = 0; i + n <= b.length; i++) {
+        const a = b.slice(i, i + n)
+        if (dropped.has(a)) continue
+        const st = stats.get(a)
+        if (!st) continue
+        if (db >= st.df * 0.8) dropped.add(a)
+      }
     }
   }
 
   const result: Candidate[] = []
   for (const { term, st } of kept) {
     if (dropped.has(term)) continue
+    // 超过 12 字的整段只用来判碎片，当类目名太长（用户没法用）
+    if (term.length > 12) continue
     const isOrg = isOrgName(term)
     result.push({
       term,
