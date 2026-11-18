@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildProposal, reassign, type ProposalTopic } from '../src/core/emergence/proposal'
+import { applyProposal, buildProposal, reassign, type ProposalTopic } from '../src/core/emergence/proposal'
 import type { FileItem } from '../src/core/types'
 import type { TopicGroup } from '../src/core/emergence/grouping'
 
@@ -151,5 +151,55 @@ describe('兜底类（只是文种的说法）只捡剩下的文件', () => {
     ]
     const p = buildProposal(files, groups)
     expect(p.topics.map((t) => t.name)).toEqual(['人工智能推进会'])
+  })
+})
+
+describe('落地：树 → 分类目录', () => {
+  const files = [F('a', '技术谱系汇报.docx'), F('b', '技术谱系附件.docx'), F('c', '差旅费.xlsx')]
+  const P = () => ({
+    topics: [
+      { id: 't1', name: '技术谱系', aliases: [], fileIds: ['a'], samples: [], domain: '技术研发' },
+      { id: 't2', name: '技术沉淀', aliases: [], fileIds: ['b'], samples: [], domain: '技术研发' },
+      { id: 't3', name: '境内差旅费', aliases: [], fileIds: ['c'], samples: [] },
+    ],
+    ungroupedIds: [],
+  })
+
+  it('有大类的事项建成两层目录：先父后子，parentId 指对了', () => {
+    const r = applyProposal(files, P())
+    const root = r.categories.find((c) => !c.parentId)!
+    expect(root.name).toBe('技术研发')
+    const kids = r.categories.filter((c) => c.parentId === root.id)
+    expect(kids.map((c) => c.name).sort()).toEqual(['技术谱系', '技术沉淀'].sort())
+  })
+
+  it('没有大类的事项直接挂在归档根目录下', () => {
+    const r = applyProposal(files, P())
+    const loose = r.categories.find((c) => c.name === '境内差旅费')!
+    expect(loose.parentId).toBeNull()
+  })
+
+  it('文件的 categoryId 指向自己的事项，不是父目录', () => {
+    const r = applyProposal(files, P())
+    const idOf = (name: string) => r.categories.find((c) => c.name === name)!.id
+    expect(r.files.find((f) => f.id === 'a')!.categoryId).toBe(idOf('技术谱系'))
+    expect(r.files.find((f) => f.id === 'c')!.categoryId).toBe(idOf('境内差旅费'))
+  })
+
+  it('只有自己的域不建父层——单孩子目录只是多一层点击', () => {
+    const r = applyProposal(files, {
+      topics: [
+        { id: 't1', name: '技术谱系', aliases: [], fileIds: ['a'], samples: [], domain: '技术研发' },
+        { id: 't2', name: '境内差旅费', aliases: [], fileIds: ['c'], samples: [] },
+      ],
+      ungroupedIds: [],
+    })
+    expect(r.categories.every((c) => !c.parentId)).toBe(true)
+    expect(r.categories.map((c) => c.name).sort()).toEqual(['境内差旅费', '技术谱系'])
+  })
+
+  it('分类 id 不重复（父子混编也不会撞）', () => {
+    const r = applyProposal(files, P())
+    expect(new Set(r.categories.map((c) => c.id)).size).toBe(r.categories.length)
   })
 })

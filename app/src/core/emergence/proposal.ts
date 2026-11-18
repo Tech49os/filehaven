@@ -5,6 +5,7 @@
  * 用户确认方案之后才真正归类——这是「先提案后执行」的分界线。
  */
 import type { Category, FileItem } from '../types'
+import { buildTree } from './domain'
 import type { TopicGroup } from './grouping'
 
 export interface ProposalTopic {
@@ -15,6 +16,11 @@ export interface ProposalTopic {
   fileIds: string[]
   /** 代表文件名（确认页展示，最多 5 个） */
   samples: string[]
+  /**
+   * 所属大域（归档第一层目录）。空 = 直接放在归档根目录下。
+   * 由 domain.ts 决定（模型分域，失败退规则），用户可在确认页的树里改。
+   */
+  domain?: string
   /**
    * 兜底类：只有其他事项都不认领的文件才会落进来，界面上单独折叠显示。
    *  weakReason='doc' 名字本身只是文种（演讲稿 / 操作手册）
@@ -200,25 +206,53 @@ export interface AppliedProposal {
 }
 
 export function applyProposal(files: FileItem[], p: Proposal): AppliedProposal {
-  const idByName = new Map<string, string>()
-  const categories: Category[] = p.topics.map((t, i) => {
-    const id = `ws_${i}`
-    idByName.set(t.name, id)
-    return {
+  // 目录形状只由 buildTree 决定：确认页上看到的树 = 真正建出来的目录
+  const tree = buildTree(p.topics)
+  const categories: Category[] = []
+  /** 事项 id → 分类 id（按 id 而不是名字，重名才不会串） */
+  const catOfTopic = new Map<string, string>()
+  let seq = 0
+
+  const addTopic = (t: ProposalTopic, parentId: string | null) => {
+    const id = `ws_${seq++}`
+    catOfTopic.set(t.id, id)
+    categories.push({
       id,
       name: t.name,
       desc: `${t.fileIds.length} 份文件`,
-      parentId: null,
-      order: i,
+      parentId,
+      order: seq,
       isFromAI: true,
-    }
-  })
+    })
+  }
 
-  const topicOfFile = new Map<string, string>()
-  for (const t of p.topics) for (const fid of t.fileIds) topicOfFile.set(fid, t.name)
+  for (const d of tree.domains) {
+    const did = `dm_${seq++}`
+    categories.push({
+      id: did,
+      name: d.name,
+      desc: `${d.topics.length} 个事项 · ${d.fileCount} 份文件`,
+      parentId: null,
+      order: seq,
+      isFromAI: true,
+    })
+    for (const t of d.topics) addTopic(t, did)
+  }
+  for (const t of tree.loose) addTopic(t, null)
+
+  const catOfFile = new Map<string, string>()
+  const nameOfFile = new Map<string, string>()
+  for (const t of p.topics) {
+    const cid = catOfTopic.get(t.id)
+    if (!cid) continue
+    for (const fid of t.fileIds) {
+      catOfFile.set(fid, cid)
+      nameOfFile.set(fid, t.name)
+    }
+  }
 
   const out = files.map((f) => {
-    const topic = topicOfFile.get(f.id) ?? null
+    const topic = nameOfFile.get(f.id) ?? null
     const year = String(new Date(f.mtime).getFullYear())
     const tags = topic ? [topic, year] : [year]
     if (f.kind === 'drawio') tags.push('架构图')
@@ -226,7 +260,7 @@ export function applyProposal(files: FileItem[], p: Proposal): AppliedProposal {
       ...f,
       ws: topic,
       dt: null,
-      categoryId: topic ? (idByName.get(topic) ?? null) : null,
+      categoryId: catOfFile.get(f.id) ?? null,
       confidence: topic ? 0.9 : 0.2,
       needReview: !topic,
       status: topic ? ('classified' as const) : ('pending' as const),

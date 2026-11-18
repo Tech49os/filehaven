@@ -275,6 +275,37 @@ pub fn kind_of(ext: &str) -> &'static str {
     }
 }
 
+/// 明确不是「要归档的文档」的扩展名。
+///
+/// 与前端 src/core/skip.ts 的 NON_DOC_EXT 保持一致（改一处必须改两处）。
+/// 判断标准是「读不出正文 / 判断不了事项」：快捷方式、程序、压缩包、系统文件。
+/// 真实数据里这些能占到未归类文件的一半以上，收进来只会淹掉真正要处理的文件。
+const NON_DOC_EXT: &[&str] = &[
+    // 快捷方式与可执行
+    "lnk", "exe", "msi", "dll", "sys", "com", "scr", "bat", "cmd", "ps1", "reg", "vbs",
+    // 系统与临时
+    "ini", "tmp", "temp", "thumbcache", "db", "dat", "bak1",
+    // 压缩包：读不出正文，归类只能靠猜
+    "zip", "rar", "7z", "gz", "tar", "iso", "cab",
+    // 二进制 / 编译产物
+    "pyc", "class", "jar", "so", "dylib", "obj", "o", "bin", "apk", "dmg",
+];
+
+/// 系统自己生成的固定文件名
+const NON_DOC_NAMES: &[&str] = &["thumbs.db", "ehthumbs.db", "desktop.ini"];
+
+/// 无扩展名的文件不武断排除：可能是不带后缀的正文文件
+pub fn is_non_document(name: &str, ext: &str) -> bool {
+    let lower = name.to_lowercase();
+    if NON_DOC_NAMES.contains(&lower.as_str()) {
+        return true;
+    }
+    if ext.is_empty() {
+        return false;
+    }
+    NON_DOC_EXT.contains(&ext)
+}
+
 fn is_plain_text(ext: &str) -> bool {
     matches!(
         ext,

@@ -318,3 +318,13 @@ select.field {
 .step-foot .spacer {
   flex: 1;
 }
+/* 开发预览页用：模拟 Tauri 窗口边界（不进打包产物，仅 dev/preview-confirm.html 引用） */
+.preview-win {
+  width: 1240px;
+  height: 820px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-bg);
+  overflow: hidden;
+}

@@ -91,7 +91,9 @@ function removeTag(t: string) {
 }
 
 function next() {
-  w.goto(5)
+  // 这里曾经写成 w.goto(5)——自己跳自己，点「预览迁移计划」毫无反应。
+  // test/wizard-nav.test.ts 现在会拦住「组件跳到自己所在步骤」这种写法。
+  w.goto(6)
 }
 </script>
 

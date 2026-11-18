@@ -29,7 +29,14 @@ const F = (id: string, name: string, text = ''): FileItem =>
 
 const P = (): Proposal => ({
   topics: [
-    { id: 't1', name: '技术谱系', aliases: ['技术谱系'], fileIds: ['a'], samples: ['技术谱系汇报.docx'] },
+    {
+      id: 't1',
+      name: '技术谱系',
+      aliases: ['技术谱系'],
+      fileIds: ['a'],
+      samples: ['技术谱系汇报.docx'],
+      domain: '技术研发',
+    },
     { id: 't2', name: '演讲稿', aliases: ['演讲稿'], fileIds: ['b'], samples: [], weak: true, weakReason: 'doc' },
   ],
   ungroupedIds: ['c'],
@@ -43,15 +50,41 @@ describe('存：把确认过的方案压成可持久化的形状', () => {
     expect(s.savedAt).toBe(1000)
   })
 
-  it('只留类名/别名/降级原因，不留文件 id（下次扫描 id 全变）', () => {
+  it('只留类名/别名/大域/降级原因，不留文件 id（下次扫描 id 全变）', () => {
     const s = toSavedPlan(P(), 'D:\\文档归档', 1000)
     expect(s.topics[0]).toEqual({
       name: '技术谱系',
       aliases: ['技术谱系'],
+      domain: '技术研发',
       weak: undefined,
       weakReason: undefined,
     })
     expect(JSON.stringify(s)).not.toContain('技术谱系汇报.docx')
+  })
+
+  it('大域跟着存档走，下次沿用时目录还是两层的', () => {
+    const saved = toSavedPlan(P(), 'D:\\a', 1000)
+    const back = fromSavedPlan(saved)!
+    expect(back[0].domain).toBe('技术研发')
+    // 兜底类没有域，回到第一层
+    expect(back[1].domain).toBeUndefined()
+  })
+
+  it('旧版（v1）存档照样能读，只是没有大类', () => {
+    const v1 = toSavedPlan(P(), 'D:\\a')
+    // v1 存档里根本没有 domain 这个字段
+    for (const t of v1.topics) delete (t as { domain?: string }).domain
+    const back = fromSavedPlan({ ...v1, version: 1 })!
+    expect(back.length).toBe(2)
+    expect(back[0].name).toBe('技术谱系')
+    expect(back[0].domain).toBeUndefined()
+  })
+
+  it('域字段是脏数据（数字/空串）时不炸，当成没有', () => {
+    const s = toSavedPlan(P(), 'D:\\a')
+    ;(s.topics[0] as unknown as { domain: unknown }).domain = 123
+    const back = fromSavedPlan(s)!
+    expect(back[0].domain).toBeUndefined()
   })
 
   it('改名后的类名被记住，别名保留原始写法', () => {

@@ -12,6 +12,10 @@ const hint = ref('')
 const topicCount = computed(() => w.proposal?.topics.length ?? 0)
 const ungrouped = computed(() => w.proposal?.ungroupedIds.length ?? 0)
 const fileCount = computed(() => w.scannedCount)
+/** 分出了几个大类（归档第一层目录） */
+const domainCount = computed(
+  () => new Set((w.proposal?.topics ?? []).map((t) => t.domain).filter(Boolean)).size
+)
 
 const savedInfo = computed(() => {
   const s = w.savedPlan
@@ -92,8 +96,9 @@ onMounted(async () => {
         <div class="ind-title">正在归纳这次要处理哪些事…</div>
         <div class="ind-sub">
           {{ w.ai.current || '正在从文件名里抽取事项…' }}<br />
-          先用规则从文件名里抽出反复出现的专名，再让本地模型分辨其中哪些只是人名/单位名。
-          模型较慢时可能要等半分钟；模型没装或没启动会自动跳过。
+          先用规则从文件名里抽出反复出现的专名，再让本地模型做两件小事：哪些词只是人名/单位名、
+          这批文件主要在管哪些方向（决定第一层目录）。模型较慢时前后要等一两分钟；
+          没装或没启动会自动跳过，只按名字规律分。
         </div>
       </template>
 
@@ -117,7 +122,7 @@ onMounted(async () => {
         <div class="ind-sub">
           <template v-if="reused">已沿用上次方案，</template>
           <template v-else>从 {{ fileCount }} 份文件里归纳出</template>
-          {{ topicCount }} 个事项，{{ ungrouped }} 份没能归类。
+          {{ topicCount }} 个事项<template v-if="domainCount">、{{ domainCount }} 个大类</template>，{{ ungrouped }} 份没能归类。
           下一步可以改名字、删掉不需要的、把重复的合并。
         </div>
         <button class="ind-btn primary" @click="w.next()">查看并确认分类方案</button>

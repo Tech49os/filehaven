@@ -2,6 +2,12 @@ import type { FileItem } from './types'
 import { WORKSTREAM_LEXICON, DOCTYPE_LEXICON } from './classifier'
 import { llmHttp } from './desktop'
 import { buildWhoPrompt, parseWhoResult, type WhoKind } from './emergence/whoJudge'
+import {
+  buildDomainPrompt,
+  parseDomainResult,
+  type DomainResult,
+  type DomainTopic,
+} from './emergence/domain'
 import type { Candidate } from './emergence/candidates'
 
 /**
@@ -309,4 +315,41 @@ export async function judgeWhoWithLlm(
     Math.max(90_000, cfg.timeoutMs ?? 0)
   )) as { message?: { content?: string } }
   return parseWhoResult(json?.message?.content ?? '', cands)
+}
+
+/**
+ * 分域：这台电脑主要在管哪些方向的文件（决定归档目录的第一层）。
+ *
+ * 为什么这件事敢交给模型：它不是「把 40 个词归并成组」那种它做不来的活，
+ * 而是「看这批事项，判断这个人用电脑管什么」——一次归纳 + 一次归类。
+ * 实测 qwen3.5:9b：40 个事项 → 4 个域（技术研发/项目建设/行政人事/财务差旅）、
+ * 40/40 全归类、83 秒、433 token。域名字面的合理性和速度都能接受。
+ *
+ * 参数：
+ *  · num_ctx 4096 —— 同 judgeWho：8192 会把 9b 挤出显存跑 CPU
+ *  · num_predict 2048 —— 输出约 450 token，留余量
+ *  · 超时 180s —— 实测 83s，加上首次加载模型
+ */
+export async function judgeDomainsWithLlm(
+  topics: DomainTopic[],
+  cfg: LlmConfig
+): Promise<DomainResult> {
+  if (topics.length === 0) return { domains: [], assign: new Map() }
+  const body: Record<string, unknown> = {
+    model: cfg.model || DEFAULT_MODEL,
+    stream: false,
+    keep_alive: '10m',
+    format: 'json',
+    messages: [{ role: 'user', content: buildDomainPrompt(topics) }],
+    options: { temperature: 0, num_ctx: 4096, num_predict: 2048 },
+  }
+  if (needThinkOff(cfg.model)) body.think = false
+
+  const json = (await llmHttp(
+    'POST',
+    `${cfg.baseUrl.replace(/\/$/, '')}/api/chat`,
+    body,
+    Math.max(180_000, cfg.timeoutMs ?? 0)
+  )) as { message?: { content?: string } }
+  return parseDomainResult(json?.message?.content ?? '', topics.map((t) => t.name))
 }

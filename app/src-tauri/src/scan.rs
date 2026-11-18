@@ -1,6 +1,6 @@
 //! 目录扫描：递归遍历 + 系统目录强制排除 + 正文特征抽取
 
-use crate::extract::{extract, kind_of};
+use crate::extract::{extract, is_non_document, kind_of};
 use crate::model::{ScanProgress, ScanSummary, ScannedFile};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -133,6 +133,12 @@ pub fn scan(
         }
 
         let ext = ext_of(&name);
+        // 快捷方式 / 程序 / 压缩包 / 系统文件：读不出正文，必然归不了类。
+        // 收进来只会把「未归类」撑大、把真正要处理的文件淹掉，所以一开始就不收。
+        if is_non_document(&name, &ext) {
+            skipped += 1;
+            continue;
+        }
         let kind = kind_of(&ext);
         let size = meta.len();
         let path_str = path.to_string_lossy().to_string();

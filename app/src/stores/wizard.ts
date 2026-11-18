@@ -21,7 +21,12 @@ import {
   expandWho,
   type WhoKind,
 } from '../core/emergence/whoJudge'
-import { judgeWhoWithLlm } from '../core/llm'
+import { judgeWhoWithLlm, judgeDomainsWithLlm } from '../core/llm'
+import {
+  domainsFromSharedToken,
+  isUsable,
+  type DomainResult,
+} from '../core/emergence/domain'
 import {
   applyProposal,
   buildProposal,
@@ -121,6 +126,13 @@ export const useWizardStore = defineStore('wizard', {
      * 直接沿用同一套类目——这是把工具从「每次重来」变成「越用越顺」的关键。
      */
     savedPlan: null as SavedPlan | null,
+    /**
+     * 第一层目录（大域）是谁分的：
+     *  · llm  模型看这批文件判断「这台电脑在管哪些方向」
+     *  · rule 模型不可用，按事项名的公共开头粗略分组
+     *  · none 连粗略分组都凑不出来，全部放一级
+     */
+    domainSource: 'none' as 'llm' | 'rule' | 'none',
     cancelled: { cancelled: false },
     scannedCount: 0,
     skippedCount: 0,
@@ -144,6 +156,15 @@ export const useWizardStore = defineStore('wizard', {
     canPrev: (s) => s.step > 1 && s.step < 7,
     /** 确认页用：按文件数降序的稳定排序，空类沉底 */
     proposalTopics: (s) => (s.proposal ? sortForDisplay(s.proposal.topics) : []),
+    /** 现有的大域名（左树改名/拖动时给下拉用） */
+    domainNames: (s) => {
+      const seen: string[] = []
+      for (const t of s.proposal?.topics ?? []) {
+        const d = (t.domain ?? '').trim()
+        if (d && !seen.includes(d)) seen.push(d)
+      }
+      return seen
+    },
     ungroupedCount: (s) => s.proposal?.ungroupedIds.length ?? 0,
     /** 未归类文件按目录成组，确认页据此让用户看清「剩的到底是什么」 */
     ungroupedGroups: (s) =>
@@ -337,17 +358,77 @@ export const useWizardStore = defineStore('wizard', {
         const groups = groupBySurface(useful, { who }).filter((g) => g.weight >= 3)
 
         const p = buildProposal(files, groups)
+        // 第一层目录：模型判断「这台电脑在管哪些方向」，不行就按名字公共开头粗分
+        await this.assignDomains(p)
         this.proposal = p
         this.ai.phase = 'done'
         this.ai.done = files.length
         this.ai.total = files.length
-        this.ai.current = `归纳出 ${p.topics.length} 个事项，${p.ungroupedIds.length} 份未归类`
+        const doms = new Set(p.topics.map((t) => t.domain).filter(Boolean)).size
+        this.ai.current = doms
+          ? `归纳出 ${doms} 个大类、${p.topics.length} 个事项，${p.ungroupedIds.length} 份未归类`
+          : `归纳出 ${p.topics.length} 个事项，${p.ungroupedIds.length} 份未归类`
       } catch (e) {
         this.error = e instanceof Error ? e.message : '生成方案失败'
       } finally {
         this.inducing = false
         this.ai.active = false
       }
+    },
+
+    /**
+     * 给事项分域（第一层目录）。
+     *
+     * 只有「正经事项」参与：兜底类（人名/单位/仅文种）本来就回答不了
+     * 「哪件事」，塞给模型只会污染域划分。
+     * 模型结果不可用（说得太少、几乎全塞进一个域）就不采信，退回公共开头分组，
+     * 界面会注明这是粗略分组——宁可承认粗糙，也不要给用户一个看似聪明的错树。
+     */
+    async assignDomains(p: Proposal): Promise<'llm' | 'rule' | 'none'> {
+      const data = useDataStore()
+      const s = data.settings
+      const strong = p.topics.filter((t) => !t.weak)
+      const input = strong.map((t) => ({ name: t.name, weight: t.fileIds.length }))
+      const names = input.map((t) => t.name)
+
+      let result: DomainResult | null = null
+      let source: 'llm' | 'rule' | 'none' = 'none'
+
+      if (s.llmEnabled && input.length >= 4) {
+        this.ai.current = '正在让本地模型判断这台电脑在管哪些方向的文件…'
+        try {
+          const r = await judgeDomainsWithLlm(input, {
+            baseUrl: s.llmBaseUrl,
+            model: s.llmModel,
+            apiKey: s.llmApiKey,
+          })
+          if (isUsable(r, names)) {
+            result = r
+            source = 'llm'
+          } else {
+            this.ai.current = '模型没分出可用的大类，改用名字里的共同词粗略分组…'
+          }
+        } catch {
+          this.ai.current = '模型没有响应，按名字里的共同词粗略分组…'
+        }
+      }
+
+      if (!result) {
+        const r = domainsFromSharedToken(input)
+        if (r.domains.length > 0) {
+          result = r
+          source = 'rule'
+        }
+      }
+
+      if (result) {
+        for (const t of strong) {
+          const d = result.assign.get(t.name)
+          if (d) t.domain = d
+        }
+      }
+      this.domainSource = source
+      return source
     },
 
     /** 改名：只改展示名，别名不变，归属不变 */
@@ -359,13 +440,41 @@ export const useWizardStore = defineStore('wizard', {
       this.refreshProposal()
     },
 
-    /** 删除：它的文件回到未归类，不会丢 */
+    /** 删掉的分类，文件回到未归类，不会丢 */
     removeTopic(id: string) {
       if (!this.proposal) return
       this.proposal = reassign(
         rawFiles,
         this.proposal.topics.filter((t) => t.id !== id)
       )
+    },
+
+    /** 改大类名：该域下所有事项一起改（目录名只有一个） */
+    renameDomain(from: string, to: string) {
+      const name = to.trim()
+      if (!this.proposal || !name || name === from) return
+      for (const t of this.proposal.topics) {
+        if (t.domain === from) t.domain = name
+      }
+      this.proposal = { ...this.proposal }
+    },
+
+    /** 解散大类：事项回到第一层，文件和类目都不动 */
+    dissolveDomain(name: string) {
+      if (!this.proposal) return
+      for (const t of this.proposal.topics) {
+        if (t.domain === name) t.domain = undefined
+      }
+      this.proposal = { ...this.proposal }
+    },
+
+    /** 把某个事项挪到别的大类（domain 传 null 表示放回第一层） */
+    moveTopicToDomain(id: string, domain: string | null) {
+      if (!this.proposal) return
+      const t = this.proposal.topics.find((x) => x.id === id)
+      if (!t) return
+      t.domain = domain?.trim() || undefined
+      this.proposal = { ...this.proposal }
     },
 
     /** 批量删除：确认页上一次性清掉扫出来的垃圾类 */
@@ -384,14 +493,14 @@ export const useWizardStore = defineStore('wizard', {
      * 系统漏掉的事，用户补个名字就能把文件捞回来——这比让用户去逐个文件指定省事得多。
      * 名字同时进文件名和正文匹配，所以像「XX 验收」这种只在正文出现的也能捞到。
      */
-    addTopic(name: string) {
+    addTopic(name: string, domain?: string) {
       const n = name.trim()
       if (!this.proposal || !n) return
       if (this.proposal.topics.some((t) => t.name === n)) return
       const id = `u${Date.now().toString(36)}`
       this.proposal = reassign(rawFiles, [
         ...this.proposal.topics,
-        { id, name: n, aliases: [n], fileIds: [], samples: [], weak: false },
+        { id, name: n, aliases: [n], fileIds: [], samples: [], weak: false, domain: domain?.trim() || undefined },
       ])
     },
 

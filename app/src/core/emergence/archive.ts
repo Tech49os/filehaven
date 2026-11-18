@@ -15,13 +15,17 @@ import type { FileItem } from '../types'
 import { reassign, type Proposal, type ProposalTopic } from './proposal'
 
 /** 存档结构变了就+1，旧存档会被当成「没有」，不冒险解释 */
-export const ARCHIVE_VERSION = 1
+export const ARCHIVE_VERSION = 2
+/** 还能读的旧版本：v1 没有 domain 字段，读出来是一层目录，其余照旧可用 */
+const READABLE_VERSIONS = [1, ARCHIVE_VERSION]
 
 export interface SavedTopic {
   /** 用户确认过的类名（可能被改名过） */
   name: string
   /** 涌现出来的原始写法，用于匹配文件名 */
   aliases: string[]
+  /** 所属大域（归档第一层）。v1 存档没有这个字段 */
+  domain?: string
   weak?: boolean
   weakReason?: 'doc' | 'who'
 }
@@ -43,6 +47,7 @@ export function toSavedPlan(proposal: Proposal, root: string, savedAt = Date.now
     topics: proposal.topics.map((t) => ({
       name: t.name,
       aliases: [...t.aliases],
+      domain: t.domain,
       weak: t.weak,
       weakReason: t.weakReason,
     })),
@@ -56,7 +61,7 @@ export function toSavedPlan(proposal: Proposal, root: string, savedAt = Date.now
  * 宁可少一个类，也不能让整个流程起不来。
  */
 export function fromSavedPlan(saved: SavedPlan | null | undefined): ProposalTopic[] | null {
-  if (!saved || saved.version !== ARCHIVE_VERSION) return null
+  if (!saved || !READABLE_VERSIONS.includes(saved.version)) return null
   if (!Array.isArray(saved.topics) || saved.topics.length === 0) return null
 
   const topics: ProposalTopic[] = []
@@ -64,6 +69,8 @@ export function fromSavedPlan(saved: SavedPlan | null | undefined): ProposalTopi
     const name = (t?.name ?? '').trim()
     if (!name) continue
     const aliases = (Array.isArray(t.aliases) ? t.aliases : []).map((a) => String(a).trim()).filter(Boolean)
+    // 只认字符串：脏数据（数字/null）当成没有大类，不要变成 "123" 这样的目录名
+    const domain = typeof t.domain === 'string' ? t.domain.trim() : ''
     topics.push({
       // 存档里的类目重新编号，避免和本轮新生成的 t1/t2 撞车
       id: `s${topics.length + 1}`,
@@ -72,6 +79,7 @@ export function fromSavedPlan(saved: SavedPlan | null | undefined): ProposalTopi
       aliases: aliases.length ? aliases : [name],
       fileIds: [],
       samples: [],
+      domain: domain || undefined,
       weak: t.weak,
       weakReason: t.weakReason,
     })
