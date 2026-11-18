@@ -142,3 +142,57 @@ pub struct BootState {
     pub counts: Counts,
     pub model: ModelStatus,
 }
+
+/// 列表/卡片里的一份文件
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRow {
+    pub id: i64,
+    pub name: String,
+    pub ext: String,
+    pub kind: String,
+    pub size: i64,
+    /// 毫秒
+    pub mtime: i64,
+    pub status: String,
+    pub rel_path: String,
+    pub abs_path: String,
+    pub source_root_id: Option<i64>,
+    pub defer_count: i32,
+    pub note: Option<String>,
+}
+
+/// 一条候选目录（reason 非空，服务端保证）
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    pub dir_id: i64,
+    pub rel_path: String,
+    pub score: f64,
+    pub reason: String,
+    /// 0.35 ≤ score < 0.55：橙色徽标
+    pub uncertain: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchItem {
+    pub file: FileRow,
+    /// 0~2 个备选：主推在 [0]；needsYou 时为空
+    pub candidates: Vec<Candidate>,
+    pub needs_you: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchView {
+    pub batch_id: i64,
+    pub seq: i64,
+    pub size: i64,
+    pub items: Vec<BatchItem>,
+    pub remaining_in_pool: i64,
+    /// 0 时前端切空态（验收 11）
+    pub dir_count: i64,
+    /// defer_count ≥ 3 的 fileId（排最后并标注）
+    pub deferred_badge: Vec<i64>,
+}

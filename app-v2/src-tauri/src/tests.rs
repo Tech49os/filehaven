@@ -186,6 +186,49 @@ mod index {
         assert_eq!((ok, bad), (17, 47), "转移表条目数变了？");
     }
 
+    // T4.6 批次落库：关批次把未确认的退回池，且暂缓过的文件必须能再进池
+    #[test]
+    fn batches_close_and_return_unconfirmed_to_pool() {
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/r").unwrap();
+        let a = db::insert_test_file(&conn, root.id, "a.docx", db::Status::Labeled).unwrap();
+        let b = db::insert_test_file(&conn, root.id, "b.docx", db::Status::Labeled).unwrap();
+        let c = db::insert_test_file(&conn, root.id, "c.docx", db::Status::Labeled).unwrap();
+
+        let seq1 = db::next_batch_seq(&conn).unwrap();
+        let batch1 = db::insert_batch(&conn, seq1, 12).unwrap();
+        for id in [a, b] {
+            db::set_status(&conn, id, db::Status::PendingConfirm).unwrap();
+        }
+        assert_eq!(db::pool_rows(&conn).unwrap().len(), 3);
+
+        let back = db::close_batch(&mut conn, batch1).unwrap();
+        assert_eq!(back, 2, "未确认的两份应回池");
+
+        let open = db::open_batch(&conn).unwrap();
+        assert!(open.is_none(), "关掉之后不该还有未关闭批次");
+        let closed_at: Option<i64> = conn
+            .query_row("SELECT closed_at FROM batches WHERE id=?1", [batch1], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(closed_at.is_some());
+
+        // 暂缓回来的文件（queued + 已打过 basic 标签）必须重新出现在池里，
+        // 否则「S 暂缓」等于把文件扔了（与 §8.4 矛盾）
+        let pool = db::pool_rows(&conn).unwrap();
+        assert!(pool.iter().any(|f| f.id == a), "暂缓的文件没回到池：{pool:?}");
+
+        let seq2 = db::next_batch_seq(&conn).unwrap();
+        db::insert_batch(&conn, seq2, 12).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM batches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(seq2, seq1 + 1);
+        let _ = c;
+    }
+
     // T1.8 assignments 写与读
     #[test]
     fn assignments_last_wins() {
@@ -598,6 +641,286 @@ mod llm {
         assert!(!m::reachable(base, Duration::from_millis(300)));
         let e = m::generate(base, "x", "hi", Duration::from_millis(300)).unwrap_err();
         assert_eq!(e.code, MODEL_DOWN);
+    }
+}
+
+// ================================================================ 推荐
+
+mod recommend {
+    use crate::model::Candidate;
+    use crate::recommend as rc;
+    use crate::tag;
+    use std::collections::HashMap;
+
+    fn f(tokens: &[&str], stem: &str) -> rc::FileFeature {
+        rc::FileFeature {
+            tokens: tokens.iter().map(|s| s.to_string()).collect(),
+            stem: stem.into(),
+            ..Default::default()
+        }
+    }
+
+    fn d(name: &str, name_tokens: &[&str], confirmed: &[&str], file_count: usize) -> rc::DirFeature {
+        rc::DirFeature {
+            name_tokens: name_tokens.iter().map(|s| s.to_string()).collect(),
+            dir_name: name.into(),
+            confirmed_tokens: confirmed.iter().map(|s| s.to_string()).collect(),
+            file_count,
+        }
+    }
+
+    // T4.1 打分：手算期望值
+    #[test]
+    fn score_hand_computed() {
+        let file = f(&["安全检查", "通知"], "安全检查通知.docx");
+        let dir = d("安全检查", &["安全检查"], &["验收", "检查"], 3);
+        // 目录侧词元 = {安全检查, 验收, 检查} = 3 个，命中 {安全检查} = 1 个
+        // → 覆盖率 1/3 = 0.333；stem 含目录名（4 字 ≥3）→ ×1.3 → 0.433
+        let s = rc::score(&file, &dir);
+        assert!((s - 1.0 / 3.0 * 1.3).abs() < 1e-9, "实际 {s}");
+
+        // 子串命中必须高于同词元的无命中情况
+        let no_hit = d("费率清单", &["费率清单"], &[], 0);
+        assert!(s > rc::score(&file, &no_hit));
+        assert_eq!(rc::score(&file, &no_hit), 0.0);
+
+        // 空集 → 0
+        assert_eq!(rc::jaccard(&[], &["a".to_string()]), 0.0);
+        assert_eq!(rc::jaccard(&[], &[]), 0.0);
+    }
+
+    // T4.2 无理由即作废
+    #[test]
+    fn candidate_without_reason_is_dropped() {
+        let file = f(&["检", "通知"], "检通知.docx");
+        // 目录侧只有一个单字词元：能算出分（1/3），但凑不出能读的理由
+        let dir = d("检", &["检"], &[], 5);
+        assert!(rc::score(&file, &dir) > 0.0);
+        assert_eq!(rc::detect_hit(&file, &dir), rc::HitKind::None);
+        assert!(rc::reason(&file, &dir, rc::HitKind::None).is_none());
+        assert!(rc::rank(&file, &[(1, dir)]).is_empty(), "无理由的候选不该出现在 rank 里");
+    }
+
+    // T4.3 0 / 1 目录分支与同分处理
+    #[test]
+    fn rank_branches_and_tie_break() {
+        let file = f(&["安全检查", "通知"], "安全检查通知.docx");
+        let paths: HashMap<i64, String> = HashMap::new();
+
+        // 0 目录：不 panic、不报错、needsYou
+        let (c, needs) = rc::candidates(&file, &[], &paths);
+        assert!(c.is_empty());
+        assert!(needs);
+
+        // 1 目录：只有唯一备选，且不给主推
+        let (c, needs) = rc::candidates(
+            &file,
+            &[(7, d("安全检查", &["安全检查"], &[], 0))],
+            &paths,
+        );
+        assert_eq!(c.len(), 1);
+        assert!(c[0].uncertain);
+        assert!(needs);
+        assert_eq!(c[0].dir_id, 7);
+        assert!(!c[0].reason.is_empty());
+
+        // 同分按 file_count 降序
+        let a = d("安全检查", &["安全检查"], &[], 1);
+        let b = d("安全检查", &["安全检查"], &[], 9);
+        let ranked = rc::rank(&file, &[(1, a), (2, b)]);
+        assert_eq!(ranked[0].0, 2, "同分应先选文件多的目录：{ranked:?}");
+    }
+
+    // T4.4 阈值校准（真实语料，跑一遍看覆盖率）
+    #[test]
+    fn calibrate_thresholds_on_real_corpus() {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            name: String,
+            kind: String,
+            size: u64,
+            mtime: i64,
+        }
+        let files: Vec<Raw> =
+            serde_json::from_str(include_str!("../../test/fixtures/real-scan.json")).unwrap();
+
+        // 从真实文件名归纳的 5 个目录（人工看过 455 个名字）
+        let dir_names = ["安全检查", "智能工厂", "会议纪要", "培训", "报表"];
+        let dirs: Vec<(i64, rc::DirFeature)> = dir_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    i as i64 + 1,
+                    rc::DirFeature {
+                        name_tokens: tag::tokenize(n),
+                        dir_name: n.to_string(),
+                        confirmed_tokens: vec![],
+                        file_count: 0,
+                    },
+                )
+            })
+            .collect();
+
+        let mut cover = [0usize; 4];
+        let mut any_hit = 0usize;
+        for raw in &files {
+            let k = tag::normalize_kind(&raw.kind);
+            if !tag::should_pool(&raw.name, k, raw.size) {
+                continue;
+            }
+            let stem = match raw.name.rfind('.') {
+                Some(i) if i > 0 => &raw.name[..i],
+                _ => &raw.name,
+            };
+            let feat = rc::FileFeature {
+                tokens: tag::tokenize(stem),
+                stem: stem.to_string(),
+                kind: k.to_string(),
+                mtime: raw.mtime,
+            };
+            let best = dirs
+                .iter()
+                .map(|(_, d)| rc::score(&feat, d))
+                .fold(0.0f64, f64::max);
+            if best > 0.0 {
+                any_hit += 1;
+            }
+            for (i, th) in [0.55f64, 0.35, 0.30, 0.20].iter().enumerate() {
+                if best >= *th {
+                    cover[i] += 1;
+                }
+            }
+        }
+        let total = 396.0f64;
+        println!(
+            "有分 {} / 396；≥0.55 {:.1}%；≥0.35 {:.1}%；≥0.30 {:.1}%；≥0.20 {:.1}%",
+            any_hit,
+            cover[0] as f64 / total * 100.0,
+            cover[1] as f64 / total * 100.0,
+            cover[2] as f64 / total * 100.0,
+            cover[3] as f64 / total * 100.0
+        );
+        assert!(any_hit > 0, "五个目录一个都没命中，分词和打分必有 bug");
+    }
+
+    // T4.7 性能：455 × 50 ≤ 300ms
+    #[test]
+    fn perf_rank_455x50() {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            name: String,
+            mtime: i64,
+        }
+        let files: Vec<Raw> =
+            serde_json::from_str(include_str!("../../test/fixtures/real-scan.json")).unwrap();
+        let dirs: Vec<(i64, rc::DirFeature)> = (0..50)
+            .map(|i| {
+                (
+                    i as i64,
+                    rc::DirFeature {
+                        name_tokens: tag::tokenize(&format!("目录{i}号业务事项")),
+                        dir_name: format!("目录{i}号业务事项"),
+                        confirmed_tokens: vec!["安全检查".into(), "费率清单".into()],
+                        file_count: i as usize,
+                    },
+                )
+            })
+            .collect();
+
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for raw in &files {
+            let stem = match raw.name.rfind('.') {
+                Some(i) if i > 0 => &raw.name[..i],
+                _ => &raw.name,
+            };
+            let feat = rc::FileFeature {
+                tokens: tag::tokenize(stem),
+                stem: stem.to_string(),
+                ..Default::default()
+            };
+            acc += rc::rank(&feat, &dirs).len();
+        }
+        let ms = t0.elapsed().as_millis();
+        println!("455 × 50 rank 用时 {ms}ms（命中 {acc}）");
+        assert!(ms <= 300, "超预算：{ms}ms");
+    }
+
+    // 第 2/3 名备选最多 2 个且不低于 ALT_MIN
+    #[test]
+    fn alts_are_limited() {
+        let file = f(&["安全检查", "通知"], "安全检查通知.docx");
+        let dirs: Vec<(i64, rc::DirFeature)> = (1..=5)
+            .map(|i| (i, d("安全检查", &["安全检查"], &[], 1)))
+            .collect();
+        let (c, needs) = rc::candidates(&file, &dirs, &HashMap::new());
+        assert!(!needs);
+        assert_eq!(c.len(), 1 + rc::MAX_ALTS);
+        let _: &Vec<Candidate> = &c;
+    }
+}
+
+// ================================================================ 批次
+
+mod batch {
+    use crate::batch as bt;
+
+    fn item(id: i64, dir: Option<i64>, defer: i32, mtime: i64) -> bt::PoolItem {
+        bt::PoolItem {
+            file_id: id,
+            primary_dir: dir,
+            score: if dir.is_some() { 0.6 } else { 0.0 },
+            defer_count: defer,
+            mtime,
+            has_deep_tag: false,
+        }
+    }
+
+    // T4.5 12 份池（5 同目录 + 4 无推荐 + 3 分散）
+    #[test]
+    fn pick_puts_hard_first_then_same_dir_together() {
+        let mut pool = Vec::new();
+        for i in 0..5 {
+            pool.push(item(100 + i, Some(1), 0, 1_000 + i));
+        }
+        for i in 0..4 {
+            pool.push(item(200 + i, None, 0, 1_000 + i));
+        }
+        for i in 0..3 {
+            pool.push(item(300 + i, Some(10 + i), 0, 1_000 + i));
+        }
+        let picked = bt::pick(&pool, 12);
+        assert_eq!(picked.len(), 12);
+        // 前 4 份都是无推荐的
+        assert!(picked[..4].iter().all(|id| (200..204).contains(id)), "{picked:?}");
+        // 同目录的 5 份是连着的
+        let pos: Vec<usize> = (0..5)
+            .map(|i| picked.iter().position(|x| *x == 100 + i).unwrap())
+            .collect();
+        let min = *pos.iter().min().unwrap();
+        let max = *pos.iter().max().unwrap();
+        assert_eq!(max - min, 4, "同目录的 5 份应连续：{pos:?}");
+    }
+
+    // parked 不在 SQL 之外过滤：pick 只负责排序，过滤责任在 SQL（注释写清）
+    #[test]
+    fn pick_does_not_filter_by_status() {
+        let pool = vec![item(1, None, 0, 10), item(2, None, 0, 20)];
+        // 调用方若把 parked 塞进来，pick 依然会选它 —— 说明过滤必须发生在 SQL 层
+        assert_eq!(bt::pick(&pool, 2).len(), 2);
+    }
+
+    // defer_count ≥ 3 挪到最后
+    #[test]
+    fn deferred_goes_last() {
+        let pool = vec![
+            item(1, Some(1), 5, 900),
+            item(2, Some(1), 0, 800),
+            item(3, Some(1), 0, 700),
+        ];
+        let picked = bt::pick(&pool, 3);
+        assert_eq!(*picked.last().unwrap(), 1, "{picked:?}");
     }
 }
 

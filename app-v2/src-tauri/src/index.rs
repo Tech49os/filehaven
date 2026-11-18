@@ -653,6 +653,153 @@ pub fn count_assigned(conn: &Connection, batch_id: i64) -> Result<i64, CmdError>
     Ok(n)
 }
 
+// ---------------------------------------------------------------- 批次
+
+const FILE_COLS: &str = "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note";
+
+fn row_to_file(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FileRow> {
+    Ok(crate::model::FileRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        ext: r.get(2)?,
+        kind: r.get(3)?,
+        size: r.get(4)?,
+        mtime: r.get(5)?,
+        status: r.get(6)?,
+        rel_path: r.get(7)?,
+        abs_path: r.get(8)?,
+        source_root_id: r.get(9)?,
+        defer_count: r.get(10)?,
+        note: r.get(11)?,
+    })
+}
+
+/// 当前未关闭的批次：(id, seq, size)
+pub fn open_batch(conn: &Connection) -> Result<Option<(i64, i64, i64)>, CmdError> {
+    let b = conn
+        .query_row(
+            "SELECT id, seq, size FROM batches WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(b)
+}
+
+pub fn insert_batch(conn: &Connection, seq: i64, size: i64) -> Result<i64, CmdError> {
+    conn.execute(
+        "INSERT INTO batches(seq, size, created_at) VALUES(?1, ?2, ?3)",
+        params![seq, size, now_ms()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn next_batch_seq(conn: &Connection) -> Result<i64, CmdError> {
+    let n: i64 = conn.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM batches", [], |r| {
+        r.get(0)
+    })?;
+    Ok(n)
+}
+
+/// 关批次：未确认的文件回池（pending_confirm → queued，合法转换）
+pub fn close_batch(conn: &mut Connection, batch_id: i64) -> Result<usize, CmdError> {
+    let tx = conn.transaction()?;
+    let n = tx.execute(
+        "UPDATE files SET status='queued' WHERE status='pending_confirm'",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE batches SET closed_at=?1 WHERE id=?2 AND closed_at IS NULL",
+        params![now_ms(), batch_id],
+    )?;
+    tx.commit()?;
+    Ok(n)
+}
+
+/// 候选池。
+///
+/// 详设 §7.5 写的是 `status ∈ {labeled, pending_confirm}`，但 §5.3 里
+/// 「S 暂缓」是 `pending_confirm → queued`。两边一合，暂缓过的文件就永远回不了池
+/// —— 与 §8.4「暂缓后回池」和验收 13 直接矛盾。
+/// 所以这里把「已打过基础标签的 queued」也算进池：暂缓回来的文件正好落在这一格。
+pub fn pool_rows(conn: &Connection) -> Result<Vec<crate::model::FileRow>, CmdError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FILE_COLS} FROM files
+         WHERE status IN ('labeled','pending_confirm')
+            OR (status='queued' AND tag_level='basic')
+         ORDER BY mtime DESC, id"
+    ))?;
+    let rows = stmt.query_map([], row_to_file)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub fn file_rows(conn: &Connection, ids: &[i64]) -> Result<Vec<crate::model::FileRow>, CmdError> {
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(&format!("SELECT {FILE_COLS} FROM files WHERE id=?1"))?;
+    for id in ids {
+        if let Some(r) = stmt.query_row([id], row_to_file).optional()? {
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+/// 推荐用的目录特征：(id, name, rel_path, 该目录下已确认文件名)
+pub fn dir_feature_rows(conn: &Connection) -> Result<Vec<(i64, String, String, Vec<String>)>, CmdError> {
+    let mut dirs: Vec<(i64, String, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, name, rel_path FROM archive_dirs ORDER BY depth, id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        for r in rows {
+            dirs.push(r?);
+        }
+    }
+
+    let mut by_dir: HashMap<i64, Vec<String>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT a.target_dir_id, f.name
+             FROM assignments a JOIN files f ON f.id = a.file_id
+             WHERE a.target_dir_id IS NOT NULL
+               AND f.status IN ('confirmed','migrated')
+               AND a.id = (SELECT MAX(a2.id) FROM assignments a2 WHERE a2.file_id = a.file_id)
+             ORDER BY a.decided_at DESC
+             LIMIT 2000",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (d, n) = row?;
+            let v = by_dir.entry(d).or_default();
+            if v.len() < 20 {
+                v.push(n);
+            }
+        }
+    }
+
+    Ok(dirs
+        .into_iter()
+        .map(|(id, name, rel)| {
+            let names = by_dir.remove(&id).unwrap_or_default();
+            (id, name, rel, names)
+        })
+        .collect())
+}
+
+pub fn count_status(conn: &Connection, status: Status) -> Result<i64, CmdError> {
+    let n = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE status=?1",
+        [status.as_str()],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
 // ---------------------------------------------------------------- 测试辅助
 // 只在测试里用：直接摆一个文件行 / 直接改状态，绕开状态机以便测状态机本身。
 // 放在 index.rs 里是为了守住「只有 index.rs 执行 SQL」这条红线。

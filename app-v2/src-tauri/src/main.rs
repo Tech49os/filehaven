@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod batch;
 mod error;
 mod index;
 mod llm;
 mod model;
 mod plan;
+mod recommend;
 mod scan;
 mod state;
 mod tag;
@@ -21,7 +23,7 @@ mod tests;
 
 use error::CmdError;
 use model::{
-    ArchiveDir, BootState, Counts, DirNode, ModelStatus, ScanReport, SourceRoot,
+    ArchiveDir, BatchView, BootState, Counts, DirNode, ModelStatus, ScanReport, SourceRoot,
 };
 use state::AppState;
 
@@ -403,6 +405,132 @@ async fn create_dir(app: AppHandle, input: String) -> Result<ArchiveDir, CmdErro
     last.ok_or_else(|| CmdError::new(error::DIR_INVALID, "目录名无效"))
 }
 
+// ---------------------------------------------------------------- 批次
+
+fn stem_of(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    }
+}
+
+#[tauri::command]
+async fn next_batch(app: AppHandle, size: Option<i64>) -> Result<BatchView, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || next_batch_inner(&app, size.unwrap_or(12)))
+        .await
+        .map_err(|e| CmdError::new(error::DB, format!("批次线程异常：{e}")))?
+}
+
+fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
+    use index::Status;
+
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+
+    // 上一个没关的批次先关掉：未确认的回池
+    if let Some((id, _, _)) = index::open_batch(&conn)? {
+        index::close_batch(&mut conn, id)?;
+    }
+    let seq = index::next_batch_seq(&conn)?;
+    let batch_id = index::insert_batch(&conn, seq, size)?;
+
+    // 目录特征（一次查全表 + 一次查已确认文件名，不做 N+1）
+    let dir_rows = index::dir_feature_rows(&conn)?;
+    let mut rel_paths: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    let mut dirs: Vec<(i64, recommend::DirFeature)> = Vec::new();
+    for (id, name, rel, confirmed_names) in &dir_rows {
+        rel_paths.insert(*id, rel.clone());
+        let mut confirmed: Vec<String> = Vec::new();
+        for n in confirmed_names {
+            for t in tag::tokenize(stem_of(n)) {
+                if !confirmed.contains(&t) {
+                    confirmed.push(t);
+                }
+            }
+        }
+        dirs.push((
+            *id,
+            recommend::DirFeature {
+                name_tokens: tag::tokenize(name),
+                dir_name: name.clone(),
+                confirmed_tokens: confirmed,
+                file_count: confirmed_names.len(),
+            },
+        ));
+    }
+
+    // 池内每份文件算一次候选，挑批次时直接复用，不重算
+    let pool = index::pool_rows(&conn)?;
+    let mut scored: Vec<(batch::PoolItem, Vec<model::Candidate>, bool)> = Vec::new();
+    for row in &pool {
+        let stem = stem_of(&row.name);
+        let feat = recommend::FileFeature {
+            tokens: tag::tokenize(stem),
+            stem: stem.to_string(),
+            kind: row.kind.clone(),
+            mtime: row.mtime,
+        };
+        let (cands, needs) = recommend::candidates(&feat, &dirs, &rel_paths);
+        scored.push((
+            batch::PoolItem {
+                file_id: row.id,
+                primary_dir: if needs {
+                    None
+                } else {
+                    cands.first().map(|c| c.dir_id)
+                },
+                score: cands.first().map(|c| c.score).unwrap_or(0.0),
+                defer_count: row.defer_count,
+                mtime: row.mtime,
+                has_deep_tag: false,
+            },
+            cands,
+            needs,
+        ));
+    }
+
+    let pool_items: Vec<batch::PoolItem> = scored.iter().map(|(p, _, _)| p.clone()).collect();
+    let picked = batch::pick(&pool_items, size as usize);
+
+    let mut items: Vec<model::BatchItem> = Vec::new();
+    let mut deferred_badge: Vec<i64> = Vec::new();
+    for id in &picked {
+        let Some((_, cands, needs)) = scored.iter().find(|(p, _, _)| p.file_id == *id) else {
+            continue;
+        };
+        let Some(file) = pool.iter().find(|r| r.id == *id).cloned() else {
+            continue;
+        };
+        // 暂缓回来的文件是 queued，必须先回到 labeled 才能进批次（详设 §5.3）
+        if file.status == "queued" {
+            index::set_status(&conn, file.id, Status::Labeled)?;
+        }
+        if file.status != "pending_confirm" {
+            index::set_status(&conn, file.id, Status::PendingConfirm)?;
+        }
+        if file.defer_count >= batch::DEFER_BADGE_AT {
+            deferred_badge.push(file.id);
+        }
+        items.push(model::BatchItem {
+            file,
+            candidates: cands.clone(),
+            needs_you: *needs,
+        });
+    }
+
+    let remaining = (pool.len() as i64) - (picked.len() as i64);
+
+    Ok(model::BatchView {
+        batch_id,
+        seq,
+        size,
+        items,
+        remaining_in_pool: remaining.max(0),
+        dir_count: dirs.len() as i64,
+        deferred_badge,
+    })
+}
+
 // ---------------------------------------------------------------- 诊断入口
 
 /// `--scan <目录> <输出json>`：不开 GUI 跑一次扫描并写报告（验收 2 计时用）
@@ -469,7 +597,8 @@ fn main() {
             scan_all,
             list_dirs,
             preview_dir_name,
-            create_dir
+            create_dir,
+            next_batch
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
