@@ -29,3 +29,53 @@ export function sortForDisplay<T extends { fileIds: readonly unknown[] }>(
     .sort((a, b) => b.t.fileIds.length - a.t.fileIds.length || a.i - b.i)
     .map((x) => x.t)
 }
+
+/** 未归类文件按所在目录成的一组 */
+export interface FolderGroup {
+  /** 完整目录路径，用于去重 */
+  folder: string
+  /** 展示用：末两级目录名 */
+  label: string
+  fileIds: string[]
+}
+
+/**
+ * 把未归类的文件按所在目录分组。
+ *
+ * 为什么按目录：这批文件正是因为「文件名里没写清属于哪件事」才没归类，
+ * 唯一还剩的线索就是它们躺在哪个文件夹里。按目录摆出来，用户一眼能看出
+ * 「原来是某次下载的一大堆」还是「这几个是我漏掉的」，再决定要不要补类。
+ *
+ * 只显示末两级目录：完整路径太长塞不下，而且前面几级（C:/Users/x/Desktop）
+ * 对判断毫无帮助。
+ */
+export function groupUngrouped(
+  ids: readonly string[],
+  pathOf: (id: string) => string | undefined
+): FolderGroup[] {
+  const byFolder = new Map<string, string[]>()
+  for (const id of ids) {
+    const path = pathOf(id)
+    const cut = path ? path.lastIndexOf('\\') : -1
+    const folder = cut > 0 ? path!.slice(0, cut) : path ? '' : '\u0000未知'
+    const list = byFolder.get(folder)
+    if (list) list.push(id)
+    else byFolder.set(folder, [id])
+  }
+
+  const out: FolderGroup[] = []
+  for (const [folder, fileIds] of byFolder) {
+    if (folder === '\u0000未知') {
+      out.push({ folder: '', label: '未知目录', fileIds })
+      continue
+    }
+    const parts = folder.split('\\').filter(Boolean)
+    out.push({
+      folder,
+      label: parts.length ? parts.slice(-2).join('\\') : '(根目录)',
+      fileIds,
+    })
+  }
+  out.sort((a, b) => b.fileIds.length - a.fileIds.length)
+  return out
+}

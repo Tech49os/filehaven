@@ -14,7 +14,7 @@ import {
 import { demoScan } from '../core/demo'
 import { collectCandidates, type Candidate } from '../core/emergence/candidates'
 import { groupBySurface } from '../core/emergence/grouping'
-import { sortForDisplay } from '../core/emergence/view'
+import { groupUngrouped, sortForDisplay } from '../core/emergence/view'
 import { DOC_KIND_WORDS } from '../core/emergence/lexicon'
 import {
   augmentWithOrgRule,
@@ -114,6 +114,8 @@ export const useWizardStore = defineStore('wizard', {
      * 而 ProposalTopic.samples 只留了 5 个样本，所以单独存一份索引。
      */
     fileIndex: {} as Record<string, string>,
+    /** 文件 id → 完整路径。未归类面板要按目录分组，只有文件名分不出来 */
+    filePathIndex: {} as Record<string, string>,
     /**
      * 上次确认过的方案存档。有它就能跳过「重新生成 + 重调一遍」，
      * 直接沿用同一套类目——这是把工具从「每次重来」变成「越用越顺」的关键。
@@ -143,6 +145,11 @@ export const useWizardStore = defineStore('wizard', {
     /** 确认页用：按文件数降序的稳定排序，空类沉底 */
     proposalTopics: (s) => (s.proposal ? sortForDisplay(s.proposal.topics) : []),
     ungroupedCount: (s) => s.proposal?.ungroupedIds.length ?? 0,
+    /** 未归类文件按目录成组，确认页据此让用户看清「剩的到底是什么」 */
+    ungroupedGroups: (s) =>
+      s.proposal
+        ? groupUngrouped(s.proposal.ungroupedIds, (id) => s.filePathIndex[id])
+        : [],
   },
 
   actions: {
@@ -239,8 +246,13 @@ export const useWizardStore = defineStore('wizard', {
         }
         this.scannedCount = rawFiles.length
         const index: Record<string, string> = {}
-        for (const f of rawFiles) index[f.id] = f.name
+        const paths: Record<string, string> = {}
+        for (const f of rawFiles) {
+          index[f.id] = f.name
+          paths[f.id] = f.path
+        }
         this.fileIndex = index
+        this.filePathIndex = paths
         if (rawFiles.length === 0) {
           this.error = '这个位置没有找到可整理的文件'
         }
@@ -504,6 +516,7 @@ export const useWizardStore = defineStore('wizard', {
       this.proposal = null
       this.whoExcluded = []
       this.fileIndex = {}
+      this.filePathIndex = {}
       this.error = ''
       this.ai = emptyAi()
       this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }

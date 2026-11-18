@@ -7,6 +7,7 @@ import TopicRow from './TopicRow.vue'
 const w = useWizardStore()
 const newName = ref('')
 const showWeak = ref(false)
+const showUn = ref(false)
 const confirmingDrop = ref(false)
 
 const topics = computed(() => w.proposalTopics as ProposalTopic[])
@@ -23,6 +24,8 @@ const total = computed(() => assigned.value + weakFiles.value + ungrouped.value)
 const pctOk = computed(() => (total.value ? (assigned.value / total.value) * 100 : 0))
 /** 落在兜底类里、等你决定去留的比例 */
 const pctMaybe = computed(() => (total.value ? (weakFiles.value / total.value) * 100 : 0))
+/** 未归类文件按所在目录分组：这是「还剩什么」的唯一线索 */
+const groups = computed(() => w.ungroupedGroups)
 
 function add() {
   const n = newName.value.trim()
@@ -117,6 +120,40 @@ async function regen() {
 
       <div v-if="topics.length === 0" class="tc-blank">
         没有归纳出任何分类。可以点下方「重新生成」，或在下一步手动指定。
+      </div>
+
+      <div v-if="ungrouped > 0" class="tc-weak tc-un">
+        <button class="tc-weak-head" @click="showUn = !showUn">
+          <span class="tc-caret" :class="{ open: showUn }">▸</span>
+          <span class="tc-weak-text">{{ ungrouped }} 份文件没归类</span>
+          <span class="tc-weak-hint">{{ showUn ? '收起' : '看看是哪些' }}</span>
+        </button>
+
+        <div v-if="showUn" class="tc-weak-body">
+          <p class="tc-weak-desc">
+            这些文件名里没写清属于哪件事。按所在文件夹列在下面——如果发现某一堆其实该单独成类，
+            在上面输入个名字就能一起归进来；都不值得单独成类的话，留着在下一步手动指定即可。
+          </p>
+          <div v-for="g in groups" :key="g.folder" class="tc-un-group">
+            <div class="tc-un-folder">
+              <span class="tc-un-path">{{ g.label }}</span>
+              <span class="tc-un-n">{{ g.fileIds.length }} 份</span>
+            </div>
+            <div class="tc-un-files">
+              <span
+                v-for="id in g.fileIds.slice(0, 10)"
+                :key="id"
+                class="tc-un-file"
+                :title="w.filePathIndex[id]"
+              >
+                {{ w.fileIndex[id] ?? '（已不在扫描结果里）' }}
+              </span>
+              <span v-if="g.fileIds.length > 10" class="tc-un-more">
+                还有 {{ g.fileIds.length - 10 }} 份
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="tc-tail"></div>
@@ -277,6 +314,45 @@ async function regen() {
 .tc-weak-hint {
   font-size: 12px;
   color: var(--c-primary);
+}
+.tc-un-group {
+  padding: 0 14px 10px;
+}
+.tc-un-folder {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.tc-un-path {
+  font-size: 12px;
+  color: var(--c-text-2);
+  font-family: var(--f-mono, ui-monospace, monospace);
+}
+.tc-un-n {
+  font-size: 11px;
+  color: var(--c-text-3);
+}
+.tc-un-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.tc-un-file {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--c-hover);
+  color: var(--c-text-2);
+}
+.tc-un-more {
+  font-size: 11.5px;
+  padding: 2px 4px;
+  color: var(--c-text-3);
 }
 .tc-weak-body {
   padding: 0 0 6px;

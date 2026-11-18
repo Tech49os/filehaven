@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { countTier, sortForDisplay } from '../src/core/emergence/view'
+import { countTier, sortForDisplay, groupUngrouped } from '../src/core/emergence/view'
 
 /** 造一个只有份数的分类 */
 const T = (name: string, n: number) => ({
@@ -48,5 +48,41 @@ describe('展示排序', () => {
   it('空分类沉到最底部', () => {
     const sorted = sortForDisplay([T('空的', 0), T('小', 2)])
     expect(sorted.map((x) => x.name)).toEqual(['小', '空的'])
+  })
+})
+
+describe('未归类文件按目录成组（看清还剩什么）', () => {
+  it('同一目录的文件归到一起，按份数降序', () => {
+    const paths: Record<string, string> = {
+      a: String.raw`D:\文档\下载\20260908\a.docx`,
+      b: String.raw`D:\文档\下载\20260908\b.docx`,
+      c: String.raw`D:\文档\桌面\c.docx`,
+    }
+    const g = groupUngrouped(['a', 'b', 'c'], (id) => paths[id])
+    expect(g[0].label).toBe(String.raw`下载\20260908`)
+    expect(g[0].fileIds).toEqual(['a', 'b'])
+    expect(g[1].label).toBe(String.raw`文档\桌面`)
+  })
+
+  it('只显示末两级目录名，太长的路径没法塞进一行', () => {
+    const g = groupUngrouped(['a'], () => String.raw`C:\Users\x\Desktop\归档\下载\20260908\a.docx`)
+    expect(g[0].label).toBe(String.raw`归档\下载\20260908`.split('\\').slice(-2).join('\\'))
+  })
+
+  it('拿不到路径的文件归到「未知目录」，不丢', () => {
+    const g = groupUngrouped(['a'], () => undefined)
+    expect(g).toHaveLength(1)
+    expect(g[0].label).toBe('未知目录')
+    expect(g[0].fileIds).toEqual(['a'])
+  })
+
+  it('空列表返回空数组', () => {
+    expect(groupUngrouped([], () => undefined)).toEqual([])
+  })
+
+  it('分组结果覆盖所有传入的文件，一个不少', () => {
+    const ids = ['a', 'b', 'c', 'd']
+    const g = groupUngrouped(ids, (id) => `D://x//${id === 'a' ? 'p' : 'q'}\\${id}.docx`)
+    expect(g.flatMap((x) => x.fileIds).sort()).toEqual(ids.sort())
   })
 })
