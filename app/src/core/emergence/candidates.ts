@@ -232,6 +232,32 @@ export function collectCandidates(files: FileRef[], opts: CandidateOptions = {})
     }
   }
 
+  // 4) 跨多个父词的公共尾巴 —— `展汇报`（= 进展汇报 + 开展汇报）
+  //
+  // 规则 2/3 只认「左邻唯一」，抓不到它：`展汇报` 的左邻有「进」「开」两种。
+  // 但它是真碎片，因为它**只**在这些父词里出现过：
+  //     各父词份数之和 ≈ 它自己的份数
+  // `展汇报` 9 = 进展汇报 5 + 开展汇报 4 → 碎片。
+  // `技术室` 35 份，`厂技术室` 覆盖的是同一批文件，求和会翻倍 → 不是碎片。
+  //
+  // 只做加法：不改上面三条规则，避免连锁误杀（试过替换，真实数据上
+  // `技术谱系` 17 份会被切成 `公司科技技术谱系` 10 份，归类从 296 掉到 276）。
+  const isSharedTail = (t: string, nei: Set<string>, side: 'left' | 'right') => {
+    if (nei.size < 2 || nei.size > 4) return false
+    const parents = [...nei].map((c) => (side === 'left' ? c + t : t + c))
+    if (!parents.every((p) => wanted.has(p))) return false
+    const selfDf = stats.get(t)?.df ?? 0
+    const sum = parents.reduce((n, p) => n + (stats.get(p)?.df ?? 0), 0)
+    return sum <= selfDf * 1.2
+  }
+  for (const t of keptTerms) {
+    if (dropped.has(t)) continue
+    const a = adj.get(t)
+    if (!a) continue
+    if (!a.atStart && isSharedTail(t, a.lefts, 'left')) dropped.add(t)
+    else if (!a.atEnd && isSharedTail(t, a.rights, 'right')) dropped.add(t)
+  }
+
   const byLenDesc = [...keptTerms].sort((a, b) => b.length - a.length)
   for (const b of byLenDesc) {
     if (b.length < 4) continue
