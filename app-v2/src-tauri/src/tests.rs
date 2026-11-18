@@ -1541,3 +1541,499 @@ mod error {
         assert!(!ce.message.is_empty());
     }
 }
+
+// ================================================================ 迁移计划（T7.1）
+
+mod migration_plan {
+    use crate::plan::{self as pl, PlanInput};
+    use std::path::Path;
+
+    fn write(p: &Path, bytes: &[u8]) {
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(p, bytes).unwrap();
+    }
+
+    fn stat(p: &Path) -> (i64, i64) {
+        let m = std::fs::metadata(p).unwrap();
+        (m.len() as i64, pl::mtime_ms(&m))
+    }
+
+    fn input(id: i64, name: &str, src: &Path) -> PlanInput {
+        let (size, mtime) = stat(src);
+        PlanInput {
+            file_id: id,
+            name: name.to_string(),
+            src_path: src.to_string_lossy().to_string(),
+            dir_id: 7,
+            dir_rel_path: "安全检查".into(),
+            rel_in_source: name.to_string(),
+            size,
+            mtime,
+        }
+    }
+
+    // T7.1 三份同目录 + 一份目标已同名 → 1 条 nameConflicts，且第二份落到 _2
+    #[test]
+    fn build_plans_flags_name_conflict() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        // 归档目标目录里已经有一份 b.docx（上次留下的）
+        write(&arc.path().join("安全检查/b.docx"), b"old");
+
+        let mut inputs = Vec::new();
+        for (i, n) in ["a.docx", "b.docx", "c.docx"].iter().enumerate() {
+            let p = src.path().join(n);
+            write(&p, format!("content-{i}").as_bytes());
+            inputs.push(input(i as i64 + 1, n, &p));
+        }
+
+        let out = pl::build_plans(&inputs, arc.path());
+        assert_eq!(out.plans.len(), 3, "不该丢计划：{:?}", out.changed);
+        assert_eq!(out.conflicts.len(), 1);
+        assert_eq!(out.conflicts[0].target_name, "b_2.docx");
+        let b = out.plans.iter().find(|p| p.name == "b.docx").unwrap();
+        assert!(b.dst_path.ends_with("b_2.docx"), "{}", b.dst_path);
+        assert!(!b.is_new_dir, "目录已在磁盘上，不该标「新建」");
+    }
+
+    // 同一批里两份同名（来自不同源目录）也必须错开，不许互相覆盖
+    #[test]
+    fn build_plans_separates_duplicate_names_inside_one_batch() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let p1 = src.path().join("甲/报告.docx");
+        let p2 = src.path().join("乙/报告.docx");
+        write(&p1, b"one");
+        write(&p2, b"two");
+
+        let mut a = input(1, "报告.docx", &p1);
+        a.rel_in_source = "甲/报告.docx".into();
+        let mut b = input(2, "报告.docx", &p2);
+        b.rel_in_source = "乙/报告.docx".into();
+
+        let out = pl::build_plans(&[a, b], arc.path());
+        assert_eq!(out.plans.len(), 2);
+        assert_eq!(out.conflicts.len(), 1);
+        let names: Vec<String> = out
+            .plans
+            .iter()
+            .map(|p| Path::new(&p.dst_path).file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"报告.docx".to_string()), "{names:?}");
+        assert!(names.contains(&"报告_2.docx".to_string()), "{names:?}");
+    }
+
+    // T7.1 标注后被改 / 被删的文件必须拦下，且不生成计划
+    #[test]
+    fn build_plans_reports_changed_files() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let p = src.path().join("a.docx");
+        write(&p, b"1234");
+        let (size, mtime) = stat(&p);
+
+        let mut by_size = input(1, "a.docx", &p);
+        by_size.size = size + 1;
+        let mut by_mtime = input(2, "a.docx", &p);
+        by_mtime.mtime = mtime - 5_000;
+        let mut gone = input(3, "已删除.docx", &p);
+        gone.src_path = src.path().join("已删除.docx").to_string_lossy().to_string();
+
+        let out = pl::build_plans(&[by_size, by_mtime, gone], arc.path());
+        assert!(out.plans.is_empty());
+        assert_eq!(out.changed.len(), 3);
+        let whys: Vec<&str> = out.changed.iter().map(|c| c.why.as_str()).collect();
+        assert!(whys.contains(&"size"));
+        assert!(whys.contains(&"mtime"));
+        assert!(whys.contains(&"missing"));
+    }
+
+    // 隔离区路径保留源目录结构（C3）
+    #[test]
+    fn quarantine_path_keeps_source_structure() {
+        let p = pl::quarantine_path(Path::new("D:/归档"), 12, "子目录/报告.docx");
+        let s = p.to_string_lossy().replace('\\', "/");
+        assert_eq!(s, "D:/归档/.filebutler/quarantine/12/子目录/报告.docx");
+    }
+
+    // R7 磁盘空间判定：能算出剩余就按字节比，算不出就不拦
+    #[test]
+    fn space_check() {
+        use crate::migration::space_ok;
+        assert!(space_ok(None, 10 * 1024 * 1024 * 1024));
+        assert!(space_ok(Some(2.0), 1_000_000));
+        assert!(!space_ok(Some(0.1), 500 * 1024 * 1024));
+    }
+}
+
+// ================================================================ 迁移执行（T7.3）
+
+mod migrate {
+    use crate::migrate::{self as mg, ItemResult};
+    use crate::plan::{self as pl, PlanItem};
+    use std::path::Path;
+
+    fn write(p: &Path, bytes: &[u8]) {
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(p, bytes).unwrap();
+    }
+
+    fn plan_of(id: i64, src: &Path, arc: &Path, name: &str, rel_in_source: &str) -> PlanItem {
+        let m = std::fs::metadata(src).unwrap();
+        PlanItem {
+            file_id: id,
+            name: name.to_string(),
+            src_path: src.to_string_lossy().to_string(),
+            dst_path: arc.join("安全检查").join(name).to_string_lossy().to_string(),
+            dir_id: 7,
+            dir_rel_path: "安全检查".into(),
+            rel_in_source: rel_in_source.to_string(),
+            size: m.len() as i64,
+            mtime: pl::mtime_ms(&m),
+            is_new_dir: true,
+        }
+    }
+
+    // T7.3 三段式：复制 → 校验 → 源文件进隔离区（保留相对结构）
+    #[test]
+    fn execute_copies_verifies_and_quarantines() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let p = src.path().join("子目录/报告.docx");
+        write(&p, b"hello-migration");
+
+        let mut stages: Vec<String> = Vec::new();
+        let plan = plan_of(1, &p, arc.path(), "报告.docx", "子目录/报告.docx");
+        let item = mg::execute_one(arc.path(), 12, &plan, &mut |s| stages.push(s.to_string()));
+
+        assert_eq!(item.result, ItemResult::Ok, "{:?}", item.error);
+        assert!(item.quarantined);
+        assert_eq!(item.sha256.as_deref().map(str::len), Some(64));
+        assert!(Path::new(&item.dst_path).is_file());
+        assert!(!p.exists(), "源文件必须离开原位置");
+        let q = mg::quarantine_path(arc.path(), 12, "子目录/报告.docx");
+        assert!(q.is_file(), "隔离区要保留相对结构：{}", q.display());
+        assert_eq!(stages, vec!["copy", "verify", "quarantine"]);
+        // 归档副本内容一致
+        assert_eq!(std::fs::read(&item.dst_path).unwrap(), b"hello-migration");
+    }
+
+    // T7.3 标注后源文件被改 → failed(FILE_CHANGED)，源文件不动、目标无残留
+    #[test]
+    fn execute_refuses_changed_file() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let p = src.path().join("报告.docx");
+        write(&p, b"old");
+        let mut plan = plan_of(1, &p, arc.path(), "报告.docx", "报告.docx");
+
+        // 模拟「标注之后用户又改了文件」
+        write(&p, b"changed-after-label");
+        plan.size = 3;
+
+        let item = mg::execute_one(arc.path(), 12, &plan, &mut |_| {});
+        assert_eq!(item.result, ItemResult::Failed);
+        assert_eq!(item.code, Some(crate::error::FILE_CHANGED));
+        assert!(p.is_file(), "源文件必须留在原地");
+        let dst = arc.path().join("安全检查/报告.docx");
+        assert!(!dst.exists(), "不许留下半份副本");
+        assert!(!mg::quarantine_path(arc.path(), 12, "报告.docx").exists());
+    }
+
+    // 目标已存在 → 自动 _2，绝不覆盖
+    #[test]
+    fn execute_never_overwrites_existing_target() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        write(&arc.path().join("安全检查/报告.docx"), b"existing");
+        let p = src.path().join("报告.docx");
+        write(&p, b"new-one");
+
+        let plan = plan_of(1, &p, arc.path(), "报告.docx", "报告.docx");
+        let item = mg::execute_one(arc.path(), 12, &plan, &mut |_| {});
+        assert_eq!(item.result, ItemResult::Ok, "{:?}", item.error);
+        assert!(item.dst_path.ends_with("报告_2.docx"), "{}", item.dst_path);
+        assert_eq!(
+            std::fs::read(arc.path().join("安全检查/报告.docx")).unwrap(),
+            b"existing"
+        );
+    }
+
+    // 源文件已消失 → 失败但不 panic，也不碰归档区
+    #[test]
+    fn execute_fails_when_source_missing() {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let p = src.path().join("跑掉了.docx");
+        write(&p, b"x");
+        let plan = plan_of(1, &p, arc.path(), "跑掉了.docx", "跑掉了.docx");
+        std::fs::remove_file(&p).unwrap();
+
+        let item = mg::execute_one(arc.path(), 12, &plan, &mut |_| {});
+        assert_eq!(item.result, ItemResult::Failed);
+        assert!(!arc.path().join("安全检查/跑掉了.docx").exists());
+    }
+}
+
+// ================================================================ 迁移全链路（T7.2 / T7.4 / T7.5）
+
+mod migration_flow {
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::{NewAssignment, ScannedFile};
+    use crate::plan::mtime_ms;
+    use crate::tests::index::fresh_db;
+    use std::path::Path;
+
+    struct Seeded {
+        _src: tempfile::TempDir,
+        _arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        dir_id: i64,
+        ids: Vec<i64>,
+        arc_path: std::path::PathBuf,
+        src_path: std::path::PathBuf,
+    }
+
+    /// 造一个真实目录 + 库里 3 份已确认文件（size/mtime 与磁盘一致）
+    fn seed(extra: &[(&str, &[u8])]) -> Seeded {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+
+        let mut scanned = Vec::new();
+        let mut names: Vec<(String, Vec<u8>)> = vec![
+            ("安全检查通知.docx".into(), b"aaa".to_vec()),
+            ("检查表.xlsx".into(), b"bbbb".to_vec()),
+            ("整改报告.pdf".into(), b"ccccc".to_vec()),
+        ];
+        for (n, b) in extra {
+            names.push((n.to_string(), b.to_vec()));
+        }
+        for (name, bytes) in &names {
+            let p = src.path().join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let m = std::fs::metadata(&p).unwrap();
+            scanned.push(ScannedFile {
+                name: name.clone(),
+                path: p.to_string_lossy().to_string(),
+                ext: name.rsplit('.').next().unwrap_or("").to_string(),
+                kind: "word".into(),
+                size: m.len(),
+                mtime: mtime_ms(&m),
+            });
+        }
+        db::upsert_files(&mut conn, root.id, &scanned).unwrap();
+
+        let dir = db::insert_dir(&conn, None, "安全检查", "user").unwrap();
+        let ids: Vec<i64> = db::list_queued(&conn, Some(root.id))
+            .unwrap()
+            .into_iter()
+            .map(|(id, ..)| id)
+            .collect();
+        for id in &ids {
+            db::force_status(&conn, *id, db::Status::Confirmed).unwrap();
+            db::insert_assignment(
+                &conn,
+                &NewAssignment {
+                    file_id: *id,
+                    batch_id: None,
+                    target_dir_id: Some(dir.id),
+                    origin: "user_picked".into(),
+                    confidence: None,
+                    reason: None,
+                    decision: "accepted".into(),
+                    decided_at: db::now_ms(),
+                },
+            )
+            .unwrap();
+        }
+
+        Seeded {
+            src_path: src.path().to_path_buf(),
+            arc_path: arc.path().to_path_buf(),
+            _src: src,
+            _arc: arc,
+            conn,
+            dir_id: dir.id,
+            ids,
+        }
+    }
+
+    /// 递归数隔离区里的文件数
+    fn files_in(root: &Path) -> usize {
+        walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .count()
+    }
+
+    // T7.2 预览：分组 / 新建目录标记 / 字节合计 / 空间不足
+    #[test]
+    fn preview_groups_bytes_and_space() {
+        let s = seed(&[]);
+        let p = mig::preview(&s.conn, &s.arc_path, Some(10.0)).unwrap();
+        assert_eq!(p.total_files, 3);
+        assert_eq!(p.groups.len(), 1, "同一目录要合成一组");
+        assert_eq!(p.groups[0].dir_id, s.dir_id);
+        assert_eq!(p.groups[0].rel_path, "安全检查");
+        assert!(p.groups[0].is_new, "磁盘上还没有这个目录");
+        assert_eq!(p.total_bytes, 3 + 4 + 5);
+        assert!(p.enough_space);
+
+        // 1e-9 GB ≈ 1 字节，装不下 12 字节
+        let tight = mig::preview(&s.conn, &s.arc_path, Some(1e-9)).unwrap();
+        assert!(!tight.enough_space, "0.000000001GB 装不下 12 字节，必须拦");
+    }
+
+    // T7.4 应用迁移：3 份进归档 + 3 份进隔离区 + 台账齐全
+    #[test]
+    fn apply_migrates_all_and_records_items() {
+        let mut s = seed(&[]);
+        let mut calls: Vec<(usize, usize, String)> = Vec::new();
+        let res = mig::apply(&mut s.conn, &s.arc_path, &[], &mut |done, total, name, _stage| {
+            calls.push((done, total, name.to_string()));
+        })
+        .unwrap();
+
+        assert_eq!(res.copied, 3);
+        assert_eq!(res.verified, 3);
+        assert_eq!(res.quarantined, 3);
+        assert!(res.failed.is_empty(), "{:?}", res.failed);
+        assert_eq!(files_in(&s.arc_path.join("安全检查")), 3);
+        assert_eq!(files_in(&s.arc_path.join(".filebutler/quarantine")), 3);
+        // 进度事件：每文件三次
+        assert_eq!(calls.len(), 9);
+        assert_eq!(
+            db::latest_migration(&s.conn).unwrap().unwrap().status,
+            "done"
+        );
+        assert_eq!(
+            db::migration_items(&s.conn, res.migration_id).unwrap().len(),
+            3
+        );
+        for id in &s.ids {
+            assert_eq!(
+                db::get_file_status(&s.conn, *id).unwrap(),
+                Some(db::Status::Migrated)
+            );
+        }
+        // 源目录只剩空壳
+        assert_eq!(files_in(&s.src_path), 0);
+    }
+
+    // T7.4 取消勾选的回池，不参与这次迁移
+    #[test]
+    fn apply_sends_excluded_files_back_to_pool() {
+        let mut s = seed(&[]);
+        let excluded = s.ids[0];
+        let res = mig::apply(&mut s.conn, &s.arc_path, &[excluded], &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(res.copied, 2);
+        assert_eq!(
+            db::get_file_status(&s.conn, excluded).unwrap(),
+            Some(db::Status::Queued)
+        );
+        assert!(s.src_path.join("安全检查通知.docx").is_file(), "没被搬走");
+    }
+
+    // T7.5 撤销：回到原路径、归档副本删除、隔离区清空、状态回 confirmed
+    #[test]
+    fn undo_restores_everything() {
+        let mut s = seed(&[]);
+        let originals: Vec<Vec<u8>> = std::fs::read_dir(&s.src_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .map(|e| std::fs::read(e.path()).unwrap())
+            .collect();
+
+        let res = mig::apply(&mut s.conn, &s.arc_path, &[], &mut |_, _, _, _| {}).unwrap();
+        let undo = mig::undo(&mut s.conn, &s.arc_path, res.migration_id, &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(undo.restored, 3, "{:?}", undo.failed);
+        assert!(undo.failed.is_empty());
+        assert_eq!(files_in(&s.arc_path.join("安全检查")), 0, "归档副本要删掉");
+        assert_eq!(
+            files_in(&s.arc_path.join(".filebutler/quarantine")),
+            0,
+            "隔离区要清空（目录保留）"
+        );
+
+        let mut now: Vec<Vec<u8>> = std::fs::read_dir(&s.src_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .map(|e| std::fs::read(e.path()).unwrap())
+            .collect();
+        let mut a = originals;
+        a.sort();
+        now.sort();
+        assert_eq!(a, now, "撤销后必须逐字节一致");
+        for id in &s.ids {
+            assert_eq!(
+                db::get_file_status(&s.conn, *id).unwrap(),
+                Some(db::Status::Confirmed)
+            );
+        }
+        // 再撤一次：明确拒绝，不重复搬
+        let again = mig::undo(&mut s.conn, &s.arc_path, res.migration_id, &mut |_, _, _, _| {});
+        assert!(again.is_err());
+    }
+
+    // T7.5 / R8 隔离区缺一份 → 4 份里 1 失败，其余照常还原
+    #[test]
+    fn undo_continues_when_one_quarantine_file_is_gone() {
+        let mut s = seed(&[]);
+        let res = mig::apply(&mut s.conn, &s.arc_path, &[], &mut |_, _, _, _| {}).unwrap();
+        let q = s.arc_path.join(".filebutler/quarantine");
+        let victim = walkdir::WalkDir::new(&q)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_type().is_file())
+            .unwrap()
+            .into_path();
+        std::fs::remove_file(&victim).unwrap();
+
+        let undo = mig::undo(&mut s.conn, &s.arc_path, res.migration_id, &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(undo.restored, 2);
+        assert_eq!(undo.failed.len(), 1);
+    }
+
+    // 没有归档根时不许瞎跑（NOT_CONFIGURED 由命令层挡，这里验空列表不 panic）
+    #[test]
+    fn preview_with_no_confirmed_files_is_empty() {
+        let (_d, conn) = fresh_db();
+        let arc = tempfile::tempdir().unwrap();
+        let p = mig::preview(&conn, arc.path(), None).unwrap();
+        assert_eq!(p.total_files, 0);
+        assert!(p.groups.is_empty());
+    }
+
+    // 重新确认：把改过的文件退回池里，并按现在的磁盘状态刷新 size/mtime
+    #[test]
+    fn requeue_refreshes_stat() {
+        let s = seed(&[]);
+        let id = s.ids[0];
+        let p = s.src_path.join("安全检查通知.docx");
+        std::fs::write(&p, "用户在标注之后改过内容".as_bytes()).unwrap();
+        let m = std::fs::metadata(&p).unwrap();
+
+        db::requeue_confirmed(&s.conn, id, m.len() as i64, mtime_ms(&m)).unwrap();
+        assert_eq!(
+            db::get_file_status(&s.conn, id).unwrap(),
+            Some(db::Status::Queued)
+        );
+        let row = db::file_row(&s.conn, id).unwrap().unwrap();
+        assert_eq!(row.size, m.len() as i64);
+        assert_eq!(row.mtime, mtime_ms(&m));
+        // 刷新后就不该再被判为「标注后已改」
+        let p2 = mig::preview(&s.conn, &s.arc_path, None).unwrap();
+        assert_eq!(p2.total_files, 2);
+        assert!(p2.changed_since_label.is_empty(), "{:?}", p2.changed_since_label);
+    }
+}

@@ -12,6 +12,8 @@ pub const ARCHIVE_IN_SOURCE: &str = "ARCHIVE_IN_SOURCE";
 pub const SOURCE_UNREADABLE: &str = "SOURCE_UNREADABLE";
 pub const FILE_CHANGED: &str = "FILE_CHANGED";
 pub const MIGRATE_FAILED: &str = "MIGRATE_FAILED";
+/// 归档盘剩余空间不够（R7：迁移前就拦住，别搬到一半炸）
+pub const DISK_FULL: &str = "DISK_FULL";
 pub const NOT_CONFIGURED: &str = "NOT_CONFIGURED";
 pub const MODEL_DOWN: &str = "MODEL_DOWN";
 pub const MODEL_TIMEOUT: &str = "MODEL_TIMEOUT";

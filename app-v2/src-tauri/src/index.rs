@@ -1049,3 +1049,195 @@ pub fn file_size(conn: &Connection, abs_path: &str) -> Result<i64, CmdError> {
     })?;
     Ok(n)
 }
+
+// ---------------------------------------------------------------- 迁移台账
+
+/// 待迁移的一份文件 + 目标目录（一次 join 拿全，不做 N+1）
+#[derive(Clone, Debug)]
+pub struct ConfirmedRow {
+    pub file: crate::model::FileRow,
+    pub dir_id: i64,
+    pub dir_rel_path: String,
+}
+
+/// 现役判定：该文件最新一条 assignment 指向的目录
+pub fn confirmed_for_migration(conn: &Connection) -> Result<Vec<ConfirmedRow>, CmdError> {
+    let cols = FILE_COLS
+        .split(',')
+        .map(|c| format!("f.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {cols}, d.id, d.rel_path
+         FROM files f
+         JOIN assignments a ON a.file_id = f.id AND a.target_dir_id IS NOT NULL
+         JOIN archive_dirs d ON d.id = a.target_dir_id
+         WHERE f.status='confirmed'
+           AND a.id = (SELECT MAX(a2.id) FROM assignments a2 WHERE a2.file_id = f.id)
+         ORDER BY d.rel_path, f.name, f.id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ConfirmedRow {
+            file: row_to_file(r)?,
+            dir_id: r.get(12)?,
+            dir_rel_path: r.get(13)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Debug)]
+pub struct MigrationRow {
+    pub id: i64,
+    /// running|done|partial|failed|undone
+    pub status: String,
+    pub file_count: i64,
+    pub bytes: i64,
+    pub finished_at: Option<i64>,
+}
+
+const MIG_COLS: &str = "id, status, file_count, bytes, finished_at";
+
+fn row_to_migration(r: &rusqlite::Row<'_>) -> rusqlite::Result<MigrationRow> {
+    Ok(MigrationRow {
+        id: r.get(0)?,
+        status: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        file_count: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+        bytes: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+        finished_at: r.get(4)?,
+    })
+}
+
+pub fn insert_migration(conn: &Connection, file_count: i64) -> Result<i64, CmdError> {
+    conn.execute(
+        "INSERT INTO migrations(batch_id, started_at, status, file_count, bytes)
+         VALUES(NULL, ?1, 'running', ?2, 0)",
+        params![now_ms(), file_count],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn finish_migration(
+    conn: &Connection,
+    id: i64,
+    status: &str,
+    bytes: i64,
+) -> Result<(), CmdError> {
+    conn.execute(
+        "UPDATE migrations SET finished_at=?1, status=?2, bytes=?3 WHERE id=?4",
+        params![now_ms(), status, bytes, id],
+    )?;
+    Ok(())
+}
+
+pub fn get_migration(conn: &Connection, id: i64) -> Result<Option<MigrationRow>, CmdError> {
+    let r = conn
+        .query_row(
+            &format!("SELECT {MIG_COLS} FROM migrations WHERE id=?1"),
+            [id],
+            row_to_migration,
+        )
+        .optional()?;
+    Ok(r)
+}
+
+/// 最近一次迁移（撤销入口用它，重启后也能撤）
+pub fn latest_migration(conn: &Connection) -> Result<Option<MigrationRow>, CmdError> {
+    let r = conn
+        .query_row(
+            &format!("SELECT {MIG_COLS} FROM migrations ORDER BY id DESC LIMIT 1"),
+            [],
+            row_to_migration,
+        )
+        .optional()?;
+    Ok(r)
+}
+
+#[derive(Clone, Debug)]
+pub struct MigrationItemRow {
+    pub file_id: Option<i64>,
+    pub src_path: String,
+    pub dst_path: String,
+    pub sha256: Option<String>,
+}
+
+pub fn insert_migration_item(
+    conn: &Connection,
+    migration_id: i64,
+    file_id: i64,
+    src_path: &str,
+    dst_path: &str,
+    sha256: Option<&str>,
+    result: &str,
+    error: Option<&str>,
+) -> Result<(), CmdError> {
+    conn.execute(
+        "INSERT INTO migration_items(migration_id, file_id, src_path, dst_path, sha256, result, error)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![migration_id, file_id, src_path, dst_path, sha256, result, error],
+    )?;
+    Ok(())
+}
+
+/// 一次迁移的全部条目（按 id 正序 = 迁移顺序，撤销要逆着走）
+pub fn migration_items(
+    conn: &Connection,
+    migration_id: i64,
+) -> Result<Vec<(MigrationItemRow, String)>, CmdError> {
+    let mut stmt = conn.prepare(
+        "SELECT file_id, src_path, dst_path, sha256, COALESCE(result,'')
+         FROM migration_items WHERE migration_id=?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([migration_id], |r| {
+        Ok((
+            MigrationItemRow {
+                file_id: r.get(0)?,
+                src_path: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                dst_path: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                sha256: r.get(3)?,
+            },
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 重新确认：退回池里，同时按磁盘现在的状态刷新 size/mtime
+///
+/// 不刷新的话，这份文件会被迁移前检查永远判成「标注后已改」，卡在原地出不去。
+pub fn requeue_confirmed(
+    conn: &Connection,
+    file_id: i64,
+    size: i64,
+    mtime: i64,
+) -> Result<(), CmdError> {
+    set_status(conn, file_id, Status::Queued)?;
+    conn.execute(
+        "UPDATE files SET size=?1, mtime=?2 WHERE id=?3",
+        params![size, mtime, file_id],
+    )?;
+    Ok(())
+}
+
+/// 文件所属源区的路径（撤销时要用它算隔离区里的相对路径）
+pub fn get_source_root_of_file(conn: &Connection, file_id: i64) -> Result<Option<String>, CmdError> {
+    let p: Option<Option<String>> = conn
+        .query_row(
+            "SELECT r.path FROM files f
+             LEFT JOIN source_roots r ON r.id = f.source_root_id
+             WHERE f.id=?1",
+            [file_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(p.flatten())
+}

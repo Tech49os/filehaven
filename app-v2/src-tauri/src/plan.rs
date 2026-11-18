@@ -155,3 +155,207 @@ pub fn unique_name(dir: &Path, name: &str) -> String {
         }
     }
 }
+
+// ---------------------------------------------------------------- 迁移计划（T7.1）
+
+use std::collections::HashMap;
+use std::fs::Metadata;
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
+
+/// 文件系统 mtime → 毫秒（扫描与迁移必须用同一个换算，否则每份都会被判「改过」）
+pub fn mtime_ms(meta: &Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 迁移计划的一条输入 —— 由 `index.rs` 从库里读出，本模块不碰 SQL
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanInput {
+    pub file_id: i64,
+    pub name: String,
+    pub src_path: String,
+    pub dir_id: i64,
+    pub dir_rel_path: String,
+    /// 源区相对路径：隔离区按它保留目录结构（C3）
+    pub rel_in_source: String,
+    /// 标注时落库的值，用来判断「标注后有没有被改」
+    pub size: i64,
+    pub mtime: i64,
+}
+
+/// 一条可执行的迁移计划
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanItem {
+    pub file_id: i64,
+    pub name: String,
+    pub src_path: String,
+    /// 预览时算好的目标路径（执行时若已存在会再错开，绝不覆盖）
+    pub dst_path: String,
+    pub dir_id: i64,
+    pub dir_rel_path: String,
+    pub rel_in_source: String,
+    pub size: i64,
+    pub mtime: i64,
+    /// 归档目录磁盘上还不存在 → 前端显示「（新建目录）」
+    pub is_new_dir: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NameConflict {
+    pub file_id: i64,
+    /// 错开之后的名字（如 `报告_2.docx`）
+    pub target_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangedFile {
+    pub file_id: i64,
+    pub name: String,
+    /// mtime | size | missing
+    pub why: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BuildResult {
+    pub plans: Vec<PlanItem>,
+    pub conflicts: Vec<NameConflict>,
+    pub changed: Vec<ChangedFile>,
+}
+
+/// `rel_path` （统一 `/` 分隔）→ 归档根下的绝对目录
+pub fn archive_dir_path(archive_root: &Path, rel_path: &str) -> PathBuf {
+    let mut cur = archive_root.to_path_buf();
+    for seg in rel_path.split(['/', '\\']) {
+        let seg = seg.trim();
+        if seg.is_empty() || seg == "." || seg == ".." {
+            continue;
+        }
+        cur = cur.join(seg);
+    }
+    cur
+}
+
+/// 隔离区路径：`<归档根>/.filebutler/quarantine/<迁移id>/<源区相对路径>`
+pub fn quarantine_path(archive_root: &Path, migration_id: i64, rel_in_source: &str) -> PathBuf {
+    archive_dir_path(
+        archive_root,
+        &format!(".filebutler/quarantine/{migration_id}/{rel_in_source}"),
+    )
+}
+
+/// 生成迁移计划。
+///
+/// 排序固定为「目录 → 文件名 → id」：同名错开的 `_2/_3` 必须每次都一样，
+/// 否则预览看到的和真搬进去的不是同一个名字。
+pub fn build_plans(inputs: &[PlanInput], archive_root: &Path) -> BuildResult {
+    let mut sorted: Vec<&PlanInput> = inputs.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.dir_rel_path
+            .cmp(&b.dir_rel_path)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.file_id.cmp(&b.file_id))
+    });
+
+    let mut out = BuildResult::default();
+    // key = 小写目录 + 0 + 小写文件名。Windows 不分大小写，计划内部也得先查重，
+    // 否则同一批里两份 `报告.docx` 会拿到同一个名字（磁盘上都还不存在，查不出来）
+    let mut used: HashMap<String, ()> = HashMap::new();
+    let mut new_dir_cache: HashMap<String, bool> = HashMap::new();
+
+    for inp in sorted {
+        let src = Path::new(&inp.src_path);
+        let meta = match std::fs::metadata(src) {
+            Ok(m) => m,
+            Err(_) => {
+                out.changed.push(ChangedFile {
+                    file_id: inp.file_id,
+                    name: inp.name.clone(),
+                    why: "missing".into(),
+                });
+                continue;
+            }
+        };
+        if meta.len() as i64 != inp.size {
+            out.changed.push(ChangedFile {
+                file_id: inp.file_id,
+                name: inp.name.clone(),
+                why: "size".into(),
+            });
+            continue;
+        }
+        if mtime_ms(&meta) != inp.mtime {
+            out.changed.push(ChangedFile {
+                file_id: inp.file_id,
+                name: inp.name.clone(),
+                why: "mtime".into(),
+            });
+            continue;
+        }
+
+        let dir_abs = archive_dir_path(archive_root, &inp.dir_rel_path);
+        let is_new_dir = *new_dir_cache
+            .entry(inp.dir_rel_path.clone())
+            .or_insert_with(|| !dir_abs.exists());
+
+        let mut candidate = inp.name.clone();
+        let mut conflicted = false;
+        if !inp.dir_rel_path.is_empty() {
+            let (stem, ext) = split_ext(&inp.name);
+            let mut n = 2u32;
+            loop {
+                let key = format!(
+                    "{}\u{0}{}",
+                    inp.dir_rel_path.to_lowercase(),
+                    candidate.to_lowercase()
+                );
+                if used.contains_key(&key) || dir_abs.join(&candidate).exists() {
+                    candidate = format!("{stem}_{n}{ext}");
+                    n += 1;
+                    conflicted = true;
+                    if n > 999 {
+                        candidate = format!("{stem}_{}{ext}", crate::index::now_ms());
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            used.insert(
+                format!(
+                    "{}\u{0}{}",
+                    inp.dir_rel_path.to_lowercase(),
+                    candidate.to_lowercase()
+                ),
+                (),
+            );
+        }
+        if conflicted {
+            out.conflicts.push(NameConflict {
+                file_id: inp.file_id,
+                target_name: candidate.clone(),
+            });
+        }
+
+        out.plans.push(PlanItem {
+            file_id: inp.file_id,
+            name: inp.name.clone(),
+            src_path: inp.src_path.clone(),
+            dst_path: dir_abs
+                .join(&candidate)
+                .to_string_lossy()
+                .to_string(),
+            dir_id: inp.dir_id,
+            dir_rel_path: inp.dir_rel_path.clone(),
+            rel_in_source: inp.rel_in_source.clone(),
+            size: inp.size,
+            mtime: inp.mtime,
+            is_new_dir,
+        });
+    }
+
+    out
+}

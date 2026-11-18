@@ -210,10 +210,23 @@ export interface MigrationPreview {
   }[]
   /** 将加 _2 的冲突 */
   nameConflicts: { fileId: number; targetName: string }[]
-  /** 标注后源文件被改过，必须拦下 */
-  changedSinceLabel: { fileId: number; name: string; why: 'mtime' | 'size' }[]
+  /** 标注后源文件被改过（或已经不见了），必须拦下 */
+  changedSinceLabel: { fileId: number; name: string; why: 'mtime' | 'size' | 'missing' }[]
   totalFiles: number
   totalBytes: number
+  /** 归档盘剩余空间（GB）；算不出来就是 null，不拦 */
+  freeGb: number | null
+  /** 服务端算的「装得下吗」，前端不要自己再猜一遍 */
+  enoughSpace: boolean
+}
+
+/** 最近一次迁移（撤销入口） */
+export interface MigrationSummary {
+  id: number
+  status: 'running' | 'done' | 'partial' | 'failed' | 'undone'
+  fileCount: number
+  bytes: number
+  finishedAt: number | null
 }
 
 export interface MigrationResult {

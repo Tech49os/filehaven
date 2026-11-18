@@ -21,6 +21,7 @@ import type {
   FileRow,
   MigrationPreview,
   MigrationResult,
+  MigrationSummary,
   ParkedItem,
   ScanReport,
   SourceRoot,
@@ -148,6 +149,16 @@ export function applyMigration(excludeFileIds: number[]) {
 
 export function undoMigration(migrationId: number) {
   return invoke<UndoReport>('undo_migration', { migrationId })
+}
+
+/** 最近一次迁移：撤销入口要靠它，重启后也还撤得回来 */
+export function latestMigration() {
+  return invoke<MigrationSummary | null>('latest_migration')
+}
+
+/** 标注后被改过的文件：退回整理台，并按磁盘现状刷新 size/mtime */
+export function requeueConfirmed(fileId: number) {
+  return invoke<void>('requeue_confirmed', { fileId })
 }
 
 // ---------------------------------------------------------------- 浏览

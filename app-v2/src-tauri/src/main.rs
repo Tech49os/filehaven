@@ -13,6 +13,8 @@ mod batch;
 mod error;
 mod index;
 mod llm;
+mod migrate;
+mod migration;
 mod model;
 mod plan;
 mod recommend;
@@ -26,7 +28,8 @@ mod tests;
 
 use error::CmdError;
 use model::{
-    ArchiveDir, BatchView, BootState, Counts, DirNode, ModelStatus, ScanReport, SourceRoot,
+    ArchiveDir, BatchView, BootState, Counts, DirNode, MigrationResult, MigrationSummary,
+    ModelStatus, ScanReport, SourceRoot, UndoReport,
 };
 use state::AppState;
 
@@ -478,6 +481,150 @@ async fn accept_dirs(app: AppHandle, names: Vec<String>) -> Result<Vec<ArchiveDi
     index::accept_dirs(&conn, &names)
 }
 
+// ---------------------------------------------------------------- 迁移
+
+/// 归档根（没有就 NOT_CONFIGURED —— 迁移类命令一律靠它）
+fn archive_root_of(conn: &rusqlite::Connection) -> Result<String, CmdError> {
+    setting(conn, "archive_root")
+        .ok_or_else(|| CmdError::new(error::NOT_CONFIGURED, "还没选择归档区，先去设置里选一个"))
+}
+
+/// 剩余空间：先看诊断用的环境变量，再问系统。
+///
+/// `FILEBUTLER_FAKE_FREE_GB` 只为验 R7（空间不足）留的后门，与 `FILEBUTLER_TIMEOUT` 同一路数。
+fn free_gb_for(archive: &str) -> Option<f64> {
+    if let Ok(v) = std::env::var("FILEBUTLER_FAKE_FREE_GB") {
+        if let Ok(g) = v.parse::<f64>() {
+            return Some(g);
+        }
+    }
+    free_gb(archive)
+}
+
+/// 迁移预览：分组 / 冲突 / 已改拦截 / 空间（T7.2）
+#[tauri::command]
+async fn migration_preview(app: AppHandle) -> Result<model::MigrationPreview, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || migration_preview_inner(&app))
+        .await
+        .map_err(|e| CmdError::new(error::DB, format!("预览线程异常：{e}")))?
+}
+
+fn migration_preview_inner(app: &AppHandle) -> Result<model::MigrationPreview, CmdError> {
+    let state = app.state::<AppState>();
+    let archive = {
+        let conn = lock_db(&state)?;
+        archive_root_of(&conn)?
+    };
+    // 剩余空间要起进程去问，放锁外
+    let free = free_gb_for(&archive);
+    let conn = lock_db(&state)?;
+    migration::preview(&conn, Path::new(&archive), free)
+}
+
+/// 应用迁移（长任务，每文件一事务，三次进度事件）
+#[tauri::command]
+async fn apply_migration(
+    app: AppHandle,
+    exclude_file_ids: Vec<i64>,
+) -> Result<MigrationResult, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+
+        // R7：预览可能放了一阵子，真搬之前再确认一次空间
+        let free = free_gb_for(&archive);
+        let pre = migration::preview(&conn, &root, free)?;
+        if !pre.enough_space {
+            return Err(CmdError::new(
+                error::DISK_FULL,
+                format!(
+                    "归档盘剩余空间不够（要 {:} MB，只剩 {:.1} GB）",
+                    pre.total_bytes / 1024 / 1024,
+                    free.unwrap_or(0.0)
+                ),
+            ));
+        }
+
+        let emitter = app.clone();
+        let mut on_progress = |done: usize, total: usize, name: &str, stage: &str| {
+            let _ = emitter.emit(
+                "migrate-progress",
+                model::MigrateProgress {
+                    done,
+                    total,
+                    name: name.to_string(),
+                    stage: stage.to_string(),
+                },
+            );
+        };
+        migration::apply(&mut conn, &root, &exclude_file_ids, &mut on_progress)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("迁移线程异常：{e}")))?
+}
+
+/// 撤销一次迁移（逆序还原，能救几份救几份）
+#[tauri::command]
+async fn undo_migration(app: AppHandle, migration_id: i64) -> Result<UndoReport, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        let emitter = app.clone();
+        let mut on_progress = |done: usize, total: usize, name: &str, stage: &str| {
+            let _ = emitter.emit(
+                "undo-progress",
+                model::MigrateProgress {
+                    done,
+                    total,
+                    name: name.to_string(),
+                    stage: stage.to_string(),
+                },
+            );
+        };
+        migration::undo(&mut conn, &root, migration_id, &mut on_progress)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("撤销线程异常：{e}")))?
+}
+
+/// 最近一次迁移 —— 撤销入口（重启后也还撤得回来）
+#[tauri::command]
+async fn latest_migration(app: AppHandle) -> Result<Option<MigrationSummary>, CmdError> {
+    let state = app.state::<AppState>();
+    let conn = lock_db(&state)?;
+    Ok(index::latest_migration(&conn)?.map(|m| MigrationSummary {
+        id: m.id,
+        status: m.status,
+        file_count: m.file_count,
+        bytes: m.bytes,
+        finished_at: m.finished_at,
+    }))
+}
+
+/// 重新确认：标注后被改过的文件退回整理台，并按磁盘现状刷新 size/mtime
+#[tauri::command]
+async fn requeue_confirmed(app: AppHandle, file_id: i64) -> Result<(), CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let path = {
+            let conn = lock_db(&state)?;
+            index::file_row(&conn, file_id)?
+                .ok_or_else(|| CmdError::new("NOT_FOUND", format!("文件不存在：{file_id}")))?
+                .abs_path
+        };
+        // stat 在锁外
+        let meta = std::fs::metadata(&path)?;
+        let conn = lock_db(&state)?;
+        index::requeue_confirmed(&conn, file_id, meta.len() as i64, plan::mtime_ms(&meta))
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("重新确认线程异常：{e}")))?
+}
+
 // ---------------------------------------------------------------- 目录建议
 
 /// 模型请求超时（详设 §7.6：180s）
@@ -896,7 +1043,12 @@ fn main() {
             next_batch,
             decide,
             undo_decide,
-            close_batch
+            close_batch,
+            migration_preview,
+            apply_migration,
+            undo_migration,
+            latest_migration,
+            requeue_confirmed
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

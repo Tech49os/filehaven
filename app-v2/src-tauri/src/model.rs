@@ -252,3 +252,98 @@ pub struct CloseAck {
 pub struct OkAck {
     pub ok: bool,
 }
+
+// ---------------------------------------------------------------- 迁移（M7）
+
+/// 待迁移预览（详设 §6.3）
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationPreview {
+    pub groups: Vec<PreviewGroup>,
+    /// 将加 `_2` 的冲突（目标已有同名，或本批里两份同名）
+    pub name_conflicts: Vec<NameConflictOut>,
+    /// 标注后被改过，必须拦下的
+    pub changed_since_label: Vec<ChangedOut>,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    /// 归档盘剩余（GB）。拿不到就是 None —— 不拦，只是不保证
+    pub free_gb: Option<f64>,
+    pub enough_space: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewGroup {
+    pub dir_id: i64,
+    pub rel_path: String,
+    /// 归档目录磁盘上还不存在 → 显示「（新建目录）」
+    pub is_new: bool,
+    pub files: Vec<FileRow>,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameConflictOut {
+    pub file_id: i64,
+    pub target_name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedOut {
+    pub file_id: i64,
+    pub name: String,
+    /// mtime | size | missing
+    pub why: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationFailure {
+    pub file_id: i64,
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationResult {
+    pub migration_id: i64,
+    pub copied: usize,
+    pub verified: usize,
+    pub quarantined: usize,
+    pub failed: Vec<MigrationFailure>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoReport {
+    pub restored: usize,
+    /// 已经不在 migrated 状态（或记录缺失）而跳过的
+    pub skipped: usize,
+    pub failed: Vec<MigrationFailure>,
+}
+
+/// 最近一次迁移（撤销入口）
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationSummary {
+    pub id: i64,
+    /// running|done|partial|failed|undone
+    pub status: String,
+    pub file_count: i64,
+    pub bytes: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// 迁移/撤销进度事件（`migrate-progress` / `undo-progress`）
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrateProgress {
+    pub done: usize,
+    pub total: usize,
+    pub name: String,
+    /// copy | verify | quarantine
+    pub stage: String,
+}

@@ -9,3 +9,6 @@ app/test/*.png
 app/test/*.jpg
 app/test/_pdf_page.png
 .DS_Store
+
+# M7 端到端手测的临时语料与截图（可随时用 test/e2e-migrate.py seed 重建）
+app-v2/test/e2e/

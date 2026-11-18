@@ -24,6 +24,8 @@ export const ERR = {
   SOURCE_UNREADABLE: 'SOURCE_UNREADABLE',
   FILE_CHANGED: 'FILE_CHANGED',
   MIGRATE_FAILED: 'MIGRATE_FAILED',
+  /** 归档盘空间不够（R7） */
+  DISK_FULL: 'DISK_FULL',
   DB: 'DB',
   IO: 'IO',
   NOT_CONFIGURED: 'NOT_CONFIGURED',
@@ -80,6 +82,8 @@ export function humanize(e: CmdError): string {
       return e.message || '文件太少了，先多扫一些再归纳'
     case ERR.FILE_CHANGED:
       return '文件在标注后被改动过'
+    case ERR.DISK_FULL:
+      return e.message || '归档盘空间不够'
     default:
       return e.message
   }
