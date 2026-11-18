@@ -1,4 +1,5 @@
 import type { Category, FileItem, MigrationPlan } from './types'
+import { familyRenames } from './version'
 
 /**
  * 迁移计划：决定每个文件最终落到哪个目录、叫什么名字。
@@ -33,15 +34,38 @@ function withIndex(name: string, n: number): string {
 
 export function buildPlans(files: FileItem[], categories: Category[]): MigrationPlan[] {
   const byId = new Map(categories.map((c) => [c.id, c]))
+  const entries = files.map((f) => {
+    const cat = f.categoryId ? byId.get(f.categoryId) : undefined
+    return {
+      f,
+      dirName: dirOf(cat, byId),
+      // 待确认和服务没归类的都不动，宁可不整理也不能乱放
+      deferred: !cat || f.needReview,
+    }
+  })
+
+  // 版本族只在本目录内成立：A 事项下的「方案V1」和 B 事项下的「方案V2」是两份不同的东西。
+  // 用 AI 建议名的文件不参与——名字是人定的，不该被机器再改一遍。
+  const buckets = new Map<string, FileItem[]>()
+  for (const e of entries) {
+    if (e.deferred || e.f.suggestedName) continue
+    const arr = buckets.get(e.dirName)
+    if (arr) arr.push(e.f)
+    else buckets.set(e.dirName, [e.f])
+  }
+  const renamedById = new Map<string, string>()
+  for (const list of buckets.values()) {
+    if (list.length < 2) continue
+    const m = familyRenames(list.map((f) => ({ id: f.id, name: f.name, size: f.size, mtime: f.mtime })))
+    for (const [id, name] of m) renamedById.set(id, name)
+  }
+
   /** 已占用的「目录\文件名」，用来给同名文件让位 */
   const seen = new Set<string>()
 
-  return files.map((f) => {
-    const cat = f.categoryId ? byId.get(f.categoryId) : undefined
-    const dirName = dirOf(cat, byId)
-    let targetName = f.suggestedName || f.name
-    // 待确认和服务没归类的都不动，宁可不整理也不能乱放
-    const deferred = !cat || f.needReview
+  return entries.map(({ f, dirName, deferred }) => {
+    const familyName = renamedById.get(f.id)
+    let targetName = f.suggestedName || familyName || f.name
 
     let conflict = false
     if (!deferred) {
@@ -62,6 +86,7 @@ export function buildPlans(files: FileItem[], categories: Category[]): Migration
       targetDir: dirName || '（未分类）',
       targetName,
       conflict,
+      renamed: !deferred && !!familyName,
       deferred,
     }
   })

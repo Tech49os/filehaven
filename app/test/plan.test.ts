@@ -86,25 +86,28 @@ describe('迁移计划：目录归属', () => {
 })
 
 describe('迁移计划：同名永不覆盖', () => {
-  it('同一目录下的同名文件自动加序号', () => {
-    const files = [F('1', '纪要.docx', { categoryId: 'c1' }), F('2', '纪要.docx', { categoryId: 'c1' })]
+  it('同一目录下的同名文件补「副本2」而不是下划线序号', () => {
+    const files = [F('1', '纪要.docx', { categoryId: 'c1' }), F('2', '纪要.docx', { categoryId: 'c1', mtime: 999 })]
     const plans = buildPlans(files, [C('c1', '技术谱系')])
+    // 新的在前，原件保留原名，旧的那份补副本号
     expect(plans[0].targetName).toBe('纪要.docx')
-    expect(plans[0].conflict).toBe(false)
-    expect(plans[1].targetName).toBe('纪要_1.docx')
-    expect(plans[1].conflict).toBe(true)
+    expect(plans[0].renamed).toBe(false)
+    expect(plans[1].targetName).toBe('纪要 (副本2).docx')
+    expect(plans[1].renamed).toBe(true)
+    // 已经靠副本号分开了，就不算「同名冲突」
+    expect(plans.every((p) => !p.conflict)).toBe(true)
   })
 
-  it('三份同名依次排到 _2', () => {
-    const files = [1, 2, 3].map((i) => F(String(i), '纪要.docx', { categoryId: 'c1' }))
+  it('三份同名依次排到 副本2 / 副本3', () => {
+    const files = [1, 2, 3].map((i) => F(String(i), '纪要.docx', { categoryId: 'c1', mtime: 100 + i }))
     const plans = buildPlans(files, [C('c1', '技术谱系')])
-    expect(plans.map((p) => p.targetName)).toEqual(['纪要.docx', '纪要_1.docx', '纪要_2.docx'])
+    expect(plans.map((p) => p.targetName)).toEqual(['纪要 (副本3).docx', '纪要 (副本2).docx', '纪要.docx'])
   })
 
-  it('没有扩展名也能加序号', () => {
-    const files = [F('1', 'LICENSE', { categoryId: 'c1' }), F('2', 'LICENSE', { categoryId: 'c1' })]
+  it('没有扩展名也能补副本号', () => {
+    const files = [F('1', 'LICENSE', { categoryId: 'c1' }), F('2', 'LICENSE', { categoryId: 'c1', mtime: 1 })]
     const plans = buildPlans(files, [C('c1', '技术谱系')])
-    expect(plans.map((p) => p.targetName)).toEqual(['LICENSE', 'LICENSE_1'])
+    expect(plans.map((p) => p.targetName)).toEqual(['LICENSE', 'LICENSE (副本2)'])
   })
 
   it('不同目录下的同名文件互不影响', () => {
@@ -131,5 +134,52 @@ describe('迁移计划：同名永不覆盖', () => {
   it('类名带斜杠时目录名被清洗，不会建出子目录', () => {
     const plans = buildPlans([F('1', 'a.docx', { categoryId: 'c1' })], [C('c1', 'A/B 方案')])
     expect(plans[0].targetDir).toBe('A_B 方案')
+  })
+})
+
+describe('迁移计划：版本族命名规范化', () => {
+  it('同一份文档的多个版本，版本号统一挪到末尾括号', () => {
+    const files = [
+      F('1', '技术方案V1.docx', { categoryId: 'c1', mtime: 100 }),
+      F('2', '技术方案v2.1.docx', { categoryId: 'c1', mtime: 200 }),
+    ]
+    const plans = buildPlans(files, [C('c1', '技术谱系')])
+    expect(plans.map((p) => p.targetName)).toEqual(['技术方案 (v1).docx', '技术方案 (v2.1).docx'])
+    expect(plans.every((p) => p.renamed)).toBe(true)
+  })
+
+  it('没有同族的单份文件不动名字（哪怕是 V1）', () => {
+    const plans = buildPlans([F('1', '技术方案V1.docx', { categoryId: 'c1' })], [C('c1', '技术谱系')])
+    expect(plans[0].targetName).toBe('技术方案V1.docx')
+    expect(plans[0].renamed).toBe(false)
+  })
+
+  it('版本族不跨目录——两个事项目录各有一份「方案V1」互不影响', () => {
+    const files = [
+      F('1', '方案V1.docx', { categoryId: 'c1' }),
+      F('2', '方案V2.docx', { categoryId: 'c2' }),
+    ]
+    const plans = buildPlans(files, [C('c1', '甲'), C('c2', '乙')])
+    expect(plans.map((p) => p.targetName)).toEqual(['方案V1.docx', '方案V2.docx'])
+  })
+
+  it('AI 建议名优先，不被版本规范化覆盖', () => {
+    const files = [
+      F('1', '方案V1.docx', { categoryId: 'c1', suggestedName: '技术方案（改名）.docx' }),
+      F('2', '方案V2.docx', { categoryId: 'c1', mtime: 999 }),
+    ]
+    const plans = buildPlans(files, [C('c1', '技术谱系')])
+    expect(plans[0].targetName).toBe('技术方案（改名）.docx')
+    expect(plans[0].renamed).toBe(false)
+  })
+
+  it('待确认的文件不迁移也不改名', () => {
+    const files = [
+      F('1', '方案V1.docx', { needReview: true }),
+      F('2', '方案V2.docx', { needReview: true }),
+    ]
+    const plans = buildPlans(files, [C('c1', '技术谱系')])
+    expect(plans.map((p) => p.targetName)).toEqual(['方案V1.docx', '方案V2.docx'])
+    expect(plans.every((p) => p.deferred)).toBe(true)
   })
 })

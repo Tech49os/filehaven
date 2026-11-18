@@ -6,6 +6,8 @@ import StatCard from '../../components/StatCard.vue'
 import { executeMigration } from '../../core/migrator'
 import { isDesktop, migrateFiles } from '../../core/desktop'
 import { buildPlans } from '../../core/plan'
+import { parseName } from '../../core/version'
+import type { MigrationPlan } from '../../core/types'
 import { useDataStore } from '../../stores/data'
 import { fileHandleMap, getRootHandle, useWizardStore } from '../../stores/wizard'
 
@@ -28,6 +30,57 @@ const totalBytes = computed(() =>
     .reduce((a, f) => a + f.size, 0)
 )
 const conflicts = computed(() => active.value.filter((p) => p.conflict).length)
+
+/** 展开了哪些版本族 */
+const openFam = ref(new Set<string>())
+
+interface PlanRow {
+  key: string
+  title: string
+  members: MigrationPlan[]
+}
+
+/**
+ * 迁移清单的行：同一目录、同一主名的多个版本折成一行。
+ * 折叠只为了「看得清」，不改变迁移行为——点开是每个版本各自的源 → 目标。
+ */
+const planRows = computed<PlanRow[]>(() => {
+  const keyOf = (p: MigrationPlan) =>
+    `${p.targetDir}\\${parseName(p.fileName).key || p.fileName}`
+
+  const buckets = new Map<string, MigrationPlan[]>()
+  for (const p of plans.value) {
+    if (p.deferred) continue
+    const k = keyOf(p)
+    const arr = buckets.get(k)
+    if (arr) arr.push(p)
+    else buckets.set(k, [p])
+  }
+
+  const used = new Set<string>()
+  const rows: PlanRow[] = []
+  for (const p of plans.value) {
+    const k = keyOf(p)
+    const members = buckets.get(k)
+    if (p.deferred || !members || members.length < 2) {
+      rows.push({ key: p.fileId, title: p.fileName, members: [p] })
+      continue
+    }
+    if (used.has(k)) continue
+    used.add(k)
+    rows.push({ key: k, title: parseName(members[0].fileName).title || members[0].fileName, members })
+  }
+  return rows
+})
+
+const famCount = computed(() => planRows.value.filter((r) => r.members.length > 1).length)
+
+function toggleFam(key: string) {
+  const next = new Set(openFam.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  openFam.value = next
+}
 
 const mb = computed(() => (totalBytes.value / 1024 / 1024).toFixed(1))
 
@@ -142,27 +195,75 @@ async function start() {
           <span class="c-dst">归档到 {{ w.archivePath }}</span>
         </div>
         <div class="scroll tbody">
-          <div v-for="p in plans" :key="p.fileId" class="trow" :class="{ off: p.deferred }">
-            <div class="c-src">
-              <div class="ellipsis">{{ p.fileName }}</div>
-              <div v-if="p.conflict" class="conflict">
-                <AppIcon name="info" :size="11" />
-                同名冲突 · 已自动加序号，不覆盖
+          <template v-for="r in planRows" :key="r.key">
+            <!-- 单份：一行到底 -->
+            <div v-if="r.members.length === 1" class="trow" :class="{ off: r.members[0].deferred }">
+              <div class="c-src">
+                <div class="ellipsis">{{ r.members[0].fileName }}</div>
+                <div v-if="r.members[0].conflict" class="conflict">
+                  <AppIcon name="info" :size="11" />
+                  同名冲突 · 已自动加序号，不覆盖
+                </div>
+                <div v-else-if="r.members[0].renamed" class="tidy">
+                  <AppIcon name="info" :size="11" />
+                  文件名已规范化
+                </div>
+                <div v-if="w.dupIndex[r.members[0].fileId]?.length" class="tidy">
+                  <AppIcon name="info" :size="11" />
+                  与另 {{ w.dupIndex[r.members[0].fileId].length }} 份内容完全相同（都归档）
+                </div>
+              </div>
+              <div class="c-arrow">
+                <AppIcon name="arrow-right" :size="13" />
+              </div>
+              <div class="c-dst">
+                <template v-if="r.members[0].deferred">
+                  <span class="muted">留在待确认队列</span>
+                </template>
+                <template v-else>
+                  <span class="dir">{{ r.members[0].targetDir }}\</span>
+                  <span class="fname">{{ r.members[0].targetName }}</span>
+                </template>
               </div>
             </div>
-            <div class="c-arrow">
-              <AppIcon name="arrow-right" :size="13" />
-            </div>
-            <div class="c-dst">
-              <template v-if="p.deferred">
-                <span class="muted">留在待确认队列</span>
-              </template>
-              <template v-else>
-                <span class="dir">{{ p.targetDir }}\</span>
-                <span class="fname">{{ p.targetName }}</span>
-              </template>
-            </div>
-          </div>
+
+            <!-- 版本族：一行收起，点开看每一版的落点 -->
+            <template v-else>
+              <div class="trow fam" role="button" tabindex="0" @click="toggleFam(r.key)" @keydown.enter.prevent="toggleFam(r.key)">
+                <div class="c-src">
+                  <div class="ellipsis">
+                    <span class="caret" :class="{ on: openFam.has(r.key) }">›</span>
+                    {{ r.title }}
+                    <span class="fam-badge">{{ r.members.length }} 个版本</span>
+                  </div>
+                  <div class="fam-hint">
+                    同一份文档的多个版本会一起归档，文件名按版本号统一编排；点开可逐个核对
+                  </div>
+                </div>
+                <div class="c-arrow">
+                  <AppIcon name="arrow-right" :size="13" />
+                </div>
+                <div class="c-dst">
+                  <span class="dir">{{ r.members[0].targetDir }}\</span>
+                  <span class="fname">{{ r.members[0].targetName }}</span>
+                  <span v-if="r.members.length > 1" class="more">等 {{ r.members.length }} 个</span>
+                </div>
+              </div>
+              <div v-if="openFam.has(r.key)" class="fam-kids">
+                <div v-for="p in r.members" :key="p.fileId" class="trow kid">
+                  <div class="c-src">
+                    <div class="ellipsis" :title="p.fileName">{{ p.fileName }}</div>
+                  </div>
+                  <div class="c-arrow">
+                    <AppIcon name="arrow-right" :size="11" />
+                  </div>
+                  <div class="c-dst">
+                    <span class="fname">{{ p.targetName }}</span>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </template>
         </div>
       </div>
 
@@ -175,6 +276,9 @@ async function start() {
           unit="个"
           :tone="deferredPlans.length ? 'warning' : 'default'"
         />
+        <StatCard label="版本族" :value="famCount" unit="组">
+          <template #sub>同名版本一起归档</template>
+        </StatCard>
         <StatCard
           label="同名冲突"
           :value="conflicts"
@@ -288,10 +392,71 @@ h1 {
   color: var(--c-warning-deep);
   margin-top: 2px;
 }
+.tidy {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--c-text-3);
+  margin-top: 2px;
+}
+
+/* 版本族折叠 */
+.trow.fam {
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.008);
+}
+.trow.fam:hover {
+  background: var(--c-hover);
+}
+.caret {
+  display: inline-block;
+  width: 10px;
+  color: var(--c-text-3);
+  font-size: 11px;
+  transition: transform 0.12s ease;
+  transform-origin: 50% 50%;
+}
+.caret.on {
+  transform: rotate(90deg);
+}
+.fam-badge {
+  margin-left: 6px;
+  font-size: 10.5px;
+  color: var(--c-text-2);
+  background: var(--c-hover);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.fam-hint {
+  font-size: 10.5px;
+  color: var(--c-text-3);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.more {
+  margin-left: 6px;
+  font-size: 10.5px;
+  color: var(--c-text-3);
+}
+.trow.kid {
+  padding: 5px 16px 5px 30px;
+  background: var(--c-titlebar);
+  border-bottom: 0.5px solid var(--c-divider);
+}
+.trow.kid .c-src div {
+  font-size: 11.5px;
+  color: var(--c-text-2);
+}
+.trow.kid .c-dst .fname {
+  font-size: 11.5px;
+}
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
   flex: 0 0 auto;
 }

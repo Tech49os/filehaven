@@ -236,6 +236,20 @@ export async function diskFreeGb(path: string): Promise<number | null> {
 }
 
 /**
+ * 批量算 SHA-256（只给「同尺寸且不止一份」的文件用）
+ *
+ * 不做全盘哈希：真实 455 份里同尺寸组只涉及 26 份，算这点文件是毫秒级，
+ * 全盘算要读几十 GB。返回 path → hash，算不出来的文件不会出现。
+ */
+export async function hashFiles(paths: string[]): Promise<Record<string, string>> {
+  if (!paths.length || !(await ensureApi())) return {}
+  const pairs = (await invokeFn!('hash_files', { paths })) as [string, string][]
+  const out: Record<string, string> = {}
+  for (const [p, h] of pairs ?? []) out[p] = h
+  return out
+}
+
+/**
  * 走 Rust 发 HTTP 请求（用于调本地大模型）
  *
  * 桌面端必须走这条路：Windows 上页面 origin 是 `http://tauri.localhost`，

@@ -92,6 +92,8 @@ export interface MigrationPlan {
   targetName: string
   /** 目标已存在同名，自动加序号 */
   conflict: boolean
+  /** 文件名被规范化过（版本号挪到末尾 / 同名补副本号），界面上要给个交代 */
+  renamed?: boolean
   /** 因待确认而暂不迁移 */
   deferred: boolean
 }

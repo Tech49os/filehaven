@@ -340,6 +340,7 @@ fn main() {
             path_info,
             open_path,
             disk_free_gb,
+            migrate::hash_files,
             llm_request
         ])
         .run(tauri::generate_context!())

@@ -101,6 +101,22 @@ fn emit_progress(app: Option<&AppHandle>, payload: MigrateProgress) {
     }
 }
 
+/// 给「字节完全相同的副本」用的批量哈希。
+///
+/// 前端只把「同一个大小、不止一份」的文件送进来（真实数据里 455 份只有 26 份），
+/// 所以这一步很便宜——不做全盘哈希。算不出来的文件直接跳过，不影响扫描结果。
+#[tauri::command]
+pub fn hash_files(paths: Vec<String>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for p in paths {
+        let path = PathBuf::from(&p);
+        if let Ok(h) = sha256_of(&path) {
+            out.push((p, h));
+        }
+    }
+    out
+}
+
 pub fn migrate(
     app: Option<&AppHandle>,
     archive_root: &str,

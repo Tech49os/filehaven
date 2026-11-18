@@ -13,6 +13,7 @@ import { useWizardStore } from '../../stores/wizard'
 import { buildTree } from '../../core/emergence/domain'
 import type { ProposalTopic } from '../../core/emergence/proposal'
 import TopicTree from './TopicTree.vue'
+import FileList from './FileList.vue'
 
 const w = useWizardStore()
 
@@ -319,12 +320,7 @@ async function regen() {
                 <span class="tc-folder">{{ g.label }}</span>
                 <span class="tc-sec-n">{{ g.fileIds.length }} 份</span>
               </div>
-              <div class="tc-files">
-                <div v-for="id in g.fileIds" :key="id" class="tc-file">
-                  <span class="tc-fn">{{ w.fileIndex[id] ?? '（已不在扫描结果里）' }}</span>
-                  <span class="tc-fp">{{ w.filePathIndex[id] }}</span>
-                </div>
-              </div>
+              <FileList :ids="g.fileIds" />
             </div>
             <div v-if="!ungrouped" class="tc-blank">全部文件都已归入分类。</div>
           </template>
@@ -337,12 +333,7 @@ async function regen() {
                 <span class="tc-sec-t">{{ s.head }}</span>
                 <span class="tc-sec-n">{{ s.count }} 份</span>
               </div>
-              <div class="tc-files">
-                <div v-for="id in s.ids" :key="id" class="tc-file">
-                  <span class="tc-fn">{{ w.fileIndex[id] ?? '（已不在扫描结果里）' }}</span>
-                  <span class="tc-fp">{{ w.filePathIndex[id] }}</span>
-                </div>
-              </div>
+              <FileList :ids="s.ids" />
             </div>
           </template>
         </div>
@@ -619,40 +610,6 @@ async function regen() {
   font-size: 11.5px;
   color: var(--c-text-3);
   font-variant-numeric: tabular-nums;
-}
-.tc-files {
-  display: flex;
-  flex-direction: column;
-}
-.tc-file {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-  padding: 3px 4px;
-  border-radius: 5px;
-}
-.tc-file:hover {
-  background: var(--c-hover);
-}
-.tc-fn {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  color: var(--c-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tc-fp {
-  flex: 0 1 40%;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--c-text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-  direction: rtl;
 }
 .tc-blank {
   padding: 40px 0;

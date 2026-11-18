@@ -7,6 +7,7 @@ import {
 import {
   isDesktop,
   pickDirectory as pickDesktopDir,
+  hashFiles,
   prepareArchiveRoot,
   scanDirectory as scanDesktop,
   toFileItems,
@@ -15,6 +16,7 @@ import { demoScan } from '../core/demo'
 import { collectCandidates, type Candidate } from '../core/emergence/candidates'
 import { groupBySurface } from '../core/emergence/grouping'
 import { groupUngrouped, sortForDisplay } from '../core/emergence/view'
+import { duplicateGroups, latestOnly } from '../core/version'
 import { DOC_KIND_WORDS } from '../core/emergence/lexicon'
 import {
   augmentWithOrgRule,
@@ -121,6 +123,19 @@ export const useWizardStore = defineStore('wizard', {
     fileIndex: {} as Record<string, string>,
     /** 文件 id → 完整路径。未归类面板要按目录分组，只有文件名分不出来 */
     filePathIndex: {} as Record<string, string>,
+    /**
+     * 文件 id → 大小/修改时间。版本族要按修改时间排「最新那份」，
+     * 光有文件名判断不了谁是新的。
+     */
+    fileMeta: {} as Record<string, { size: number; mtime: number }>,
+    /**
+     * 文件 id → 与它字节完全相同的其他文件 id。
+     *
+     * 只标注、不删（用户要求「全部归档，只在预览里标注」）。
+     * 只对「同尺寸且不止一份」的文件算 SHA-256：真实数据 455 份里只涉及 26 份，
+     * 全盘哈希要读几十 GB，不值得。
+     */
+    dupIndex: {} as Record<string, string[]>,
     /**
      * 上次确认过的方案存档。有它就能跳过「重新生成 + 重调一遍」，
      * 直接沿用同一套类目——这是把工具从「每次重来」变成「越用越顺」的关键。
@@ -268,12 +283,41 @@ export const useWizardStore = defineStore('wizard', {
         this.scannedCount = rawFiles.length
         const index: Record<string, string> = {}
         const paths: Record<string, string> = {}
+        const meta: Record<string, { size: number; mtime: number }> = {}
         for (const f of rawFiles) {
           index[f.id] = f.name
           paths[f.id] = f.path
+          meta[f.id] = { size: f.size, mtime: f.mtime }
         }
         this.fileIndex = index
         this.filePathIndex = paths
+        this.fileMeta = meta
+
+        // 字节完全相同的副本：只对「同尺寸且不止一份」的文件算哈希
+        this.dupIndex = {}
+        if (isDesktop) {
+          const bySize = new Map<number, { id: string; path: string }[]>()
+          for (const f of rawFiles) {
+            if (f.size <= 0) continue
+            const arr = bySize.get(f.size)
+            if (arr) arr.push({ id: f.id, path: f.path })
+            else bySize.set(f.size, [{ id: f.id, path: f.path }])
+          }
+          const need = [...bySize.values()].filter((v) => v.length > 1)
+          if (need.length) {
+            try {
+              const hashes = await hashFiles(need.flat().map((x) => x.path))
+              const dups = duplicateGroups(
+                rawFiles.map((f) => ({ id: f.id, hash: hashes[f.path] }))
+              )
+              const out: Record<string, string[]> = {}
+              for (const [id, others] of dups) out[id] = others.map((o) => o.id)
+              this.dupIndex = out
+            } catch {
+              // 哈希失败不影响扫描：只是少了「内容重复」的标注
+            }
+          }
+        }
         if (rawFiles.length === 0) {
           this.error = '这个位置没有找到可整理的文件'
         }
@@ -343,8 +387,14 @@ export const useWizardStore = defineStore('wizard', {
           this.error = '没有可归纳的文件'
           return
         }
+        // 同一份文档的多个版本只贡献一次统计：否则「存了 7 个版本的 PPT」名字里的词
+        // 会被数 7 遍，直接垄断候选榜（实测 455 份上去重后归类 304 → 318）
+        const forStats = latestOnly(
+          files.map((f) => ({ id: f.id, name: f.name, size: f.size, mtime: f.mtime }))
+        )
+        const statIds = new Set(forStats.map((f) => f.id))
         const cands = collectCandidates(
-          files.map((f) => ({ name: f.name, path: f.path })),
+          files.filter((f) => statIds.has(f.id)).map((f) => ({ name: f.name, path: f.path })),
           { topK: 60 }
         )
         // 纯英文短词（ppt/work）和纯格式词（演讲稿/申请表）不当事项，否则确认页全是垃圾
@@ -626,6 +676,8 @@ export const useWizardStore = defineStore('wizard', {
       this.whoExcluded = []
       this.fileIndex = {}
       this.filePathIndex = {}
+      this.fileMeta = {}
+      this.dupIndex = {}
       this.error = ''
       this.ai = emptyAi()
       this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }
