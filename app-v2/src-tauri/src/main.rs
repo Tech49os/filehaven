@@ -627,15 +627,20 @@ async fn requeue_confirmed(app: AppHandle, file_id: i64) -> Result<(), CmdError>
 
 // ---------------------------------------------------------------- 目录建议
 
-/// 模型请求超时（详设 §7.6：180s）
-pub const SUGGEST_TIMEOUT_SECS: u64 = 180;
+/// 模型请求超时
+///
+/// 详设 §7.6 写的是 180s，M8 按实测改成 240s（偏差记录见 `P1_执行状态.md`）：
+/// T5.8 三次实跑 81.6s / 164.4s / 114.3s，164s 那次离 180s 只剩 16 秒。
+/// 耗时抖动的真因不是 prompt 长度，而是模型加载与显存分层 —— 上限给宽一点，
+/// 换来的是「本来能成的一次不会白等 3 分钟还被降级」。超时仍走 `MODEL_TIMEOUT` 降级。
+pub const SUGGEST_TIMEOUT_SECS: u64 = 240;
 /// 等待期心跳间隔：只报「已等多少秒」，不报假百分比
 const SUGGEST_HEARTBEAT_MS: u64 = 5_000;
 
 /// 目录建议：抽样 → 本地模型 → 五条门槛
 ///
 /// 失败一律返回 `CmdError`（详设 §6.3 第 12 条），前端按 `code` 降级到手写。
-/// 整个流程（含 180s 等待）都**不持数据库锁**（铁律见 `state.rs`）。
+/// 整个流程（含最长 240s 等待）都**不持数据库锁**（铁律见 `state.rs`）。
 #[tauri::command]
 async fn suggest_dirs(
     app: AppHandle,
@@ -654,7 +659,7 @@ async fn suggest_dirs(
         (base, model, files, existing)
     };
 
-    // 模型没起要立刻说清，别让用户干等 180 秒
+    // 模型没起要立刻说清，别让用户干等 240 秒
     if !llm::reachable(&base, Duration::from_secs(3)) {
         return Err(CmdError::new(
             error::MODEL_DOWN,
@@ -941,7 +946,7 @@ fn run_suggest_cli(samples: &str, out: &str, force: bool) -> i32 {
 
     let base = std::env::var("FILEBUTLER_BASE").unwrap_or_else(|_| llm::DEFAULT_BASE.to_string());
     let model = std::env::var("FILEBUTLER_MODEL").unwrap_or_else(|_| llm::DEFAULT_MODEL.to_string());
-    // 只在诊断入口留的超时旋钮：用来验「超时降级」这一支（界面恒定 180s）
+    // 只在诊断入口留的超时旋钮：用来验「超时降级」这一支（界面恒定 SUGGEST_TIMEOUT_SECS）
     let timeout_secs = std::env::var("FILEBUTLER_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())

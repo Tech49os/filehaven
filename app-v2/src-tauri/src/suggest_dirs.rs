@@ -26,6 +26,17 @@ pub const FAN_WORDS: &[&str] = &[
     "未分类",
 ];
 
+/// 修饰词/版本词表：本身不是泛词，但**整名只剩它们**时同样等于没有信息（V3 增强）
+///
+/// 起因：T5.8 第 3 次实跑模型给出「临时草稿副本」——整名不是泛词表里的任何一个，
+/// 也没有非法字符、长度合规，于是原 V3 放行。这类名字的共同点是：
+/// 把泛词、版本词、修饰词逐个摘掉之后什么都不剩。判定见 `is_filler_composed`。
+pub const FILLER_WORDS: &[&str] = &[
+    "临时", "草稿", "初版", "初稿", "定稿", "终版", "最终", "最新", "副本", "拷贝", "备份",
+    "各类", "各种", "一些", "常用", "重要", "紧急", "旧的", "新的", "待整理", "未整理", "待分类",
+    "待删", "无用", "散件",
+];
+
 // ---------------------------------------------------------------- 入参/出参
 
 /// 抽样输入（命令层从 files 表取，诊断入口从 fixture 取）
@@ -466,6 +477,35 @@ pub fn validate(raw: RawSchemes, sample_count: usize) -> Result<DirSuggestion, C
     })
 }
 
+/// V3 增强：整名由泛词/版本词/修饰词拼成
+///
+/// 做法是「摘空即泛」——把泛词表与修饰词表里的词反复从名字里摘掉，连接符、空白、数字一并忽略，
+/// 摘到什么都不剩就说明这个名字没有任何实义。举例：
+/// - 「临时草稿副本」→ 摘掉 临时/草稿/副本 → 空 → 判泛（要拦）
+/// - 「临时用电方案」→ 摘掉 临时 → 用电方案 → 非空 → 放行（修饰词只是定语）
+/// - 「资料归档制度」→ 摘掉 资料 → 归档制度 → 非空 → 放行
+///
+/// 只摘**整词**，不做单字匹配 —— 否则「审计」的「计」、「新」这种单字会误伤实词。
+pub fn is_filler_composed(name: &str) -> bool {
+    let mut s = name.to_string();
+    loop {
+        let before = s.clone();
+        for w in FAN_WORDS.iter().chain(FILLER_WORDS.iter()) {
+            if s.contains(w) {
+                s = s.replace(w, "");
+            }
+        }
+        s.retain(|c| {
+            !c.is_whitespace()
+                && !matches!(c, '_' | '-' | '·' | '(' | ')' | '（' | '）' | '[' | ']' | '【' | '】')
+                && !c.is_ascii_digit()
+        });
+        if s == before {
+            return s.is_empty();
+        }
+    }
+}
+
 /// V2 + V3 + V4：一个目录是否留下
 fn passes_gates(name: &str, samples: &[usize], sample_count: usize) -> bool {
     // V2：至少 2 个支撑，且序号都在 1..=sample_count
@@ -475,8 +515,8 @@ fn passes_gates(name: &str, samples: &[usize], sample_count: usize) -> bool {
     if samples.iter().any(|&i| i == 0 || i > sample_count) {
         return false;
     }
-    // V3：整名就是泛词
-    if FAN_WORDS.contains(&name) {
+    // V3：整名就是泛词，或整名由泛词/版本词拼成
+    if FAN_WORDS.contains(&name) || is_filler_composed(name) {
         return false;
     }
     // V4：2~20 字，且清洗后与原名一致（含非法字符即违规）

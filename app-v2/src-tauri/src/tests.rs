@@ -1187,6 +1187,22 @@ mod suggest_dirs {
         sd::parse(json).unwrap()
     }
 
+    // ---------------- 门槛总则
+
+    // M8 收尾：界面上的模型超时上限从 180s 提到 240s
+    //
+    // 依据：T5.8 三次实跑 81.6s / 164.4s / 114.3s，164s 那次离 180s 只剩 16 秒；
+    // 同一 prompt 同一模型耗时抖动来自模型加载与显存分层，不是 prompt 变长。
+    // 180s 会让「本来能成」的一次跑成 MODEL_TIMEOUT，白等 3 分钟还给用户降级。
+    #[test]
+    fn suggest_timeout_has_headroom() {
+        assert!(
+            crate::SUGGEST_TIMEOUT_SECS >= 240,
+            "上限需 ≥240s（实测峰值 164s），实为 {}s",
+            crate::SUGGEST_TIMEOUT_SECS
+        );
+    }
+
     // ---------------- T5.3 版本族去重
 
     // T5.3 版本标记剥离：四种常见写法都要认得
@@ -1431,6 +1447,40 @@ mod suggest_dirs {
         let json = OK.replace(r#""name":"培训台账""#, r#""name":"其他费用凭证""#);
         let s = sd::validate(raw(&json), 60).unwrap();
         assert_eq!(s.option_a.len(), 4);
+    }
+
+    // V3 增强（M8 收尾）：整名由泛词/版本词拼成 → 剔除
+    //
+    // 为什么补这条：T5.8 第 3 次实跑给出目录「临时草稿副本」，V3 只看「整名等于泛词」，
+    // 「临时」不在泛词表、整名又是拼出来的，于是漏进界面。判定口径改为「摘空即泛」：
+    // 把泛词、版本词、修饰词反复从名字里摘掉，摘到空说明这个名字没有任何实义。
+    #[test]
+    fn v3_drops_composed_filler_name() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"临时草稿副本""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert!(
+            s.option_a.iter().all(|d| d.name != "临时草稿副本"),
+            "拼词型泛名必须剔掉，实得 {:?}",
+            s.option_a.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    // V3 增强正例：修饰词 + 实词不能误杀 ——「临时」在「临时用电方案」里只是定语
+    #[test]
+    fn v3_keeps_filler_word_with_real_noun() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"临时用电方案""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 4);
+        assert!(s.option_a.iter().any(|d| d.name == "临时用电方案"));
+    }
+
+    // V3 增强正例2：两个泛词拼起来仍然有实义（「资料归档制度」不是泛名）
+    #[test]
+    fn v3_keeps_generic_words_plus_noun() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"资料归档制度""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 4);
+        assert!(s.option_a.iter().any(|d| d.name == "资料归档制度"));
     }
 
     // V4 负例：名字含非法字符（清洗后与原名不一致）→ 剔除
