@@ -14,6 +14,7 @@ import {
 import { demoScan } from '../core/demo'
 import { collectCandidates, type Candidate } from '../core/emergence/candidates'
 import { groupBySurface } from '../core/emergence/grouping'
+import { sortForDisplay } from '../core/emergence/view'
 import { DOC_KIND_WORDS } from '../core/emergence/lexicon'
 import {
   augmentWithOrgRule,
@@ -102,6 +103,11 @@ export const useWizardStore = defineStore('wizard', {
     proposal: null as Proposal | null,
     /** 被判定为人名/组织名、因而不进类目的词（确认页可一键恢复） */
     whoExcluded: [] as string[],
+    /**
+     * 文件 id → 文件名。确认页要能展开某个分类看「到底装了哪些文件」，
+     * 而 ProposalTopic.samples 只留了 5 个样本，所以单独存一份索引。
+     */
+    fileIndex: {} as Record<string, string>,
     cancelled: { cancelled: false },
     scannedCount: 0,
     skippedCount: 0,
@@ -123,11 +129,8 @@ export const useWizardStore = defineStore('wizard', {
         '完成',
       ][s.step] ?? '',
     canPrev: (s) => s.step > 1 && s.step < 7,
-    /** 确认页用：按文件数排序的事项 */
-    proposalTopics: (s) =>
-      s.proposal
-        ? [...s.proposal.topics].sort((a, b) => b.fileIds.length - a.fileIds.length)
-        : [],
+    /** 确认页用：按文件数降序的稳定排序，空类沉底 */
+    proposalTopics: (s) => (s.proposal ? sortForDisplay(s.proposal.topics) : []),
     ungroupedCount: (s) => s.proposal?.ungroupedIds.length ?? 0,
   },
 
@@ -224,6 +227,9 @@ export const useWizardStore = defineStore('wizard', {
           }, this.cancelled)
         }
         this.scannedCount = rawFiles.length
+        const index: Record<string, string> = {}
+        for (const f of rawFiles) index[f.id] = f.name
+        this.fileIndex = index
         if (rawFiles.length === 0) {
           this.error = '这个位置没有找到可整理的文件'
         }
@@ -426,6 +432,7 @@ export const useWizardStore = defineStore('wizard', {
       this.summary = null
       this.proposal = null
       this.whoExcluded = []
+      this.fileIndex = {}
       this.error = ''
       this.ai = emptyAi()
       this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }

@@ -2,40 +2,27 @@
 import { computed, ref } from 'vue'
 import { useWizardStore } from '../../stores/wizard'
 import type { ProposalTopic } from '../../core/emergence/proposal'
+import TopicRow from './TopicRow.vue'
 
 const w = useWizardStore()
-const editing = ref<string | null>(null)
-const draft = ref('')
 const newName = ref('')
 const showWeak = ref(false)
+const confirmingDrop = ref(false)
 
 const topics = computed(() => w.proposalTopics as ProposalTopic[])
-/** 正经事项：名字本身说明了「哪件事」 */
+/** 正经分类：名字本身说明了「哪件事」 */
 const strong = computed(() => topics.value.filter((t) => !t.weak))
-/** 兜底类：名字只是文种（演讲稿 / 操作手册 / 进展汇报），建议删掉 */
+/** 兜底分类：只说人名/单位，或只说文件是什么，默认收起 */
 const weak = computed(() => topics.value.filter((t) => t.weak))
 const weakFiles = computed(() => weak.value.reduce((n, t) => n + t.fileIds.length, 0))
 
-const assigned = computed(() => topics.value.reduce((n, t) => n + t.fileIds.length, 0))
+const assigned = computed(() => strong.value.reduce((n, t) => n + t.fileIds.length, 0))
 const ungrouped = computed(() => w.proposal?.ungroupedIds.length ?? 0)
-
-function startEdit(t: ProposalTopic) {
-  editing.value = t.id
-  draft.value = t.name
-}
-
-function save(id: string) {
-  if (editing.value !== id) return
-  w.renameTopic(id, draft.value)
-  editing.value = null
-}
-
-function onMerge(id: string, e: Event) {
-  const el = e.target as HTMLSelectElement
-  const to = el.value
-  el.value = ''
-  if (to) w.mergeTopics(id, to)
-}
+const total = computed(() => assigned.value + weakFiles.value + ungrouped.value)
+/** 已归入正经分类的比例 */
+const pctOk = computed(() => (total.value ? (assigned.value / total.value) * 100 : 0))
+/** 落在兜底类里、等你决定去留的比例 */
+const pctMaybe = computed(() => (total.value ? (weakFiles.value / total.value) * 100 : 0))
 
 function add() {
   const n = newName.value.trim()
@@ -44,8 +31,19 @@ function add() {
   newName.value = ''
 }
 
+/** 中文输入法选词的回车不算提交 */
+function onAddEnter(e: KeyboardEvent) {
+  if (e.isComposing) return
+  add()
+}
+
 function dropWeak() {
+  if (!confirmingDrop.value) {
+    confirmingDrop.value = true
+    return
+  }
   w.removeTopics(weak.value.map((t) => t.id))
+  confirmingDrop.value = false
   showWeak.value = false
 }
 
@@ -57,94 +55,71 @@ async function regen() {
 <template>
   <div class="tc">
     <header class="tc-head">
-      <div class="tc-title">
-        系统归纳出 {{ strong.length }} 个分类
-        <span v-if="weak.length" class="tc-weak-tag">+ {{ weak.length }} 个仅文种</span>
+      <div class="tc-title-row">
+        <h2 class="tc-title">系统归纳出 {{ strong.length }} 个分类</h2>
+        <div class="tc-stats">
+          <span><b>{{ assigned }}</b> 份已归入</span>
+          <span class="tc-dot">·</span>
+          <span :class="{ warn: ungrouped > 0 }"><b>{{ ungrouped }}</b> 份待指定</span>
+        </div>
       </div>
+
+      <div
+        class="tc-progress"
+        :title="`已归入 ${assigned} 份 · 兜底类待定 ${weakFiles} 份 · 未归类 ${ungrouped} 份`"
+      >
+        <i class="ok" :style="{ width: pctOk + '%' }"></i>
+        <i class="maybe" :style="{ width: pctMaybe + '%' }"></i>
+      </div>
+
       <p class="tc-sub">
-        {{ assigned }} 份已归入，{{ ungrouped }} 份未能归类。改名字、删掉不需要的、把重复的并到一起，
-        改完会自动重算归属。确认之后才会真正建目录。
+        点类名可改名，鼠标移到某行上可并入或删除。<strong>改动只存在内存里</strong>，确认后才会真正建目录。
       </p>
+
       <div class="tc-bar">
         <input
           v-model="newName"
           class="tc-new"
-          placeholder="系统漏了哪件事？输入名字回车，含这个名字的文件会立刻归进来"
-          @keyup.enter="add"
+          placeholder="系统漏了哪件事？输入名字，含这个名字的文件会立刻归进来"
+          @keydown.enter="onAddEnter"
         />
         <button class="tc-btn ghost sm" :disabled="!newName.trim()" @click="add">新建分类</button>
       </div>
     </header>
 
     <div class="tc-list">
-      <div v-for="t in strong" :key="t.id" class="tc-item">
-        <div class="tc-row">
-          <input
-            v-if="editing === t.id"
-            v-model="draft"
-            class="tc-input"
-            autofocus
-            @keyup.enter="save(t.id)"
-            @blur="save(t.id)"
-          />
-          <button v-else class="tc-name" title="点一下改名" @click="startEdit(t)">
-            {{ t.name }}
-          </button>
-          <span class="tc-count" :class="{ zero: t.fileIds.length === 0 }">
-            {{ t.fileIds.length }} 份
-          </span>
-          <div class="tc-actions">
-            <select v-if="topics.length > 1" class="tc-sel" @change="onMerge(t.id, $event)">
-              <option value="">并入…</option>
-              <option v-for="o in topics.filter((x) => x.id !== t.id)" :key="o.id" :value="o.id">
-                {{ o.name }}
-              </option>
-            </select>
-            <button class="tc-del" @click="w.removeTopic(t.id)">删除</button>
-          </div>
-        </div>
-        <div v-if="t.samples.length" class="tc-samples">
-          <span v-for="s in t.samples.slice(0, 3)" :key="s" class="tc-sample">{{ s }}</span>
-        </div>
-        <div v-else class="tc-samples">
-          <span class="tc-empty">这个分类下已经没有文件，可以删掉</span>
-        </div>
-      </div>
+      <TopicRow v-for="t in strong" :key="t.id" :topic="t" />
 
       <div v-if="weak.length" class="tc-weak">
         <button class="tc-weak-head" @click="showWeak = !showWeak">
           <span class="tc-caret" :class="{ open: showWeak }">▸</span>
-          另有 {{ weak.length }} 个「只说了文件是什么、没说属于哪件事」的分类，
-          共 {{ weakFiles }} 份
-          <span class="tc-weak-hint">{{ showWeak ? '收起' : '展开删掉' }}</span>
+          <span class="tc-weak-text">
+            {{ weak.length }} 个分类看不出属于哪件事，共 {{ weakFiles }} 份
+          </span>
+          <span class="tc-weak-hint">{{ showWeak ? '收起' : '展开看看' }}</span>
         </button>
+
         <div v-if="showWeak" class="tc-weak-body">
           <p class="tc-weak-desc">
-            两类：一是「演讲稿」「操作手册」这种只说明文档性质的名字；
-            二是「海油发展」这种人名/单位名——它回答的是「谁在办」，不是「哪件事」。
-            它们的文件都没写清属于哪件事，删掉后会回到未归类，在下一步手动指定；
-            如果其中有你其实想单独成类的，改个名字留在上面就行。
+            「演讲稿」「操作手册」这类名字只说明文件性质；「海油发展」这类是单位名——它回答的是「谁在办」，
+            不是「哪件事」。它们名下的文件本来就没写清归属，删掉会回到未归类，在下一步手动指定；
+            其中有你其实想单独成类的，改个名字留在上面就行。
           </p>
-          <button class="tc-btn ghost sm" @click="dropWeak">全部删除</button>
-          <div v-for="t in weak" :key="t.id" class="tc-item">
-            <div class="tc-row">
-              <button class="tc-name" @click="startEdit(t)">{{ t.name }}</button>
-              <span class="tc-badge">{{ t.weakReason === 'who' ? '人名/单位' : '仅文种' }}</span>
-              <span class="tc-count">{{ t.fileIds.length }} 份</span>
-              <div class="tc-actions">
-                <button class="tc-del" @click="w.removeTopic(t.id)">删除</button>
-              </div>
-            </div>
-            <div v-if="t.samples.length" class="tc-samples">
-              <span v-for="s in t.samples.slice(0, 2)" :key="s" class="tc-sample">{{ s }}</span>
-            </div>
+          <div class="tc-weak-ops">
+            <button class="tc-btn sm" :class="{ danger: confirmingDrop }" @click="dropWeak">
+              {{ confirmingDrop ? `确认删除这 ${weak.length} 个分类` : '全部删除' }}
+            </button>
+            <span v-if="confirmingDrop" class="tc-hint">再点一次才生效</span>
           </div>
+          <TopicRow v-for="t in weak" :key="t.id" :topic="t" />
         </div>
       </div>
 
       <div v-if="topics.length === 0" class="tc-blank">
         没有归纳出任何分类。可以点下方「重新生成」，或在下一步手动指定。
       </div>
+
+      <div class="tc-tail"></div>
     </div>
 
     <footer class="tc-foot">
@@ -170,40 +145,86 @@ async function regen() {
 }
 .tc-head {
   flex: 0 0 auto;
-  padding: 20px 28px 12px;
+  padding: 18px 28px 12px;
+  border-bottom: 0.5px solid var(--c-border);
+}
+.tc-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .tc-title {
-  font-size: 18px;
+  margin: 0;
+  font-size: 17px;
   font-weight: 500;
   color: var(--c-text);
 }
-.tc-weak-tag {
+.tc-stats {
   font-size: 12px;
-  font-weight: 400;
+  color: var(--c-text-2);
+}
+.tc-stats b {
+  font-weight: 500;
+  color: var(--c-text);
+}
+.tc-stats .warn b {
+  color: var(--c-warning);
+}
+.tc-dot {
+  margin: 0 5px;
   color: var(--c-text-3);
-  margin-left: 6px;
+}
+.tc-progress {
+  display: flex;
+  height: 3px;
+  margin-top: 10px;
+  border-radius: 2px;
+  background: var(--c-hover);
+  overflow: hidden;
+}
+.tc-progress i {
+  display: block;
+  height: 100%;
+  transition: width 0.25s;
+}
+.tc-progress i.ok {
+  background: var(--c-primary);
+}
+.tc-progress i.maybe {
+  background: var(--c-text-3);
 }
 .tc-sub {
-  margin: 8px 0 0;
-  font-size: 13px;
-  line-height: 1.7;
+  margin: 9px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
   color: var(--c-text-2);
-  max-width: 760px;
+  max-width: 780px;
+}
+.tc-sub strong {
+  font-weight: 500;
+  color: var(--c-text);
 }
 .tc-bar {
   display: flex;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 12px;
 }
 .tc-new {
   flex: 1;
-  max-width: 520px;
+  max-width: 480px;
+  font-family: inherit;
   font-size: 13px;
   padding: 7px 12px;
-  border: 0.5px solid var(--c-border);
-  border-radius: 8px;
-  background: var(--c-surface);
+  border: 0.5px solid var(--c-border-strong);
+  border-radius: var(--r-field);
+  background: var(--c-field);
   color: var(--c-text);
+  outline: none;
+}
+.tc-new:focus {
+  border-color: var(--c-primary);
+  background: var(--c-surface);
 }
 .tc-new::placeholder {
   color: var(--c-text-3);
@@ -212,151 +233,76 @@ async function regen() {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 28px 16px;
+  padding: 2px 0 0;
 }
-.tc-item {
-  border-bottom: 0.5px solid var(--c-border);
-  padding: 12px 0;
-}
-.tc-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.tc-name {
-  border: none;
-  background: transparent;
-  padding: 2px 4px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--c-text);
-  cursor: text;
-  border-radius: 4px;
-  text-align: left;
-}
-.tc-name:hover {
-  background: var(--c-hover);
-}
-.tc-input {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--c-text);
-  padding: 2px 6px;
-  border: 0.5px solid var(--c-primary);
-  border-radius: 4px;
-  background: var(--c-surface);
-  min-width: 180px;
-}
-.tc-count {
-  font-size: 12px;
-  color: var(--c-text-2);
-  flex: 0 0 auto;
-}
-.tc-count.zero {
-  color: var(--c-warning);
-}
-.tc-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-.tc-sel {
-  font-size: 12px;
-  padding: 3px 6px;
-  border: 0.5px solid var(--c-border);
-  border-radius: 6px;
-  background: var(--c-surface);
-  color: var(--c-text-2);
-  cursor: pointer;
-}
-.tc-del {
-  font-size: 12px;
-  padding: 3px 10px;
-  border: 0.5px solid var(--c-border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--c-text-2);
-  cursor: pointer;
-}
-.tc-del:hover {
-  border-color: var(--c-warning);
-  color: var(--c-warning);
-}
-.tc-samples {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-  padding-left: 4px;
-}
-.tc-sample {
-  font-size: 12px;
-  color: var(--c-text-3);
-  background: var(--c-hover);
-  padding: 2px 8px;
-  border-radius: 4px;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tc-badge {
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--c-hover);
-  color: var(--c-text-3);
-  flex: 0 0 auto;
-}
-.tc-empty {
-  font-size: 12px;
-  color: var(--c-text-3);
-  font-style: italic;
+.tc-tail {
+  height: 12px;
 }
 .tc-weak {
-  margin-top: 18px;
+  margin: 14px 20px 0;
   border: 0.5px solid var(--c-border);
-  border-radius: 10px;
-  padding: 4px 12px 8px;
+  border-radius: var(--r-card);
   background: var(--c-titlebar);
+  overflow: hidden;
 }
 .tc-weak-head {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 0;
+  padding: 11px 14px;
   border: none;
   background: transparent;
+  font-family: inherit;
   font-size: 13px;
   color: var(--c-text-2);
   cursor: pointer;
   text-align: left;
 }
+.tc-weak-head:hover {
+  background: var(--c-hover);
+}
 .tc-caret {
   display: inline-block;
-  transition: transform 0.15s;
+  font-size: 11px;
   color: var(--c-text-3);
+  transition: transform 0.15s;
 }
 .tc-caret.open {
   transform: rotate(90deg);
 }
+.tc-weak-text {
+  flex: 1;
+}
 .tc-weak-hint {
-  margin-left: auto;
   font-size: 12px;
   color: var(--c-primary);
 }
 .tc-weak-body {
-  padding-bottom: 4px;
+  padding: 0 0 6px;
+  border-top: 0.5px solid var(--c-border);
+}
+/* 嵌在卡片里，行内边距要收窄，否则文字被挤到中间 */
+.tc-weak-body :deep(.tr) {
+  padding-left: 14px;
+  padding-right: 14px;
 }
 .tc-weak-desc {
-  margin: 0 0 10px;
+  margin: 10px 14px 8px;
   font-size: 12px;
   line-height: 1.7;
   color: var(--c-text-3);
-  max-width: 680px;
+  max-width: 720px;
+}
+.tc-weak-ops {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 8px;
+}
+.tc-hint {
+  font-size: 12px;
+  color: var(--c-text-3);
 }
 .tc-blank {
   padding: 40px 0;
@@ -369,7 +315,7 @@ async function regen() {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 14px 28px;
+  padding: 12px 28px;
   border-top: 0.5px solid var(--c-border);
   background: var(--c-titlebar);
 }
@@ -383,11 +329,12 @@ async function regen() {
   gap: 10px;
 }
 .tc-btn {
+  font-family: inherit;
   font-size: 13px;
   padding: 7px 18px;
-  border-radius: 8px;
+  border-radius: var(--r-btn);
   cursor: pointer;
-  border: 0.5px solid var(--c-border);
+  border: 0.5px solid var(--c-border-strong);
   background: var(--c-surface);
   color: var(--c-text);
 }
@@ -400,13 +347,20 @@ async function regen() {
   background: var(--c-primary);
   border-color: var(--c-primary);
   color: #fff;
+  box-shadow: var(--sh-primary);
 }
 .tc-btn.primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  box-shadow: none;
 }
 .tc-btn.ghost:hover {
   background: var(--c-hover);
+}
+.tc-btn.danger {
+  color: var(--c-danger);
+  border-color: var(--c-danger);
+  background: var(--c-danger-bg);
 }
 .tc-btn:disabled {
   opacity: 0.5;
