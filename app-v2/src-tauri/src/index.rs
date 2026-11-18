@@ -2,9 +2,10 @@
 //!
 //! 每次数据访问都只做一件事，事务边界见详设 §5.4。
 
-use crate::error::{CmdError, BAD_TRANSITION};
+use crate::error::{CmdError, BAD_TRANSITION, DIR_INVALID};
 use crate::model::{
-    ArchiveDir, Assignment, DirNode, NewAssignment, ScannedFile, SourceRoot, UpsertStats,
+    ArchiveDir, Assignment, CloseAck, DecideAck, DecideReq, DirNode, NewAssignment, ScannedFile,
+    SourceRoot, UpsertStats,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -293,6 +294,45 @@ pub fn insert_dir(
         row_to_dir,
     )?;
     Ok(dir)
+}
+
+/// 采纳一组目录方案：逐段建（父不存在一并建），已存在的直接复用。
+///
+/// 换一批后方案与已有目录重叠是常态，所以这里必须幂等，不许报 DIR_EXISTS。
+pub fn accept_dirs(conn: &Connection, names: &[String]) -> Result<Vec<ArchiveDir>, CmdError> {
+    let mut out = Vec::new();
+    for raw in names {
+        let clean = crate::plan::clean_path(raw);
+        if !clean.valid {
+            return Err(CmdError::new(
+                DIR_INVALID,
+                clean.reason.unwrap_or_else(|| "目录名无效".into()),
+            ));
+        }
+        let mut parent: Option<i64> = None;
+        let mut last: Option<ArchiveDir> = None;
+        for seg in clean.cleaned.split('/') {
+            let existing = match parent {
+                Some(pid) => {
+                    let p = get_dir(conn, pid)?.ok_or_else(|| {
+                        CmdError::new("DIR_PARENT_MISSING", format!("父目录不存在：{pid}"))
+                    })?;
+                    dir_by_rel_path(conn, &format!("{}/{}", p.rel_path, seg))?
+                }
+                None => dir_by_rel_path(conn, seg)?,
+            };
+            let d = match existing {
+                Some(d) => d,
+                None => insert_dir(conn, parent, seg, "model_approved")?,
+            };
+            parent = Some(d.id);
+            last = Some(d);
+        }
+        if let Some(d) = last {
+            out.push(d);
+        }
+    }
+    Ok(out)
 }
 
 pub fn dir_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<ArchiveDir>, CmdError> {
@@ -653,6 +693,123 @@ pub fn count_assigned(conn: &Connection, batch_id: i64) -> Result<i64, CmdError>
     Ok(n)
 }
 
+// ---------------------------------------------------------------- 判定落库
+
+/// 一次人工判定的落库（单事务）：推状态 + 写 assignment（+ 暂缓计数 / 备注 / 目录最近使用）
+///
+/// 状态推进一律走 `set_status`，非转移表内的组合直接 `BAD_TRANSITION`；
+/// 事务里任何一步失败都不许留下半条记录。
+pub fn apply_decide(conn: &mut Connection, req: &DecideReq) -> Result<DecideAck, CmdError> {
+    let target = match req.decision.as_str() {
+        "accepted" | "changed" => Status::Confirmed,
+        "deferred" => Status::Queued,
+        "parked" => Status::Parked,
+        other => {
+            return Err(CmdError::new(
+                BAD_TRANSITION,
+                format!("未知的判定：{other}"),
+            ))
+        }
+    };
+    // 采纳/改判必须落到具体目录；暂缓与先放着不该带目标
+    if target == Status::Confirmed && req.dir_id.is_none() {
+        return Err(CmdError::new(DIR_INVALID, "没有指定目标目录"));
+    }
+    if target != Status::Confirmed && req.dir_id.is_some() {
+        return Err(CmdError::new(DIR_INVALID, "暂缓/先放着不该带目标目录"));
+    }
+
+    let tx = conn.transaction()?;
+    // 同状态转换在转移表里非法，正好用来挡住重复确认
+    set_status(&tx, req.file_id, target)?;
+
+    insert_assignment(
+        &tx,
+        &NewAssignment {
+            file_id: req.file_id,
+            batch_id: Some(req.batch_id),
+            target_dir_id: req.dir_id,
+            origin: req.origin.clone(),
+            confidence: req.confidence,
+            reason: req.reason.clone(),
+            decision: req.decision.clone(),
+            decided_at: now_ms(),
+        },
+    )?;
+
+    if req.decision == "deferred" {
+        tx.execute(
+            "UPDATE files SET defer_count = defer_count + 1 WHERE id=?1",
+            [req.file_id],
+        )?;
+    }
+    if let Some(note) = req.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        tx.execute(
+            "UPDATE files SET note=?1 WHERE id=?2",
+            params![note, req.file_id],
+        )?;
+    }
+    if let Some(dir_id) = req.dir_id {
+        tx.execute(
+            "UPDATE archive_dirs SET last_used_at=?1 WHERE id=?2",
+            params![now_ms(), dir_id],
+        )?;
+    }
+
+    let confirmed = count_assigned(&tx, req.batch_id)?;
+    let target_rel_path = match req.dir_id {
+        Some(d) => get_dir(&tx, d)?.map(|x| x.rel_path),
+        None => None,
+    };
+    let remaining = pool_count(&tx)?;
+    tx.commit()?;
+
+    Ok(DecideAck {
+        file_id: req.file_id,
+        status: target.as_str().to_string(),
+        confirmed,
+        target_rel_path,
+        remaining_in_pool: remaining,
+    })
+}
+
+/// Ctrl+Z：撤销本批最近一条 accepted/changed，文件回到池里
+///
+/// 暂缓与先放着不产生「已确认」，不在撤销范围内（返回 None）。
+pub fn undo_last_decide(
+    conn: &mut Connection,
+    batch_id: i64,
+) -> Result<Option<crate::model::FileRow>, CmdError> {
+    let tx = conn.transaction()?;
+    let row: Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT id, file_id FROM assignments
+             WHERE batch_id=?1 AND decision IN ('accepted','changed')
+             ORDER BY id DESC LIMIT 1",
+            [batch_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((aid, file_id)) = row else {
+        return Ok(None);
+    };
+    tx.execute("DELETE FROM assignments WHERE id=?1", [aid])?;
+    set_status(&tx, file_id, Status::Queued)?;
+    let file = file_row(&tx, file_id)?;
+    tx.commit()?;
+    Ok(file)
+}
+
+/// 关批次并告知剩余池量（前端完成提示条要用）
+pub fn close_batch_cmd(conn: &mut Connection, batch_id: i64) -> Result<CloseAck, CmdError> {
+    let closed = close_batch(conn, batch_id)?;
+    let remaining = pool_count(conn)?;
+    Ok(CloseAck {
+        closed,
+        remaining_in_pool: remaining,
+    })
+}
+
 // ---------------------------------------------------------------- 批次
 
 const FILE_COLS: &str = "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note";
@@ -746,6 +903,29 @@ pub fn file_rows(conn: &Connection, ids: &[i64]) -> Result<Vec<crate::model::Fil
         }
     }
     Ok(out)
+}
+
+pub fn file_row(conn: &Connection, id: i64) -> Result<Option<crate::model::FileRow>, CmdError> {
+    let r = conn
+        .query_row(
+            &format!("SELECT {FILE_COLS} FROM files WHERE id=?1"),
+            [id],
+            row_to_file,
+        )
+        .optional()?;
+    Ok(r)
+}
+
+/// 池内还有多少份（与 `pool_rows` 同一口径）
+pub fn pool_count(conn: &Connection) -> Result<i64, CmdError> {
+    let n = conn.query_row(
+        "SELECT COUNT(*) FROM files
+         WHERE status IN ('labeled','pending_confirm')
+            OR (status='queued' AND tag_level='basic')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
 }
 
 /// 推荐用的目录特征：(id, name, rel_path, 该目录下已确认文件名)

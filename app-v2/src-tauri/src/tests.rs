@@ -924,6 +924,220 @@ mod batch {
     }
 }
 
+// ================================================================ 判定落库
+
+mod decide {
+    use crate::error::{BAD_TRANSITION, DIR_INVALID};
+    use crate::index as db;
+    use crate::model::DecideReq;
+    use crate::tests::index::fresh_db;
+
+    fn req(file_id: i64, batch_id: i64, dir_id: Option<i64>, decision: &str) -> DecideReq {
+        DecideReq {
+            file_id,
+            batch_id,
+            dir_id,
+            decision: decision.into(),
+            origin: "recommended".into(),
+            confidence: Some(0.8),
+            reason: Some("测试理由".into()),
+            note: None,
+        }
+    }
+
+    /// 建源区 + 一个待确认文件 + 一个目录 + 一个批次
+    fn setup() -> (tempfile::TempDir, rusqlite::Connection, i64, i64, i64) {
+        let (d, conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/scanroot").unwrap();
+        let f = db::insert_test_file(&conn, root.id, "安全检查通知.docx", db::Status::PendingConfirm)
+            .unwrap();
+        let dir = db::insert_dir(&conn, None, "安全检查", "user").unwrap();
+        let batch = db::insert_batch(&conn, 1, 12).unwrap();
+        (d, conn, f, dir.id, batch)
+    }
+
+    // T6.14 采纳：pending_confirm → confirmed + 一条 assignment
+    #[test]
+    fn accept_confirms_and_records_assignment() {
+        let (_d, mut conn, f, dir, batch) = setup();
+        let ack = db::apply_decide(&mut conn, &req(f, batch, Some(dir), "accepted")).unwrap();
+        assert_eq!(ack.status, "confirmed");
+        assert_eq!(ack.confirmed, 1);
+        assert_eq!(ack.target_rel_path.as_deref(), Some("安全检查"));
+        assert_eq!(
+            db::get_file_status(&conn, f).unwrap(),
+            Some(db::Status::Confirmed)
+        );
+        let a = db::last_assignment(&conn, f).unwrap().unwrap();
+        assert_eq!(a.decision, "accepted");
+        assert_eq!(a.target_dir_id, Some(dir));
+        assert_eq!(db::count_assigned(&conn, batch).unwrap(), 1);
+    }
+
+    // 改判也计入「已确认」，但决策值必须是 changed
+    #[test]
+    fn change_counts_as_confirmed_with_changed_decision() {
+        let (_d, mut conn, f, dir, batch) = setup();
+        let mut r = req(f, batch, Some(dir), "changed");
+        r.origin = "user_changed".into();
+        db::apply_decide(&mut conn, &r).unwrap();
+        let a = db::last_assignment(&conn, f).unwrap().unwrap();
+        assert_eq!(a.decision, "changed");
+        assert_eq!(a.origin, "user_changed");
+        assert_eq!(db::count_assigned(&conn, batch).unwrap(), 1);
+    }
+
+    // 暂缓：回 queued 且 defer_count +1（回池的关键）
+    #[test]
+    fn defer_returns_to_pool_and_bumps_count() {
+        let (_d, mut conn, f, _dir, batch) = setup();
+        let ack = db::apply_decide(&mut conn, &req(f, batch, None, "deferred")).unwrap();
+        assert_eq!(ack.status, "queued");
+        assert_eq!(ack.confirmed, 0);
+        assert_eq!(
+            db::get_file_status(&conn, f).unwrap(),
+            Some(db::Status::Queued)
+        );
+        let n: i32 = conn
+            .query_row("SELECT defer_count FROM files WHERE id=?1", [f], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        // 回池：下次挑批还能被选到
+        assert!(db::pool_rows(&conn).unwrap().iter().any(|r| r.id == f));
+    }
+
+    // 先放着：parked + 记下备注
+    #[test]
+    fn park_sets_status_and_note() {
+        let (_d, mut conn, f, _dir, batch) = setup();
+        let mut r = req(f, batch, None, "parked");
+        r.note = Some("等财务确认".into());
+        let ack = db::apply_decide(&mut conn, &r).unwrap();
+        assert_eq!(ack.status, "parked");
+        assert_eq!(
+            db::get_file_status(&conn, f).unwrap(),
+            Some(db::Status::Parked)
+        );
+        let note: Option<String> = conn
+            .query_row("SELECT note FROM files WHERE id=?1", [f], |r| r.get(0))
+            .unwrap();
+        assert_eq!(note.as_deref(), Some("等财务确认"));
+        // parked 不在候选池里
+        assert!(!db::pool_rows(&conn).unwrap().iter().any(|r| r.id == f));
+    }
+
+    // 采纳却没给目录 → DIR_INVALID（不许静默写一条空目标）
+    #[test]
+    fn accept_without_dir_is_rejected() {
+        let (_d, mut conn, f, _dir, batch) = setup();
+        let e = db::apply_decide(&mut conn, &req(f, batch, None, "accepted")).unwrap_err();
+        assert_eq!(e.code, DIR_INVALID);
+        // 失败不许留下半条记录
+        assert!(db::last_assignment(&conn, f).unwrap().is_none());
+        assert_eq!(
+            db::get_file_status(&conn, f).unwrap(),
+            Some(db::Status::PendingConfirm)
+        );
+    }
+
+    // 已确认再确认 → BAD_TRANSITION
+    #[test]
+    fn decide_illegal_transition_is_rejected() {
+        let (_d, mut conn, f, dir, batch) = setup();
+        db::apply_decide(&mut conn, &req(f, batch, Some(dir), "accepted")).unwrap();
+        let e = db::apply_decide(&mut conn, &req(f, batch, Some(dir), "accepted")).unwrap_err();
+        assert_eq!(e.code, BAD_TRANSITION);
+    }
+
+    // Ctrl+Z：删掉最近一条 accepted/changed，文件回 queued
+    #[test]
+    fn undo_restores_file_and_removes_assignment() {
+        let (_d, mut conn, f, dir, batch) = setup();
+        db::apply_decide(&mut conn, &req(f, batch, Some(dir), "accepted")).unwrap();
+        let back = db::undo_last_decide(&mut conn, batch).unwrap().unwrap();
+        assert_eq!(back.id, f);
+        assert_eq!(
+            db::get_file_status(&conn, f).unwrap(),
+            Some(db::Status::Queued)
+        );
+        assert!(db::last_assignment(&conn, f).unwrap().is_none());
+        assert_eq!(db::count_assigned(&conn, batch).unwrap(), 0);
+    }
+
+    // 空栈：返回 None，不报错
+    #[test]
+    fn undo_on_empty_batch_returns_none() {
+        let (_d, mut conn, _f, _dir, batch) = setup();
+        assert!(db::undo_last_decide(&mut conn, batch).unwrap().is_none());
+    }
+
+    // 暂缓不可撤销（它本来就没落确认），撤销只针对 accepted/changed
+    #[test]
+    fn undo_ignores_deferred() {
+        let (_d, mut conn, f, _dir, batch) = setup();
+        db::apply_decide(&mut conn, &req(f, batch, None, "deferred")).unwrap();
+        assert!(db::undo_last_decide(&mut conn, batch).unwrap().is_none());
+        // 只回滚一次，defer_count 不被撤销逻辑改动
+        let n: i32 = conn
+            .query_row("SELECT defer_count FROM files WHERE id=?1", [f], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    // 关批次：未确认回池，返回剩余池数与关掉的份数
+    #[test]
+    fn close_batch_returns_unconfirmed_to_pool() {
+        let (_d, mut conn, f, _dir, batch) = setup();
+        let ack = db::close_batch_cmd(&mut conn, batch).unwrap();
+        assert_eq!(ack.closed, 1);
+        assert_eq!(ack.remaining_in_pool, 1);
+        assert_eq!(
+            db::get_file_status(&conn, f).unwrap(),
+            Some(db::Status::Queued)
+        );
+        assert!(db::open_batch(&conn).unwrap().is_none());
+    }
+
+    // 采纳方案：多层一起建，origin 记 model_approved，父目录自动补齐
+    #[test]
+    fn accept_dirs_builds_parents() {
+        let (_d, conn) = fresh_db();
+        db::set_setting(&conn, "archive_root", "D:/归档").unwrap();
+        let made = db::accept_dirs(&conn, &["合同/采购".to_string(), "安全".to_string()]).unwrap();
+        assert_eq!(made.len(), 2);
+        assert_eq!(made[0].rel_path, "合同/采购");
+        assert_eq!(made[0].depth, 2);
+        assert_eq!(made[0].origin, "model_approved");
+        let parent = db::dir_by_rel_path(&conn, "合同").unwrap().unwrap();
+        assert_eq!(parent.origin, "model_approved");
+        assert_eq!(db::list_dirs(&conn).unwrap().len(), 3);
+    }
+
+    // 已有目录不重复建（换一批后重叠是常态）
+    #[test]
+    fn accept_dirs_is_idempotent() {
+        let (_d, conn) = fresh_db();
+        db::set_setting(&conn, "archive_root", "D:/归档").unwrap();
+        db::accept_dirs(&conn, &["安全".to_string()]).unwrap();
+        let again = db::accept_dirs(&conn, &["安全".to_string()]).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(db::list_dirs(&conn).unwrap().len(), 1);
+    }
+
+    // 清洗后为空的名字直接拒（不许建出空目录）
+    #[test]
+    fn accept_dirs_rejects_invalid_name() {
+        let (_d, conn) = fresh_db();
+        db::set_setting(&conn, "archive_root", "D:/归档").unwrap();
+        let e = db::accept_dirs(&conn, &["...".to_string()]).unwrap_err();
+        assert_eq!(e.code, DIR_INVALID);
+    }
+}
+
 // ================================================================ 错误
 
 mod error {

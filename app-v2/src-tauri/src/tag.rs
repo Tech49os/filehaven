@@ -113,7 +113,7 @@ pub fn tokenize(stem: &str) -> Vec<String> {
 
     let chars: Vec<char> = s.chars().collect();
     let mut out: Vec<String> = Vec::new();
-    let mut push = |t: String, out: &mut Vec<String>| {
+    let push = |t: String, out: &mut Vec<String>| {
         if t.is_empty() || is_stopword(&t) || out.contains(&t) {
             return;
         }

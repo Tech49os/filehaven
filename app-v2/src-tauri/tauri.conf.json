@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "文件管家",
-        "width": 1280,
-        "height": 880,
-        "minWidth": 1080,
-        "minHeight": 700,
+        "width": 1160,
+        "height": 740,
+        "minWidth": 1000,
+        "minHeight": 620,
         "center": true,
         "resizable": true,
         "decorations": false,
@@ -31,8 +31,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
     "shortDescription": "本地智能文件归档客户端",
     "longDescription": "扫描散落各处的文件，AI 归纳分类，人工确认后安全迁移到统一归档目录。"
   }

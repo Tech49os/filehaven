@@ -421,21 +421,68 @@ async fn next_batch(app: AppHandle, size: Option<i64>) -> Result<BatchView, CmdE
         .map_err(|e| CmdError::new(error::DB, format!("批次线程异常：{e}")))?
 }
 
-fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
-    use index::Status;
-
+/// 一次人工判定（单事务）
+#[tauri::command]
+async fn decide(app: AppHandle, req: model::DecideReq) -> Result<model::DecideAck, CmdError> {
     let state = app.state::<AppState>();
     let mut conn = lock_db(&state)?;
+    index::apply_decide(&mut conn, &req)
+}
 
-    // 上一个没关的批次先关掉：未确认的回池
-    if let Some((id, _, _)) = index::open_batch(&conn)? {
-        index::close_batch(&mut conn, id)?;
-    }
-    let seq = index::next_batch_seq(&conn)?;
-    let batch_id = index::insert_batch(&conn, seq, size)?;
+/// Ctrl+Z：撤销本批最近一次确认
+#[tauri::command]
+async fn undo_decide(
+    app: AppHandle,
+    batch_id: i64,
+) -> Result<Option<model::BatchItem>, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || undo_decide_inner(&app, batch_id))
+        .await
+        .map_err(|e| CmdError::new(error::DB, format!("撤销线程异常：{e}")))?
+}
 
-    // 目录特征（一次查全表 + 一次查已确认文件名，不做 N+1）
-    let dir_rows = index::dir_feature_rows(&conn)?;
+fn undo_decide_inner(app: &AppHandle, batch_id: i64) -> Result<Option<model::BatchItem>, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    let Some(file) = index::undo_last_decide(&mut conn, batch_id)? else {
+        return Ok(None);
+    };
+    // 回填要带候选，否则前端恢复的卡片没有可选项 —— 复用挑批那套打分
+    let scored = scored_pool(&conn)?;
+    let (cands, needs) = scored
+        .items
+        .iter()
+        .find(|(r, _, _)| r.id == file.id)
+        .map(|(_, c, n)| (c.clone(), *n))
+        .unwrap_or((Vec::new(), true));
+    Ok(Some(model::BatchItem {
+        file,
+        candidates: cands,
+        needs_you: needs,
+    }))
+}
+
+#[tauri::command]
+async fn close_batch(app: AppHandle, batch_id: i64) -> Result<model::CloseAck, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::close_batch_cmd(&mut conn, batch_id)
+}
+
+#[tauri::command]
+async fn accept_dirs(app: AppHandle, names: Vec<String>) -> Result<Vec<ArchiveDir>, CmdError> {
+    let state = app.state::<AppState>();
+    let conn = lock_db(&state)?;
+    index::accept_dirs(&conn, &names)
+}
+
+/// 池内每份文件算一次候选（挑批与撤销回填共用）
+struct ScoredPool {
+    items: Vec<(model::FileRow, Vec<model::Candidate>, bool)>,
+    dir_count: usize,
+}
+
+fn scored_pool(conn: &rusqlite::Connection) -> Result<ScoredPool, CmdError> {
+    let dir_rows = index::dir_feature_rows(conn)?;
     let mut rel_paths: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
     let mut dirs: Vec<(i64, recommend::DirFeature)> = Vec::new();
     for (id, name, rel, confirmed_names) in &dir_rows {
@@ -459,9 +506,8 @@ fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
         ));
     }
 
-    // 池内每份文件算一次候选，挑批次时直接复用，不重算
-    let pool = index::pool_rows(&conn)?;
-    let mut scored: Vec<(batch::PoolItem, Vec<model::Candidate>, bool)> = Vec::new();
+    let pool = index::pool_rows(conn)?;
+    let mut items = Vec::with_capacity(pool.len());
     for row in &pool {
         let stem = stem_of(&row.name);
         let feat = recommend::FileFeature {
@@ -471,42 +517,64 @@ fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
             mtime: row.mtime,
         };
         let (cands, needs) = recommend::candidates(&feat, &dirs, &rel_paths);
-        scored.push((
-            batch::PoolItem {
-                file_id: row.id,
-                primary_dir: if needs {
-                    None
-                } else {
-                    cands.first().map(|c| c.dir_id)
-                },
-                score: cands.first().map(|c| c.score).unwrap_or(0.0),
-                defer_count: row.defer_count,
-                mtime: row.mtime,
-                has_deep_tag: false,
-            },
-            cands,
-            needs,
-        ));
+        items.push((row.clone(), cands, needs));
     }
+    Ok(ScoredPool {
+        items,
+        dir_count: dirs.len(),
+    })
+}
 
-    let pool_items: Vec<batch::PoolItem> = scored.iter().map(|(p, _, _)| p.clone()).collect();
+fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
+    use index::Status;
+
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+
+    // 上一个没关的批次先关掉：未确认的回池
+    if let Some((id, _, _)) = index::open_batch(&conn)? {
+        index::close_batch(&mut conn, id)?;
+    }
+    let seq = index::next_batch_seq(&conn)?;
+    let batch_id = index::insert_batch(&conn, seq, size)?;
+
+    // 池内每份文件算一次候选，挑批次时直接复用，不重算
+    let scored_all = scored_pool(&conn)?;
+    let pool_count = scored_all.items.len() as i64;
+
+    let pool_items: Vec<batch::PoolItem> = scored_all
+        .items
+        .iter()
+        .map(|(row, cands, needs)| batch::PoolItem {
+            file_id: row.id,
+            primary_dir: if *needs {
+                None
+            } else {
+                cands.first().map(|c| c.dir_id)
+            },
+            score: cands.first().map(|c| c.score).unwrap_or(0.0),
+            defer_count: row.defer_count,
+            mtime: row.mtime,
+            has_deep_tag: false,
+        })
+        .collect();
     let picked = batch::pick(&pool_items, size as usize);
 
     let mut items: Vec<model::BatchItem> = Vec::new();
     let mut deferred_badge: Vec<i64> = Vec::new();
     for id in &picked {
-        let Some((_, cands, needs)) = scored.iter().find(|(p, _, _)| p.file_id == *id) else {
+        let Some((file, cands, needs)) = scored_all.items.iter().find(|(r, _, _)| r.id == *id) else {
             continue;
         };
-        let Some(file) = pool.iter().find(|r| r.id == *id).cloned() else {
-            continue;
-        };
+        let mut file = file.clone();
         // 暂缓回来的文件是 queued，必须先回到 labeled 才能进批次（详设 §5.3）
         if file.status == "queued" {
             index::set_status(&conn, file.id, Status::Labeled)?;
+            file.status = "labeled".into();
         }
         if file.status != "pending_confirm" {
             index::set_status(&conn, file.id, Status::PendingConfirm)?;
+            file.status = "pending_confirm".into();
         }
         if file.defer_count >= batch::DEFER_BADGE_AT {
             deferred_badge.push(file.id);
@@ -518,7 +586,7 @@ fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
         });
     }
 
-    let remaining = (pool.len() as i64) - (picked.len() as i64);
+    let remaining = pool_count - (picked.len() as i64);
 
     Ok(model::BatchView {
         batch_id,
@@ -526,7 +594,7 @@ fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
         size,
         items,
         remaining_in_pool: remaining.max(0),
-        dir_count: dirs.len() as i64,
+        dir_count: scored_all.dir_count as i64,
         deferred_badge,
     })
 }
@@ -598,7 +666,11 @@ fn main() {
             list_dirs,
             preview_dir_name,
             create_dir,
-            next_batch
+            accept_dirs,
+            next_batch,
+            decide,
+            undo_decide,
+            close_batch
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

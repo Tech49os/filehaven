@@ -196,3 +196,47 @@ pub struct BatchView {
     /// defer_count ≥ 3 的 fileId（排最后并标注）
     pub deferred_badge: Vec<i64>,
 }
+
+/// 一次人工判定（`decide` 入参）
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecideReq {
+    pub file_id: i64,
+    pub batch_id: i64,
+    pub dir_id: Option<i64>,
+    /// accepted | changed | deferred | parked
+    pub decision: String,
+    /// recommended | user_changed | user_picked | new_dir
+    pub origin: String,
+    pub confidence: Option<f64>,
+    pub reason: Option<String>,
+    pub note: Option<String>,
+}
+
+/// 判定回执：前端只靠它更新计数与卡片，不重拉整批
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecideAck {
+    pub file_id: i64,
+    pub status: String,
+    /// 本批已确认份数（accepted + changed）
+    pub confirmed: i64,
+    pub target_rel_path: Option<String>,
+    pub remaining_in_pool: i64,
+}
+
+/// 关批次回执
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseAck {
+    /// 本次回池的份数
+    pub closed: usize,
+    pub remaining_in_pool: i64,
+}
+
+/// 启动/写操作后刷新用的空忙态占位（前端不显示，只用于命令出参一致）
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OkAck {
+    pub ok: bool,
+}

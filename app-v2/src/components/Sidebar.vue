@@ -2,28 +2,52 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from './AppIcon.vue'
-import { useDataStore } from '../stores/data'
+import { useAppStore } from '../stores/app'
 
 const route = useRoute()
 const router = useRouter()
-const data = useDataStore()
+const app = useAppStore()
 
-const items = computed(() => [
-  { path: '/main/dashboard', label: '概览', icon: 'dashboard' },
-  { path: '/main/browse', label: '分类浏览', icon: 'folder' },
+interface NavItem {
+  path: string
+  label: string
+  icon: string
+  badge?: number
+  /** 角标为 0 时也显示（待迁移/待定区需要让用户看到 0） */
+  alwaysBadge?: boolean
+}
+
+const items = computed<NavItem[]>(() => [
+  { path: '/workspace', label: '整理台', icon: 'dashboard' },
   {
-    path: '/main/pending',
-    label: '待确认',
-    icon: 'clock',
-    badge: data.pendingFiles.length,
+    path: '/migration',
+    label: '待迁移',
+    icon: 'layers',
+    badge: app.pendingMigration,
+    alwaysBadge: true,
   },
-  { path: '/main/logs', label: '迁移记录', icon: 'list' },
-  { path: '/main/settings', label: '设置', icon: 'settings' },
+  { path: '/browser', label: '浏览', icon: 'folder' },
+  {
+    path: '/parked',
+    label: '待定区',
+    icon: 'clock',
+    badge: app.parkedCount,
+    alwaysBadge: true,
+  },
+  { path: '/settings', label: '设置', icon: 'settings' },
 ])
 
+const isOn = (p: string) => route.path === p || route.path.startsWith(`${p}/`)
+
 function go(p: string) {
-  router.push(p)
+  if (route.path !== p) void router.push(p)
 }
+
+const model = computed(() => app.modelStatus)
+const modelTip = computed(() => {
+  if (model.value.reachable) return `模型已就绪：${model.value.model ?? '未知'}`
+  return '模型未连接，目录建议会降级为手动'
+})
 </script>
 
 <template>
@@ -34,12 +58,18 @@ function go(p: string) {
         v-for="it in items"
         :key="it.path"
         class="nav"
-        :class="{ on: route.path === it.path }"
+        :class="{ on: isOn(it.path) }"
+        :aria-current="isOn(it.path) ? 'page' : undefined"
         @click="go(it.path)"
       >
         <AppIcon :name="it.icon" :size="16" />
         <span class="lbl">{{ it.label }}</span>
-        <span v-if="it.badge" class="badge">{{ it.badge }}</span>
+        <span
+          v-if="it.alwaysBadge || (it.badge ?? 0) > 0"
+          class="badge"
+          :class="{ zero: (it.badge ?? 0) === 0 }"
+          >{{ it.badge ?? 0 }}</span
+        >
       </button>
     </nav>
 
@@ -47,9 +77,13 @@ function go(p: string) {
       <div class="root">
         <AppIcon name="drive" :size="14" />
         <div class="path">
-          <div class="p1 ellipsis">{{ data.settings.rootName }}</div>
-          <div class="p2 ellipsis">{{ data.settings.rootPath }}</div>
+          <div class="p1 ellipsis">{{ app.archiveRoot ?? '未设置归档区' }}</div>
+          <div class="p2 ellipsis">{{ app.sourceRoots.length }} 个源区</div>
         </div>
+      </div>
+      <div class="model" :title="modelTip">
+        <i class="dot" :class="{ on: model.reachable }" />
+        <span class="mtext ellipsis">{{ modelTip }}</span>
       </div>
     </div>
   </aside>
@@ -64,7 +98,7 @@ function go(p: string) {
   display: flex;
   flex-direction: column;
   padding: 10px 10px 0;
-  backdrop-filter: blur(22px);
+  backdrop-filter: blur(30px) saturate(180%);
 }
 
 .group-title {
@@ -92,6 +126,9 @@ nav {
   text-align: left;
   transition: background 0.12s ease;
   min-height: 32px;
+  background: transparent;
+  border: 0;
+  cursor: default;
 }
 .nav:hover {
   background: var(--c-hover);
@@ -100,6 +137,11 @@ nav {
   background: var(--c-primary-bg);
   color: var(--c-primary);
   font-weight: 500;
+}
+.nav:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 3px var(--c-primary-glow);
 }
 
 .lbl {
@@ -119,11 +161,18 @@ nav {
   align-items: center;
   justify-content: center;
 }
+.badge.zero {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--c-text-2);
+}
 
 .foot {
   margin-top: auto;
   border-top: 0.5px solid var(--c-border);
-  padding: 12px 8px 14px;
+  padding: 12px 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .root {
@@ -144,5 +193,33 @@ nav {
 .p2 {
   font-size: 11px;
   color: var(--c-text-3);
+}
+
+.model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c-text-3);
+  flex: 0 0 7px;
+}
+.dot.on {
+  background: var(--c-success);
+  box-shadow: 0 0 0 3px var(--c-success-bg);
+}
+.mtext {
+  font-size: 11px;
+  color: var(--c-text-2);
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
