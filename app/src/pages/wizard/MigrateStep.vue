@@ -5,7 +5,7 @@ import SafetyBanner from '../../components/SafetyBanner.vue'
 import StatCard from '../../components/StatCard.vue'
 import { executeMigration } from '../../core/migrator'
 import { isDesktop, migrateFiles } from '../../core/desktop'
-import type { MigrationPlan } from '../../core/types'
+import { buildPlans } from '../../core/plan'
 import { useDataStore } from '../../stores/data'
 import { fileHandleMap, getRootHandle, useWizardStore } from '../../stores/wizard'
 
@@ -18,48 +18,7 @@ const totalCount = ref(0)
 const currentName = ref('')
 const stage = ref('')
 
-/** 组装迁移计划：待确认的文件暂不迁移 */
-const plans = computed<MigrationPlan[]>(() => {
-  const seen = new Set<string>()
-  return data.files.map((f) => {
-    const cat = data.categories.find((c) => c.id === f.categoryId)
-    const parent = cat?.parentId
-      ? data.categories.find((c) => c.id === cat.parentId)
-      : cat
-    const dirName = parent
-      ? cat && cat.parentId
-        ? `${parent.name}\\${cat.name}`
-        : parent.name
-      : ''
-    let targetName = f.suggestedName || f.name
-    const deferred = !cat || f.needReview
-
-    let conflict = false
-    if (!deferred) {
-      const key = `${dirName}\\${targetName}`
-      if (seen.has(key)) {
-        conflict = true
-        const dot = targetName.lastIndexOf('.')
-        const base = dot > 0 ? targetName.slice(0, dot) : targetName
-        const ext = dot > 0 ? targetName.slice(dot) : ''
-        let i = 1
-        while (seen.has(`${dirName}\\${base}_${i}${ext}`)) i++
-        targetName = `${base}_${i}${ext}`
-      }
-      seen.add(`${dirName}\\${targetName}`)
-    }
-
-    return {
-      fileId: f.id,
-      fileName: f.name,
-      sourcePath: f.path,
-      targetDir: dirName || '（未分类）',
-      targetName,
-      conflict,
-      deferred,
-    }
-  })
-})
+const plans = computed(() => buildPlans(data.files, data.categories))
 
 const active = computed(() => plans.value.filter((p) => !p.deferred))
 const deferredPlans = computed(() => plans.value.filter((p) => p.deferred))
