@@ -1,0 +1,47 @@
+/* ============================================================
+   毛玻璃工具类（P1 用 CSS 毛玻璃，Mica 留 P4）
+   可读性硬约束：毛玻璃区文字必须加底衬或描边
+   ============================================================ */
+
+.glass {
+  background: var(--c-sidebar);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+}
+
+/* 毛玻璃上的文字底衬：保证深浅壁纸下都能读 */
+.glass-text {
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+/* 毛玻璃上的浮层/浮条（命令条、待迁移浮条） */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 0.5px solid var(--c-border-strong);
+  box-shadow: var(--sh-card);
+}
+
+/* 焦点环：Apple 蓝 2px 外发光 */
+.focus-ring {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--c-primary-glow);
+}
+
+/* 列表卡片不用毛玻璃（性能与可读性双输） */
+.list-surface {
+  background: var(--c-surface);
+  border: 0.5px solid var(--c-border);
+  border-radius: var(--r-card);
+}
+
+/* 正文可读性底线：≥13px / 行高 1.6 */
+.readable {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--c-text);
+}

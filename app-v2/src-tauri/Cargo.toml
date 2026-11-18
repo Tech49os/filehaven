@@ -1,0 +1,40 @@
+[package]
+name = "filemanager-v2"
+version = "0.3.0-alpha.1"
+description = "本地智能文件归档客户端 v2"
+edition = "2021"
+rust-version = "1.77"
+
+[features]
+# 用于生产构建（不带 devServer 时走自定义协议），勿删
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+walkdir = "2"
+rfd = "0.15"
+base64 = "0.22"
+percent-encoding = "2"
+# 目录名超长截断的哈希后缀（详设 §7.3 第 4 条）
+md5 = "0.7"
+# 本地大模型调用（绕开 WebView 的 CORS 限制，见 llm.rs）
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# SQLite：bundled 编静态库，不依赖本机 dll
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

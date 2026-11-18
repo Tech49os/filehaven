@@ -1,0 +1,26 @@
+[
+  { "input": "安全检查", "cleaned": "安全检查", "valid": true },
+  { "input": " 安全生产 ", "cleaned": "安全生产", "valid": true },
+  { "input": "项目:报告", "cleaned": "项目_报告", "valid": true },
+  { "input": "a*b?c", "cleaned": "a_b_c", "valid": true },
+  { "input": "报告...", "cleaned": "报告", "valid": true },
+  { "input": "...报告", "cleaned": "报告", "valid": true },
+  { "input": "...", "cleaned": "", "valid": false, "reason": "目录名不能为空" },
+  { "input": "   ", "cleaned": "", "valid": false, "reason": "目录名不能为空" },
+  { "input": "a___b", "cleaned": "a_b", "valid": true },
+  { "input": "CON", "cleaned": "_CON", "valid": true },
+  { "input": "com1", "cleaned": "_com1", "valid": true },
+  { "input": "con.txt", "cleaned": "_con.txt", "valid": true },
+  { "input": "2026年度安全检查报告", "cleaned": "2026年度安全检查报告", "valid": true },
+  { "input": "智能工厂（二期）", "cleaned": "智能工厂（二期）", "valid": true },
+  {
+    "input": "安全生产管理制度汇编与应急预案演练记录汇总材料归档说明文件整理清单及附件目录索引与责任分工与考核办法与培训计划与检查记录与整改通知与验收报告",
+    "cleaned": "安全生产管理制度汇编与应急预案演练记录汇总材料归档说明文件整理清单及附件目录索引与责任分工与考核办法与_fdae6014",
+    "valid": true
+  },
+  { "input": "报告:2026", "cleaned": "报告_2026", "valid": true },
+  { "input": "a.b.c", "cleaned": "a.b.c", "valid": true },
+  { "input": "制表符\t名", "cleaned": "制表符_名", "valid": true },
+  { "input": "  .hidden  ", "cleaned": "hidden", "valid": true },
+  { "input": "安全/检查", "cleaned": "安全_检查", "valid": true }
+]
