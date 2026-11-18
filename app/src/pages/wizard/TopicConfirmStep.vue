@@ -80,6 +80,8 @@ const sections = computed<FileSec[]>(() => {
 })
 
 const fileCount = computed(() => sections.value.reduce((n, s) => n + s.ids.length, 0))
+/** 工具栏右上角的份数：未归类面板走的是目录分组，得用未归类的总数 */
+const shownCount = computed(() => (sel.value === 'un' ? ungrouped.value : fileCount.value))
 
 const domainHint = computed(() => {
   if (w.domainSource === 'llm')
@@ -266,7 +268,7 @@ async function regen() {
             <span v-if="curTopic?.weakReason" class="tc-tag">
               {{ curTopic.weakReason === 'who' ? '人名 / 单位名' : '只说明文件性质' }}
             </span>
-            <span class="tc-count">{{ fileCount }} 份文件</span>
+            <span class="tc-count">{{ shownCount }} 份文件</span>
 
             <div class="tc-acts">
               <template v-if="curDomain">
@@ -371,6 +373,7 @@ async function regen() {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 .tc-head {
   flex: 0 0 auto;
@@ -464,10 +467,15 @@ async function regen() {
   flex: 1;
   min-height: 0;
   display: grid;
+  /* minmax(0,1fr)：内容再多也不许把这一行撑出窗口高度，否则整页会跟着长 */
   grid-template-columns: 250px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
 }
 .tc-side {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border-right: 0.5px solid var(--c-border);
   background: var(--c-titlebar);
 }
