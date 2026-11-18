@@ -28,6 +28,12 @@ import {
   reassign,
   type Proposal,
 } from '../core/emergence/proposal'
+import {
+  buildProposalFromSaved,
+  toSavedPlan,
+  type SavedPlan,
+} from '../core/emergence/archive'
+import { dbGet, dbSet } from '../core/db'
 import type {
   AppMode,
   FileItem,
@@ -108,6 +114,11 @@ export const useWizardStore = defineStore('wizard', {
      * 而 ProposalTopic.samples 只留了 5 个样本，所以单独存一份索引。
      */
     fileIndex: {} as Record<string, string>,
+    /**
+     * 上次确认过的方案存档。有它就能跳过「重新生成 + 重调一遍」，
+     * 直接沿用同一套类目——这是把工具从「每次重来」变成「越用越顺」的关键。
+     */
+    savedPlan: null as SavedPlan | null,
     cancelled: { cancelled: false },
     scannedCount: 0,
     skippedCount: 0,
@@ -399,6 +410,7 @@ export const useWizardStore = defineStore('wizard', {
       data.setResult(applied.files, applied.categories)
       const byKind: Record<string, number> = {}
       for (const f of applied.files) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1
+      void this.savePlan()
       this.summary = {
         categories: applied.categories,
         fileCount: applied.files.length,
@@ -407,6 +419,65 @@ export const useWizardStore = defineStore('wizard', {
         byKind,
       }
       this.next()
+    },
+
+    /**
+     * 读上次的方案存档（程序启动时调一次）。
+     * 读不到不算错——第一次用本来就没有存档。
+     */
+    async loadSavedPlan() {
+      try {
+        const s = await dbGet<SavedPlan>('savedPlan')
+        this.savedPlan = s && Array.isArray(s.topics) && s.topics.length ? s : null
+      } catch {
+        this.savedPlan = null
+      }
+    },
+
+    /**
+     * 沿用存档：直接按老类目认领这一批文件，不跑候选抽取、不跑模型。
+     *
+     * 适用场景：
+     *  · 上次整理完，这周又来了一批新文件 → 新文件自动落进老类目
+     *  · 上次的方案你花时间调过，不想每次重调
+     * 返回是否沿用成功；失败时调用方提示「存档没匹配到任何文件，请重新生成」。
+     */
+    useSavedPlan(): boolean {
+      if (!this.savedPlan) return false
+      const p = buildProposalFromSaved(rawFiles, this.savedPlan)
+      if (!p || p.topics.length === 0) return false
+      this.proposal = p
+      this.whoExcluded = []
+      this.ai = {
+        ...emptyAi(),
+        phase: 'done',
+        done: rawFiles.length,
+        total: rawFiles.length,
+        current: `沿用上次方案：${p.topics.length} 个分类，${p.ungroupedIds.length} 份待指定`,
+      }
+      return true
+    },
+
+    /** 把当前提案存成下次可沿用的方案（确认时自动调） */
+    async savePlan() {
+      if (!this.proposal) return
+      const plan = toSavedPlan(this.proposal, this.archivePath)
+      this.savedPlan = plan
+      try {
+        await dbSet('savedPlan', plan)
+      } catch {
+        // 存不下不影响本轮整理，下次重新调一遍而已
+      }
+    },
+
+    /** 丢掉存档（用户觉得这套类目不好用了） */
+    async forgetSavedPlan() {
+      this.savedPlan = null
+      try {
+        await dbSet('savedPlan', null)
+      } catch {
+        /* 忽略 */
+      }
     },
 
     /** 中止本轮归纳（已判完的保留，剩余按规则结果收尾） */

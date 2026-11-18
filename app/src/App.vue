@@ -18,6 +18,12 @@ const data = useDataStore()
  *       /?auto=main#/main/logs → 直接看迁移记录
  */
 onMounted(async () => {
+  // 先恢复持久化的东西，再决定进哪一步。
+  // 注意 loadSettings 之前从来没被调用过——设置存进 IndexedDB 却从不读回来，
+  // 表现就是「改完 Ollama 地址，重启程序又变回去」。
+  await data.loadSettings()
+  await w.loadSavedPlan()
+
   const auto = new URLSearchParams(location.search).get('auto')
   if (!auto || auto === '1') return
 
