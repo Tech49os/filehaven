@@ -100,6 +100,18 @@ pub struct ScanProgress {
     pub skipped: usize,
 }
 
+/// 目录建议阶段事件载荷（`suggest-stage`）
+///
+/// 只报阶段名与已等毫秒数 —— 模型什么时候返回说不准，报百分比就是撒谎。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestStage {
+    /// sampling | waiting | validating
+    pub stage: String,
+    pub elapsed_ms: u64,
+    pub note: String,
+}
+
 /// 一次扫描的汇总（前端用它显示「已跳过 N 份非资料型文件」，不许静默）
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

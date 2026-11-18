@@ -625,6 +625,26 @@ mod corpus {
         assert_eq!(get("skipped"), 1);
         assert_eq!(get("queued"), 0);
     }
+
+    // T5.3 真实语料抽样：六类各留 ≤15 份，合并后正好取满 60
+    #[test]
+    fn sample_real_corpus_hits_cap() {
+        let files: Vec<crate::suggest_dirs::SampleInput> = load()
+            .into_iter()
+            .map(|f| crate::suggest_dirs::SampleInput {
+                name: f.name,
+                kind: tag::normalize_kind(&f.kind).to_string(),
+                source: "Desktop".into(),
+                mtime: f.mtime,
+            })
+            .collect();
+        let picked = crate::suggest_dirs::sample(&files, false);
+        println!("真实语料抽样 {}/{}", picked.len(), files.len());
+        assert_eq!(picked.len(), crate::suggest_dirs::MAX_SAMPLES);
+        // 序号必须从 1 连到 60，prompt 里的 samples 才对得上
+        assert_eq!(picked.first().unwrap().no, 1);
+        assert_eq!(picked.last().unwrap().no, 60);
+    }
 }
 
 // ================================================================ 模型
@@ -641,6 +661,16 @@ mod llm {
         assert!(!m::reachable(base, Duration::from_millis(300)));
         let e = m::generate(base, "x", "hi", Duration::from_millis(300)).unwrap_err();
         assert_eq!(e.code, MODEL_DOWN);
+    }
+
+    // think 只对思考模型传：给 qwen2.5 传会被 Ollama 400 拒掉
+    #[test]
+    fn think_only_for_thinking_models() {
+        assert!(m::supports_think("qwen3.5:9b"));
+        assert!(m::supports_think("qwen3:4b-q4_K_M"));
+        assert!(m::supports_think("deepseek-r1:8b"));
+        assert!(!m::supports_think("qwen2.5:7b"));
+        assert!(!m::supports_think("llama3.1:8b"));
     }
 }
 
@@ -1135,6 +1165,365 @@ mod decide {
         db::set_setting(&conn, "archive_root", "D:/归档").unwrap();
         let e = db::accept_dirs(&conn, &["...".to_string()]).unwrap_err();
         assert_eq!(e.code, DIR_INVALID);
+    }
+}
+
+// ================================================================ 目录建议
+
+mod suggest_dirs {
+    use crate::error::MODEL_BAD_OUTPUT;
+    use crate::suggest_dirs as sd;
+
+    fn one(name: &str, kind: &str, mtime: i64) -> sd::SampleInput {
+        sd::SampleInput {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            source: "桌面".to_string(),
+            mtime,
+        }
+    }
+
+    fn raw(json: &str) -> sd::RawSchemes {
+        sd::parse(json).unwrap()
+    }
+
+    // ---------------- T5.3 版本族去重
+
+    // T5.3 版本标记剥离：四种常见写法都要认得
+    #[test]
+    fn strip_version_suffix_handles_common_marks() {
+        assert_eq!(sd::strip_version_suffix("04生产工艺设备_初版草稿_完"), "04生产工艺设备");
+        assert_eq!(sd::strip_version_suffix("设计方案_v2"), "设计方案");
+        assert_eq!(sd::strip_version_suffix("采购合同(1)"), "采购合同");
+        assert_eq!(sd::strip_version_suffix("安全检查报告副本"), "安全检查报告");
+        assert_eq!(sd::strip_version_suffix("费率清单-最新"), "费率清单");
+        // 没有版本标记时原样返回，不许把正常名字吃掉
+        assert_eq!(sd::strip_version_suffix("安全检查报告"), "安全检查报告");
+    }
+
+    // T5.3 同族只留 mtime 最大的一份
+    #[test]
+    fn sample_keeps_newest_of_version_family() {
+        let mut files = Vec::new();
+        for fam in 0..5 {
+            for ver in 0..4 {
+                files.push(one(
+                    &format!("项目文件{fam}_v{ver}.docx"),
+                    "word",
+                    1_700_000_000_000 + (fam * 10 + ver) as i64,
+                ));
+            }
+        }
+        let picked = sd::sample(&files, false);
+        assert_eq!(picked.len(), 5, "5 个版本族各剩 1 份");
+        for fam in 0..5 {
+            let hits: Vec<_> = picked
+                .iter()
+                .filter(|s| s.name.contains(&format!("项目文件{fam}")))
+                .collect();
+            assert_eq!(hits.len(), 1);
+            // 该族最大 mtime 是 _v3
+            assert!(hits[0].name.contains("_v3"), "留下的是最新版本：{}", hits[0].name);
+        }
+    }
+
+    // T5.3 上限 60
+    #[test]
+    fn sample_caps_at_sixty() {
+        let files: Vec<_> = (0..200)
+            .map(|i| one(&format!("不同名字{i:03}.docx"), "word", 1_700_000_000_000 + i))
+            .collect();
+        assert!(sd::sample(&files, false).len() <= 60);
+    }
+
+    // T5.3 每桶 ≤15：只有 word 一种类型时，60 个槽位也只能取 15
+    #[test]
+    fn sample_takes_at_most_fifteen_per_kind() {
+        let files: Vec<_> = (0..40)
+            .map(|i| one(&format!("不同名字{i:03}.docx"), "word", 1_700_000_000_000 + i))
+            .collect();
+        assert_eq!(sd::sample(&files, false).len(), 15);
+    }
+
+    // T5.3 少于 10 份直接返回空
+    #[test]
+    fn sample_empty_below_ten_files() {
+        let files: Vec<_> = (0..9)
+            .map(|i| one(&format!("不同名字{i}.docx"), "word", 1_700_000_000_000 + i))
+            .collect();
+        assert!(sd::sample(&files, false).is_empty());
+    }
+
+    // T5.3 换一批：换成最旧的一批，保证两次输入不同
+    #[test]
+    fn sample_force_takes_oldest_first() {
+        let files: Vec<_> = (0..40)
+            .map(|i| one(&format!("不同名字{i:03}.docx"), "word", 1_700_000_000_000 + i))
+            .collect();
+        let a = sd::sample(&files, false);
+        let b = sd::sample(&files, true);
+        assert_eq!(a[0].name, "不同名字039.docx", "默认取最新");
+        assert_eq!(b[0].name, "不同名字000.docx", "换一批取最旧");
+    }
+
+    // ---------------- T5.4 prompt
+
+    // T5.4 没有已有目录时，「已有目录」那行整行不输出
+    #[test]
+    fn prompt_omits_existing_dirs_line_when_empty() {
+        let samples = vec![sd::Sample {
+            no: 1,
+            name: "安全检查报告.docx".into(),
+            kind: "word".into(),
+            source: "桌面".into(),
+            mtime: 0,
+        }];
+        let p = sd::build_prompt(&samples, &[]);
+        assert!(!p.contains("已有"));
+        assert!(p.contains("1|word|桌面|安全检查报告.docx"));
+        assert!(p.contains("只输出 JSON"));
+    }
+
+    // T5.4 有已有目录时带上，不许自造同义目录
+    #[test]
+    fn prompt_lists_existing_dirs_when_present() {
+        let samples = vec![sd::Sample {
+            no: 1,
+            name: "安全检查报告.docx".into(),
+            kind: "word".into(),
+            source: "桌面".into(),
+            mtime: 0,
+        }];
+        let p = sd::build_prompt(&samples, &["安全检查/年度".to_string(), "合同".to_string()]);
+        assert!(p.contains("安全检查/年度"));
+        assert!(p.contains("沿用这些维度"));
+    }
+
+    // ---------------- T5.4 解析容错
+
+    // T5.4 纯 JSON
+    #[test]
+    fn parse_plain_json() {
+        let r = raw(r#"{"schemes":[{"dimension":"按事项","dirs":[{"name":"安全检查","basis":"b","samples":[1,2]}]}]}"#);
+        assert_eq!(r.schemes.len(), 1);
+        assert_eq!(r.schemes[0].dirs[0].name, "安全检查");
+        assert_eq!(r.schemes[0].dirs[0].samples, vec![1, 2]);
+    }
+
+    // T5.4 带 ```json 围栏
+    #[test]
+    fn parse_strips_code_fence() {
+        let r = raw("好的，结果如下：\n```json\n{\"schemes\":[]}\n```\n希望有帮助");
+        assert!(r.schemes.is_empty());
+    }
+
+    // T5.4 尾部逗号
+    #[test]
+    fn parse_tolerates_trailing_comma() {
+        let r = raw(r#"{"schemes":[{"dimension":"按用途","dirs":[],},],}"#);
+        assert_eq!(r.schemes.len(), 1);
+    }
+
+    // T5.4 被截断：给 MODEL_BAD_OUTPUT，不许 panic
+    #[test]
+    fn parse_truncated_is_bad_output() {
+        let e = sd::parse(r#"{"schemes":[{"dimension":"按事项","dirs":[{"name":"安全"#).unwrap_err();
+        assert_eq!(e.code, MODEL_BAD_OUTPUT);
+    }
+
+    // T5.4 模型把 samples 写成字符串也要认（9b 实测高发）
+    #[test]
+    fn parse_accepts_string_samples() {
+        let r = raw(r#"{"schemes":[{"dimension":"按事项","dirs":[{"name":"安全检查","basis":"b","samples":["3","7"]}]}]}"#);
+        assert_eq!(r.schemes[0].dirs[0].samples, vec![3, 7]);
+    }
+
+    // ---------------- T5.5 五条门槛
+    //
+    // 基线：两套各 4 个目录。为什么是 4 而不是 3 —— V2/V3/V4 都是「剔掉一个」，
+    // 若基线只有 3 个，剔一个就掉到 2、触发整份作废，就测不出「只剔该目录」本身。
+
+    const OK: &str = r#"{"schemes":[
+        {"dimension":"按事项","dirs":[
+            {"name":"安全检查","basis":"安全类检查记录","samples":[1,2]},
+            {"name":"采购合同","basis":"合同与采购单据","samples":[3,4]},
+            {"name":"培训台账","basis":"培训签到与计划","samples":[5,6]},
+            {"name":"设备维保","basis":"设备台账与保养单","samples":[13,14]}]},
+        {"dimension":"按文档用途","dirs":[
+            {"name":"制度发布","basis":"正式发布的制度","samples":[7,8]},
+            {"name":"汇报材料","basis":"对上汇报的 PPT","samples":[9,10]},
+            {"name":"评审记录","basis":"评审会纪要","samples":[11,12]},
+            {"name":"台账报表","basis":"周期性报表","samples":[15,16]}]}]}"#;
+
+    // V1 正例：两套各 4 个、维度不同 → 通过
+    #[test]
+    fn v1_accepts_two_distinct_dimensions() {
+        let s = sd::validate(raw(OK), 60).unwrap();
+        assert_eq!(s.option_a.len(), 4);
+        assert_eq!(s.option_b.len(), 4);
+        assert_eq!(s.dimension_a, "按事项");
+        assert_eq!(s.option_a[0].file_count, 2);
+    }
+
+    // V1 负例：两套维度相同 → 整份作废
+    #[test]
+    fn v1_rejects_same_dimension() {
+        let json = OK.replace("按文档用途", "按事项");
+        let e = sd::validate(raw(&json), 60).unwrap_err();
+        assert_eq!(e.code, MODEL_BAD_OUTPUT);
+        assert!(e.message.contains("V1"), "{}", e.message);
+    }
+
+    // V1 负例：一套只有 2 个目录 → 整份作废
+    #[test]
+    fn v1_rejects_too_few_dirs() {
+        let json = r#"{"schemes":[
+            {"dimension":"按事项","dirs":[
+                {"name":"安全检查","basis":"a","samples":[1,2]},
+                {"name":"采购合同","basis":"b","samples":[3,4]}]},
+            {"dimension":"按用途","dirs":[
+                {"name":"制度发布","basis":"a","samples":[7,8]},
+                {"name":"汇报材料","basis":"b","samples":[9,10]},
+                {"name":"评审记录","basis":"c","samples":[11,12]}]}]}"#;
+        let e = sd::validate(raw(json), 60).unwrap_err();
+        assert_eq!(e.code, MODEL_BAD_OUTPUT);
+        assert!(e.message.contains("V1"), "{}", e.message);
+    }
+
+    // V2 负例：samples 只有 1 个 → 剔掉该目录，首套余 3 个仍可用
+    #[test]
+    fn v2_drops_dir_with_single_sample() {
+        let json = OK.replace(r#""samples":[5,6]"#, r#""samples":[5]"#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 3);
+        assert!(s.option_a.iter().all(|d| d.name != "培训台账"));
+    }
+
+    // V2 负例2：序号越界（样本只有 20 份却引用 99）→ 剔掉
+    #[test]
+    fn v2_drops_out_of_range_index() {
+        let json = OK.replace(r#""samples":[7,8]"#, r#""samples":[99,100]"#);
+        let s = sd::validate(raw(&json), 20).unwrap();
+        assert_eq!(s.option_b.len(), 3, "越界那条被剔掉，余 3 条仍可保留");
+        assert!(s.option_b.iter().all(|d| d.name != "制度发布"));
+    }
+
+    // V2 负例3：序号 0（模型从 0 开始数）也算越界 —— 提示词要求从 1 开始
+    #[test]
+    fn v2_drops_zero_index() {
+        let json = OK.replace(r#""samples":[5,6]"#, r#""samples":[0,0]"#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert!(s.option_a.iter().all(|d| d.name != "培训台账"));
+    }
+
+    // V3 负例：目录名就是泛词 → 剔除
+    #[test]
+    fn v3_drops_generic_dir_name() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"其他""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 3);
+        assert!(s.option_a.iter().all(|d| d.name != "其他"));
+    }
+
+    // V3 正例：泛词只是名字的一部分（"其他费用凭证"）应当保留
+    #[test]
+    fn v3_keeps_names_containing_generic_word() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"其他费用凭证""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 4);
+    }
+
+    // V4 负例：名字含非法字符（清洗后与原名不一致）→ 剔除
+    #[test]
+    fn v4_drops_name_needing_clean() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"培训/台账""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert!(s.option_a.iter().all(|d| d.name != "培训/台账"));
+        assert_eq!(s.option_a.len(), 3);
+    }
+
+    // V4 负例2：名字 1 个字 → 剔除
+    #[test]
+    fn v4_drops_too_short_name() {
+        let json = OK.replace(r#""name":"培训台账""#, r#""name":"训""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 3);
+    }
+
+    // V4 负例3：超过 20 字 → 剔除
+    #[test]
+    fn v4_drops_too_long_name() {
+        let long = "超".repeat(21);
+        let json = OK.replace(r#""name":"培训台账""#, &format!(r#""name":"{long}""#));
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_a.len(), 3);
+    }
+
+    // V5 负例：两套目录名重复率 ≥50% → 整份作废
+    #[test]
+    fn v5_rejects_overlapping_schemes() {
+        let json = r#"{"schemes":[
+            {"dimension":"按事项","dirs":[
+                {"name":"安全检查","basis":"a","samples":[1,2]},
+                {"name":"采购合同","basis":"b","samples":[3,4]},
+                {"name":"培训台账","basis":"c","samples":[5,6]}]},
+            {"dimension":"按用途","dirs":[
+                {"name":"安全检查","basis":"a","samples":[7,8]},
+                {"name":"采购合同","basis":"b","samples":[9,10]},
+                {"name":"评审记录","basis":"c","samples":[11,12]}]}]}"#;
+        let e = sd::validate(raw(json), 60).unwrap_err();
+        assert_eq!(e.code, MODEL_BAD_OUTPUT);
+        assert!(e.message.contains("V5"), "{}", e.message);
+    }
+
+    // V5 正例：重复 1/4 = 25% < 50% 通过
+    #[test]
+    fn v5_accepts_low_overlap() {
+        let json = OK.replace(r#""name":"制度发布""#, r#""name":"安全检查""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert_eq!(s.option_b.len(), 4);
+    }
+
+    // 组合：V3 把一套剔到只剩 2 个 → 整份作废
+    #[test]
+    fn removing_to_two_dirs_voids_whole_suggestion() {
+        let json = OK
+            .replace(r#""name":"培训台账""#, r#""name":"资料""#)
+            .replace(r#""name":"设备维保""#, r#""name":"杂项""#);
+        let e = sd::validate(raw(&json), 60).unwrap_err();
+        assert_eq!(e.code, MODEL_BAD_OUTPUT);
+        assert!(e.message.contains("V1"), "剔完剩 2 个按 V1 复审作废：{}", e.message);
+    }
+
+    // 依据为空时补默认文案，不让前端出现空「依据」
+    #[test]
+    fn empty_basis_gets_fallback() {
+        let json = OK.replace(r#""basis":"安全类检查记录""#, r#""basis":"""#);
+        let s = sd::validate(raw(&json), 60).unwrap();
+        assert!(!s.option_a[0].basis.is_empty());
+    }
+
+    // 少于 10 份直接报 TOO_FEW_FILES，绝不发网络请求（base 指向死端口）
+    #[test]
+    fn run_rejects_too_few_files_before_network() {
+        let files: Vec<_> = (0..9)
+            .map(|i| one(&format!("不同名字{i}.docx"), "word", 1_700_000_000_000 + i))
+            .collect();
+        let mut stages: Vec<String> = Vec::new();
+        let e = sd::run(
+            sd::RunInput {
+                base: "http://127.0.0.1:9",
+                model: "x",
+                files: &files,
+                existing_dirs: &[],
+                oldest_first: false,
+                timeout: std::time::Duration::from_millis(100),
+            },
+            &mut |s, _| stages.push(s.to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::TOO_FEW_FILES);
+        assert!(stages.is_empty(), "连 sampling 阶段都不该报：{stages:?}");
     }
 }
 

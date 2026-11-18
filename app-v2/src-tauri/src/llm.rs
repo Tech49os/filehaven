@@ -22,6 +22,17 @@ pub fn reachable(base: &str, timeout: Duration) -> bool {
         .is_ok()
 }
 
+/// 思考模型判定：只有这几个家族能接受 `think` 参数
+///
+/// 对非思考模型显式传 `think` 会被 Ollama 以 400 拒掉（"does not support thinking"），
+/// 那会变成一次莫名其妙的功能不可用 —— 所以按模型名白名单传，而不是一律传。
+pub fn supports_think(model: &str) -> bool {
+    let m = model.to_lowercase();
+    ["qwen3", "deepseek-r1", "magistral", "gpt-oss", "qwq", "glm-4.5"]
+        .iter()
+        .any(|k| m.contains(k))
+}
+
 /// 一次非流式生成。`format=json` 让模型只吐 JSON。
 pub fn generate(
     base: &str,
@@ -30,13 +41,18 @@ pub fn generate(
     timeout: Duration,
 ) -> Result<String, CmdError> {
     let url = format!("{}/api/generate", base.trim_end_matches('/'));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "prompt": prompt,
         "stream": false,
         "format": "json",
         "options": { "num_ctx": 8192, "temperature": 0.3 }
     });
+    if supports_think(model) {
+        // 思考模型开着 think 会把 JSON 任务拖成 10 倍耗时（实测 9b 超 180s 全超时），
+        // 且思考内容会挤占输出额度。只要结论，不要推理过程。
+        body["think"] = serde_json::json!(false);
+    }
 
     let res = agent(timeout)
         .post(&url)
@@ -69,7 +85,18 @@ pub fn generate(
 fn classify_transport_error(e: &ureq::Error) -> CmdError {
     let msg = e.to_string();
     let low = msg.to_lowercase();
-    if low.contains("timed out") || low.contains("timeout") {
+    // 读超时和连不上必须分开：前者是「模型太慢」，后者是「模型没起」，
+    // 前端文案与用户该做的事完全不同（等一会儿重试 vs 去开 Ollama）。
+    // Windows 上读超时是 WSAETIMEDOUT(10060)，报错文案是中文「没有正确答复」，
+    // 拿英文关键词判会把它误判成 MODEL_DOWN —— 实测踩过。
+    let timeout_markers = [
+        "timed out",
+        "timeout",
+        "10060",
+        "没有正确答复",
+        "超时",
+    ];
+    if timeout_markers.iter().any(|m| low.contains(m)) {
         CmdError::new(MODEL_TIMEOUT, format!("模型响应超时：{msg}"))
     } else {
         CmdError::new(MODEL_DOWN, format!("无法连接模型服务：{msg}"))

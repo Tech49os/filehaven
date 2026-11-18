@@ -894,6 +894,37 @@ pub fn pool_rows(conn: &Connection) -> Result<Vec<crate::model::FileRow>, CmdErr
     Ok(out)
 }
 
+/// 目录建议的抽样输入：除 skipped / missing 之外的所有文件（详设 §7.6）
+///
+/// 已迁移的也算进来 —— 它们同样是「这个人在管什么」的证据，
+/// 只是不再需要被整理。`source` 取路径最后两层，用来告诉模型文件原本散在哪。
+pub fn suggest_input_rows(
+    conn: &Connection,
+) -> Result<Vec<crate::suggest_dirs::SampleInput>, CmdError> {
+    let mut stmt = conn.prepare(
+        "SELECT name, kind, abs_path, mtime FROM files
+         WHERE status NOT IN ('skipped','missing')
+         ORDER BY mtime DESC, id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let name: String = r.get(0)?;
+        let kind: String = r.get(1)?;
+        let abs: String = r.get(2)?;
+        let mtime: i64 = r.get(3)?;
+        Ok(crate::suggest_dirs::SampleInput {
+            name,
+            kind,
+            source: crate::suggest_dirs::source_of(&abs),
+            mtime,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub fn file_rows(conn: &Connection, ids: &[i64]) -> Result<Vec<crate::model::FileRow>, CmdError> {
     let mut out = Vec::new();
     let mut stmt = conn.prepare(&format!("SELECT {FILE_COLS} FROM files WHERE id=?1"))?;

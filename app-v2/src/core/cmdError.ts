@@ -15,6 +15,8 @@ export const ERR = {
   MODEL_DOWN: 'MODEL_DOWN',
   MODEL_TIMEOUT: 'MODEL_TIMEOUT',
   MODEL_BAD_OUTPUT: 'MODEL_BAD_OUTPUT',
+  /** 文件太少（<10 份），不请求模型 */
+  TOO_FEW_FILES: 'TOO_FEW_FILES',
   BAD_TRANSITION: 'BAD_TRANSITION',
   DIR_EXISTS: 'DIR_EXISTS',
   DIR_INVALID: 'DIR_INVALID',
@@ -74,6 +76,8 @@ export function humanize(e: CmdError): string {
       return '模型响应超时，可以先手动建目录'
     case ERR.MODEL_BAD_OUTPUT:
       return '模型这次没给出可用的方案'
+    case ERR.TOO_FEW_FILES:
+      return e.message || '文件太少了，先多扫一些再归纳'
     case ERR.FILE_CHANGED:
       return '文件在标注后被改动过'
     default:

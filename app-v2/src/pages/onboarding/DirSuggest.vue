@@ -76,9 +76,14 @@ async function load(force: boolean) {
   try {
     const s = await ipc.suggestDirs(force)
     if (cancelled) return
+    // 列标题带上维度名：「方案 A · 按事项」才看得出两套差在哪
+    const title = (base: string, dim?: string) => {
+      const d = (dim ?? '').trim()
+      return d ? `${base} · ${d}` : base
+    }
     columns.value = [
-      { key: 'A', title: '方案 A', dirs: s.optionA ?? [] },
-      { key: 'B', title: '方案 B', dirs: s.optionB ?? [] },
+      { key: 'A', title: title('方案 A', s.dimensionA), dirs: s.optionA ?? [] },
+      { key: 'B', title: title('方案 B', s.dimensionB), dirs: s.optionB ?? [] },
     ].filter((c) => c.dirs.length > 0) as typeof columns.value
     if (columns.value.length === 0) {
       manual.value = true
@@ -206,7 +211,9 @@ onUnmounted(() => {
                 @change="toggle(d.name)"
               />
               <span class="dname">{{ d.name }}</span>
-              <span class="dcount">{{ d.fileCount }} 份</span>
+              <!-- 说清这是「样本里的支撑数」而不是将来会搬进去的份数：
+                   模型往往只列举 2 个序号，写成「2 份」会让人误以为只有 2 个文件 -->
+              <span class="dcount">样本 {{ d.fileCount }} 份</span>
               <button
                 class="basis-btn"
                 :aria-expanded="expanded.has(d.name)"

@@ -5,3 +5,5 @@ src-tauri/gen/
 *.log
 *.bmp
 *.png
+test/suggest-run*.json
+test/degrade-*.json

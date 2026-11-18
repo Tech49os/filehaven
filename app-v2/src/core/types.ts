@@ -125,8 +125,13 @@ export interface DirSuggestion {
   /** 方案组：每组一个方案名 */
   optionA: SuggestedDir[]
   optionB: SuggestedDir[]
+  /** 两套方案的维度名（如「按事项」/「按文档用途」），列标题显示 */
+  dimensionA: string
+  dimensionB: string
   model: string
   elapsedMs: number
+  /** 实际送模型的样本数 */
+  sampleCount?: number
 }
 
 export interface SuggestedDir {

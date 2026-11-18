@@ -4,6 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -16,6 +18,7 @@ mod plan;
 mod recommend;
 mod scan;
 mod state;
+mod suggest_dirs;
 mod tag;
 
 #[cfg(test)]
@@ -475,6 +478,114 @@ async fn accept_dirs(app: AppHandle, names: Vec<String>) -> Result<Vec<ArchiveDi
     index::accept_dirs(&conn, &names)
 }
 
+// ---------------------------------------------------------------- 目录建议
+
+/// 模型请求超时（详设 §7.6：180s）
+pub const SUGGEST_TIMEOUT_SECS: u64 = 180;
+/// 等待期心跳间隔：只报「已等多少秒」，不报假百分比
+const SUGGEST_HEARTBEAT_MS: u64 = 5_000;
+
+/// 目录建议：抽样 → 本地模型 → 五条门槛
+///
+/// 失败一律返回 `CmdError`（详设 §6.3 第 12 条），前端按 `code` 降级到手写。
+/// 整个流程（含 180s 等待）都**不持数据库锁**（铁律见 `state.rs`）。
+#[tauri::command]
+async fn suggest_dirs(
+    app: AppHandle,
+    force: Option<bool>,
+) -> Result<suggest_dirs::DirSuggestion, CmdError> {
+    let state = app.state::<AppState>();
+    let (base, model, files, existing) = {
+        let conn = lock_db(&state)?;
+        let base = setting(&conn, "ollama_base").unwrap_or_else(|| llm::DEFAULT_BASE.to_string());
+        let model = setting(&conn, "ollama_model").unwrap_or_else(|| llm::DEFAULT_MODEL.to_string());
+        let files = index::suggest_input_rows(&conn)?;
+        let existing: Vec<String> = index::list_dirs(&conn)?
+            .into_iter()
+            .map(|d| d.rel_path)
+            .collect();
+        (base, model, files, existing)
+    };
+
+    // 模型没起要立刻说清，别让用户干等 180 秒
+    if !llm::reachable(&base, Duration::from_secs(3)) {
+        return Err(CmdError::new(
+            error::MODEL_DOWN,
+            format!("本地模型未启动（{base} 连不上），先打开 Ollama，或者直接自己写目录"),
+        ));
+    }
+
+    let total = files.len();
+    let _ = app.emit(
+        "suggest-stage",
+        model::SuggestStage {
+            stage: "sampling".into(),
+            elapsed_ms: 0,
+            note: format!("共 {total} 份文件，抽样后送模型"),
+        },
+    );
+
+    // 心跳线程：阻塞请求期间每 5s 补报一次，界面才不会像卡死
+    let stop = Arc::new(AtomicBool::new(false));
+    let hb = {
+        let app = app.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let mut ticks: u32 = 0;
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                ticks += 1;
+                if ticks as u64 % (SUGGEST_HEARTBEAT_MS / 250) == 0 {
+                    let _ = app.emit(
+                        "suggest-stage",
+                        model::SuggestStage {
+                            stage: "waiting".into(),
+                            elapsed_ms: t0.elapsed().as_millis() as u64,
+                            note: String::new(),
+                        },
+                    );
+                }
+            }
+        })
+    };
+
+    let force = force.unwrap_or(false);
+    let stage_app = app.clone();
+    let req = tauri::async_runtime::spawn_blocking(move || {
+        let mut on_stage = |stage: &str, ms: u64| {
+            let _ = stage_app.emit(
+                "suggest-stage",
+                model::SuggestStage {
+                    stage: stage.to_string(),
+                    elapsed_ms: ms,
+                    note: String::new(),
+                },
+            );
+        };
+        suggest_dirs::run(
+            suggest_dirs::RunInput {
+                base: &base,
+                model: &model,
+                files: &files,
+                existing_dirs: &existing,
+                oldest_first: force,
+                timeout: Duration::from_secs(SUGGEST_TIMEOUT_SECS),
+            },
+            &mut on_stage,
+        )
+    })
+    .await;
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = hb.join();
+
+    req.map_err(|e| CmdError::new(error::DB, format!("目录建议线程异常：{e}")))?
+}
+
 /// 池内每份文件算一次候选（挑批与撤销回填共用）
 struct ScoredPool {
     items: Vec<(model::FileRow, Vec<model::Candidate>, bool)>,
@@ -635,10 +746,124 @@ fn run_scan_cli(dir: &str, out: &str) -> i32 {
     }
 }
 
+/// `--suggest <样本json> <输出json> [force]`：不开 GUI 跑一次目录建议（T5.8 验收计时用）
+///
+/// 走的是与界面**完全同一条**管线（`suggest_dirs::run`），
+/// 区别只在于样本来自 fixture 而不是数据库、进度打印到 stderr。
+fn run_suggest_cli(samples: &str, out: &str, force: bool) -> i32 {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        name: String,
+        kind: String,
+        #[serde(default)]
+        size: u64,
+        mtime: i64,
+        path: Option<String>,
+    }
+
+    let text = match std::fs::read_to_string(samples) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("读样本失败：{e}");
+            return 1;
+        }
+    };
+    let raws: Vec<Raw> = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("样本不是 JSON 数组：{e}");
+            return 1;
+        }
+    };
+
+    let files: Vec<suggest_dirs::SampleInput> = raws
+        .into_iter()
+        // 与扫描入库同一口径：压缩包/程序/空文件在库里就是 skipped，
+        // 诊断入口必须一起过滤，否则「系统工具软件」这种目录会凭 ZIP/EXE 混进来
+        .filter(|r| {
+            let kind = tag::normalize_kind(&r.kind);
+            tag::should_pool(&r.name, kind, r.size)
+        })
+        .map(|r| suggest_dirs::SampleInput {
+            name: r.name,
+            kind: tag::normalize_kind(&r.kind).to_string(),
+            source: r.path.as_deref().map(suggest_dirs::source_of).unwrap_or_default(),
+            mtime: r.mtime,
+        })
+        .collect();
+
+    let base = std::env::var("FILEBUTLER_BASE").unwrap_or_else(|_| llm::DEFAULT_BASE.to_string());
+    let model = std::env::var("FILEBUTLER_MODEL").unwrap_or_else(|_| llm::DEFAULT_MODEL.to_string());
+    // 只在诊断入口留的超时旋钮：用来验「超时降级」这一支（界面恒定 180s）
+    let timeout_secs = std::env::var("FILEBUTLER_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(SUGGEST_TIMEOUT_SECS);
+
+    let t0 = Instant::now();
+    let mut on_stage = |stage: &str, ms: u64| eprintln!("[{stage}] {ms}ms");
+    let res = suggest_dirs::run(
+        suggest_dirs::RunInput {
+            base: &base,
+            model: &model,
+            files: &files,
+            existing_dirs: &[],
+            oldest_first: force,
+            timeout: Duration::from_secs(timeout_secs),
+        },
+        &mut on_stage,
+    );
+
+    let payload = match res {
+        Ok(s) => {
+            let names: Vec<String> = s.option_a.iter().map(|d| d.name.clone()).collect();
+            let names_b: Vec<String> = s.option_b.iter().map(|d| d.name.clone()).collect();
+            eprintln!(
+                "成功：{} 份样本 / {}ms\nA({})：{}\nB({})：{}",
+                s.sample_count,
+                s.elapsed_ms,
+                s.dimension_a,
+                names.join("、"),
+                s.dimension_b,
+                names_b.join("、")
+            );
+            serde_json::json!({
+                "ok": true,
+                "wallMs": t0.elapsed().as_millis() as u64,
+                "model": s.model,
+                "sampleCount": s.sample_count,
+                "elapsedMs": s.elapsed_ms,
+                "suggestion": s,
+            })
+        }
+        Err(e) => {
+            eprintln!("失败：[{}] {}", e.code, e.message);
+            serde_json::json!({
+                "ok": false,
+                "wallMs": t0.elapsed().as_millis() as u64,
+                "model": model,
+                "error": { "code": e.code, "message": e.message },
+            })
+        }
+    };
+
+    match std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("写出失败：{e}");
+            1
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 4 && args[1] == "--scan" {
         std::process::exit(run_scan_cli(&args[2], &args[3]));
+    }
+    if args.len() >= 4 && args[1] == "--suggest" {
+        let force = args.get(4).map(|a| a == "force").unwrap_or(false);
+        std::process::exit(run_suggest_cli(&args[2], &args[3], force));
     }
 
     tauri::Builder::default()
@@ -667,6 +892,7 @@ fn main() {
             preview_dir_name,
             create_dir,
             accept_dirs,
+            suggest_dirs,
             next_batch,
             decide,
             undo_decide,

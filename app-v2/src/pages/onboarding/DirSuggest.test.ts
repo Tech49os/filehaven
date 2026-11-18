@@ -24,6 +24,8 @@ const TWO_OPTIONS = {
   optionB: [
     { name: '安全/检查记录', basis: '按业务对象 + 文档类型拆', fileCount: 6 },
   ],
+  dimensionA: '按事项',
+  dimensionB: '按文档用途',
   model: 'qwen2.5:7b',
   elapsedMs: 42000,
 }
@@ -43,6 +45,9 @@ describe('目录方案页（T6.7）', () => {
 
     expect(w.text()).toContain('方案 A')
     expect(w.text()).toContain('方案 B')
+    // 两套的区别就在维度上，列标题必须带上，否则用户看到的是两个「方案」而不知道差在哪
+    expect(w.text()).toContain('按事项')
+    expect(w.text()).toContain('按文档用途')
     expect(w.text()).toContain('安全检查')
 
     // 依据默认收起，点开才显示
