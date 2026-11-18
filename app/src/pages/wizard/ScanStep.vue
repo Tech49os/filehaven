@@ -54,8 +54,8 @@ function next() {
             <span class="muted tiny">
               {{ done ? '完成' : `已发现 ${w.progress.processed} 个文件` }}
             </span>
-            <span v-if="w.progress.skipped" class="muted tiny">
-              已跳过 {{ w.progress.skipped }}
+            <span v-if="w.progress.skipped" class="muted tiny" title="快捷方式、可执行程序、压缩包、系统文件读不出正文，收进来也归不了类">
+              已跳过 {{ w.progress.skipped }} 个非文档
             </span>
           </div>
         </div>
@@ -73,7 +73,7 @@ function next() {
             </div>
             <div class="s">
               <div class="n">{{ w.progress.skipped }}</div>
-              <div class="l">已跳过（系统/超大）</div>
+              <div class="l">已跳过（快捷方式/程序/压缩包/超大）</div>
             </div>
             <div class="s">
               <div class="n">{{ w.mode === 'demo' ? '示例' : '真实' }}</div>

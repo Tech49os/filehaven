@@ -1,5 +1,6 @@
 import type { FileItem, ScanProgress } from './types'
 import { extractText, extOf, kindOf } from './extractor'
+import { isNonDocument } from './skip'
 
 /** 浏览器是否支持目录选择（Chrome/Edge 支持） */
 export const supportsFSA =
@@ -105,6 +106,11 @@ export async function scanDirectory(
         continue
       }
       if (file.size > maxSizeBytes) {
+        skipped++
+        continue
+      }
+      // 快捷方式 / 程序 / 压缩包 / 系统文件：读不出正文，收进来只会变成未归类噪音
+      if (isNonDocument(file.name)) {
         skipped++
         continue
       }
