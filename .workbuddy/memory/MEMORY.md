@@ -1,16 +1,20 @@
 # 项目长期约定（文件管家 / 本地智能文件归档客户端）
 
-## 当前阶段：P1 只差 M8（2026-11-18 23:10，分支 `feat/p1`，提交 `1d04ea3`）
+## 当前阶段：P1 完成，已出包 v0.3.0-alpha.1（2026-11-18 23:35，分支 `feat/p1`，提交 `3fff316`）
 
 `设计文档_v1.1_人机协作整理.md` + `设计文档_P1_详细设计_v1.0.md` + `P1_实施计划_任务清单_v1.0.md`（58 任务 9 里程碑）。
-**代码在 `app-v2/`，旧 `app/` 保留不动。M0~M7 全部完成并提交**，现在能真正把文件搬起来：
-计划生成（`plan::build_plans`）→ 预览（冲突/已改/空间）→ 三段式迁移（复制/SHA-256/隔离区，
-每文件一事务）→ 撤销（逆序还原，sha 不符只记该条失败）。前端待迁移页有分组勾选/红块拦截/撤销入口。
-**只剩 M8 验收收尾**（验收清单 14 条、断模型复测、强杀一致性、可读性、打包 v0.3.0-alpha.1）。
-测试基线：`cargo test` **91** passed、`vitest` **86** passed（16 文件）、`vue-tsc` 零错误、build 通过。
-端到端手测脚本：`app-v2/test/e2e-migrate.py`（seed/snap/verify-migrated/verify-undone）
-+ `e2e-click.py`（按客户区坐标点击；`shot.py` 截的是客户区物理像素，两者同一套坐标）。
-细节见 `.workbuddy/memory/2026-11-18.md` 末节（M7 的 6 处偏差 + 端到端实测步骤）。
+**M0~M8 全部完成并提交**，代码在 `app-v2/`（旧 `app/` 保留不动）。
+功能链：引导（源区/归档区/目录方案）→ 整理台（推荐+理由+键盘流水线）→ 待迁移（分组/冲突/已改拦截）
+→ 三段式迁移（复制/SHA-256/隔离区，每文件一事务）→ 撤销（逆序还原，sha 不符只记该条失败）。
+发布件：`发布/文件管家_v0.3.0-alpha.1.exe`（6.1MB）+ `文件管家_0.3.0-alpha.1_x64-setup.exe`（2.3MB NSIS）。
+验收：`验收清单_P1.md` 14 条全过，截图在 `验收截图/`。
+测试基线：`cargo test` **95** passed、`vitest` **86** passed（16 文件）、`vue-tsc` 零错误、`app:build` 通过。
+
+**驱动界面必须用 CDP，不要用 SendInput/PostMessage**：这台机器上键盘事件送不进 WebView2（鼠标能进）。
+启动前设 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"`，用 `app-v2/test/cdp.py`
+读 DOM 文本做断言、发真键盘事件、截 PNG。截图用 `test/shotp.py`（BMP 一张 14MB，会吃光读图预算）。
+细节见 `.workbuddy/memory/2026-11-18.md` 末节（M8 五件事 + 3 处偏差 + 4 个新坑）。
+
 
 ## 历史：2026-11-18 傍晚转向重启
 
