@@ -1,6 +1,8 @@
 import type { FileItem } from './types'
 import { WORKSTREAM_LEXICON, DOCTYPE_LEXICON } from './classifier'
 import { llmHttp } from './desktop'
+import { buildWhoPrompt, parseWhoResult, type WhoKind } from './emergence/whoJudge'
+import type { Candidate } from './emergence/candidates'
 
 /**
  * 本地大模型分类（Ollama 原生接口）
@@ -271,4 +273,40 @@ export async function classifyFiles(
 
   await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker))
   return out
+}
+
+/**
+ * 组织/人名判定：整个流程里唯一交给模型做的一步。
+ *
+ * 一次请求判完全部候选（实测 57 个候选 28-34 秒），不做并发——Ollama 默认串行推理，
+ * 并发只会让同一批词排队，墙钟一样。
+ *
+ * 参数为什么是这几个：
+ *  · num_ctx 4096 —— 实测 8192 会让 9b 被挤出显存跑到 CPU 上，整整 59 分钟没回；
+ *    4096 + 约 1800 token 的 prompt 刚好全量进显存
+ *  · num_predict 2048 —— 57 条 JSON 约 1300 token，留足余量但别浪费
+ *  · 超时 90s —— 含模型加载（首次约 5-10s）+ 生成 30s
+ */
+export async function judgeWhoWithLlm(
+  cands: Candidate[],
+  cfg: LlmConfig
+): Promise<Map<string, WhoKind>> {
+  if (cands.length === 0) return new Map()
+  const body: Record<string, unknown> = {
+    model: cfg.model || DEFAULT_MODEL,
+    stream: false,
+    keep_alive: '10m',
+    format: 'json',
+    messages: [{ role: 'user', content: buildWhoPrompt(cands) }],
+    options: { temperature: 0, num_ctx: 4096, num_predict: 2048 },
+  }
+  if (needThinkOff(cfg.model)) body.think = false
+
+  const json = (await llmHttp(
+    'POST',
+    `${cfg.baseUrl.replace(/\/$/, '')}/api/chat`,
+    body,
+    Math.max(90_000, cfg.timeoutMs ?? 0)
+  )) as { message?: { content?: string } }
+  return parseWhoResult(json?.message?.content ?? '', cands)
 }

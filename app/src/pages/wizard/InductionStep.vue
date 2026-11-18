@@ -28,9 +28,11 @@ const fileCount = computed(() => w.scannedCount)
     <div class="ind-box">
       <template v-if="!ready">
         <div class="ind-spin"></div>
-        <div class="ind-title">正在从文件名里归纳事项…</div>
+        <div class="ind-title">正在归纳这次要处理哪些事…</div>
         <div class="ind-sub">
-          不预设任何行业词表，完全靠你这批文件的命名规律归纳。几百毫秒即可完成。
+          {{ w.ai.current || '正在从文件名里抽取事项…' }}<br />
+          先用规则从文件名里抽出反复出现的专名，再让本地模型分辨其中哪些只是人名/单位名。
+          模型较慢时可能要等半分钟；模型没装或没启动会自动跳过。
         </div>
       </template>
 

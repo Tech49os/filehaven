@@ -12,14 +12,22 @@
  * 这样每一步都可解释、可复现、不依赖模型。
  */
 import type { Candidate } from './candidates'
+import { isOrgName } from './lexicon'
 
 export interface TopicGroup {
   name: string
   aliases: string[]
   /** 组内所有候选的 df 之和，用于判断这组有多少文件 */
   weight: number
-  /** 整组都只是文种词（见 Candidate.weak）→ 提案阶段降级为兜底类 */
+  /** 兜底类：提案阶段只捡其他事项不要的文件 */
   weak: boolean
+  /**
+   * 为什么降级：
+   *  doc —— 整组都是文种词（演讲稿/操作手册）
+   *  who —— 组名是人名/组织名（说不出「哪件事」，但对用户仍有信息量，
+   *         所以不删掉，折叠起来让他自己决定）
+   */
+  weakReason?: 'doc' | 'who'
 }
 
 /** 长度差超过这个值就不认为是同一件事的简写/全称 */
@@ -31,9 +39,20 @@ function related(a: string, b: string): boolean {
   return a.includes(b) || b.includes(a)
 }
 
-export function groupBySurface(cands: Candidate[]): TopicGroup[] {
+export interface GroupOptions {
+  /**
+   * 已判定为「人名/组织名」的词（见 whoJudge）。
+   * 它们说不出「哪件事」，不参与分组——否则「海油发展」会把技术谱系的文件全吞掉。
+   */
+  who?: Set<string>
+}
+
+export function groupBySurface(cands: Candidate[], opts: GroupOptions = {}): TopicGroup[] {
+  const who = opts.who ?? new Set<string>()
   // 先放长词：组名直接取最具体的那个写法
-  const sorted = [...cands].filter((c) => !c.isOrg).sort((a, b) => b.term.length - a.term.length)
+  // 注意：组织名不过滤掉——它们要作为「兜底类」留下（见下面的 weakReason='who'），
+  // 直接删会让它们名下的文件被邻近事项吸走或掉进未归类，用户就看不到这批文件了
+  const sorted = [...cands].sort((a, b) => b.term.length - a.term.length)
   const groups: TopicGroup[] = []
   const weakCount = new Map<TopicGroup, number>()
 
@@ -50,8 +69,18 @@ export function groupBySurface(cands: Candidate[]): TopicGroup[] {
     }
   }
 
-  // 「整组都是文种词」才算兜底类；只要混进一个真专名，它就是正经事项
-  for (const g of groups) g.weak = (weakCount.get(g) ?? 0) === g.aliases.length
+  // 降级规则：
+  //  · 组名本身是人名/组织名 → 兜底（它回答的是「谁」）
+  //  · 否则，整组都是文种词才算兜底；混进一个真专名就是正经事项
+  for (const g of groups) {
+    if (who.has(g.name) || isOrgName(g.name)) {
+      g.weak = true
+      g.weakReason = 'who'
+    } else if ((weakCount.get(g) ?? 0) === g.aliases.length) {
+      g.weak = true
+      g.weakReason = 'doc'
+    }
+  }
 
   groups.sort((a, b) => b.weight - a.weight)
   return groups

@@ -1,0 +1,215 @@
+{
+ "excluded": [
+  "海油发展",
+  "中海油",
+  "生产智能化项目组",
+  "智能工厂技术室",
+  "信科公司",
+  "王一名",
+  "海油发展智能工厂",
+  "中国海油",
+  "海油发展数字化"
+ ],
+ "topics": [
+  {
+   "name": "人工智能推进会",
+   "n": 28,
+   "weak": false
+  },
+  {
+   "name": "海油发展智能工厂",
+   "n": 20,
+   "weak": true
+  },
+  {
+   "name": "技术谱系",
+   "n": 17,
+   "weak": false
+  },
+  {
+   "name": "生产智能化项目组",
+   "n": 13,
+   "weak": true
+  },
+  {
+   "name": "数智化项目建设",
+   "n": 13,
+   "weak": false
+  },
+  {
+   "name": "海油发展数字化",
+   "n": 12,
+   "weak": true
+  },
+  {
+   "name": "服务器领用交接单",
+   "n": 11,
+   "weak": false
+  },
+  {
+   "name": "智能工厂产品模块",
+   "n": 11,
+   "weak": false
+  },
+  {
+   "name": "AI编程",
+   "n": 11,
+   "weak": false
+  },
+  {
+   "name": "软件开发",
+   "n": 9,
+   "weak": false
+  },
+  {
+   "name": "生产管理",
+   "n": 9,
+   "weak": false
+  },
+  {
+   "name": "智能工厂技术室",
+   "n": 8,
+   "weak": true
+  },
+  {
+   "name": "AI应用落地",
+   "n": 8,
+   "weak": false
+  },
+  {
+   "name": "智擎海发版",
+   "n": 8,
+   "weak": false
+  },
+  {
+   "name": "模块深化建设项目",
+   "n": 7,
+   "weak": false
+  },
+  {
+   "name": "发展智能工厂系统",
+   "n": 7,
+   "weak": false
+  },
+  {
+   "name": "培训项目项目方案",
+   "n": 7,
+   "weak": false
+  },
+  {
+   "name": "中期工作会",
+   "n": 7,
+   "weak": false
+  },
+  {
+   "name": "演讲稿",
+   "n": 7,
+   "weak": true
+  },
+  {
+   "name": "数字化建设",
+   "n": 7,
+   "weak": false
+  },
+  {
+   "name": "架构设计",
+   "n": 7,
+   "weak": false
+  },
+  {
+   "name": "全栈工程师",
+   "n": 6,
+   "weak": false
+  },
+  {
+   "name": "梯度培育培训课程设置",
+   "n": 5,
+   "weak": false
+  },
+  {
+   "name": "智能工厂开展汇报",
+   "n": 5,
+   "weak": false
+  },
+  {
+   "name": "王一名",
+   "n": 5,
+   "weak": true
+  },
+  {
+   "name": "AI赋能智能工厂生产场景",
+   "n": 5,
+   "weak": false
+  },
+  {
+   "name": "AI大赛",
+   "n": 5,
+   "weak": false
+  },
+  {
+   "name": "赋能海发工业互联网平台",
+   "n": 4,
+   "weak": false
+  },
+  {
+   "name": "非功能性需求管控",
+   "n": 4,
+   "weak": false
+  },
+  {
+   "name": "境内差旅费",
+   "n": 4,
+   "weak": false
+  },
+  {
+   "name": "服务器配置",
+   "n": 4,
+   "weak": false
+  },
+  {
+   "name": "技术沉淀",
+   "n": 4,
+   "weak": false
+  },
+  {
+   "name": "安环大屏",
+   "n": 4,
+   "weak": false
+  },
+  {
+   "name": "信科公司",
+   "n": 3,
+   "weak": true
+  },
+  {
+   "name": "服务器资源申请单",
+   "n": 3,
+   "weak": false
+  },
+  {
+   "name": "作业H5培训游戏",
+   "n": 3,
+   "weak": false
+  },
+  {
+   "name": "技战法",
+   "n": 2,
+   "weak": false
+  },
+  {
+   "name": "中海油",
+   "n": 1,
+   "weak": true
+  },
+  {
+   "name": "海上采油平台受限",
+   "n": 1,
+   "weak": false
+  },
+  {
+   "name": "中国海油",
+   "n": 1,
+   "weak": true
+  }
+ ]
+}

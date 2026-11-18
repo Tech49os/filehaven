@@ -12,9 +12,15 @@ import {
   toFileItems,
 } from '../core/desktop'
 import { demoScan } from '../core/demo'
-import { collectCandidates } from '../core/emergence/candidates'
+import { collectCandidates, type Candidate } from '../core/emergence/candidates'
 import { groupBySurface } from '../core/emergence/grouping'
 import { DOC_KIND_WORDS } from '../core/emergence/lexicon'
+import {
+  augmentWithOrgRule,
+  expandWho,
+  type WhoKind,
+} from '../core/emergence/whoJudge'
+import { judgeWhoWithLlm } from '../core/llm'
 import {
   applyProposal,
   buildProposal,
@@ -94,6 +100,8 @@ export const useWizardStore = defineStore('wizard', {
     ai: emptyAi(),
     /** 涌现出的分类方案（确认之前不落盘、不建目录） */
     proposal: null as Proposal | null,
+    /** 被判定为人名/组织名、因而不进类目的词（确认页可一键恢复） */
+    whoExcluded: [] as string[],
     cancelled: { cancelled: false },
     scannedCount: 0,
     skippedCount: 0,
@@ -228,6 +236,35 @@ export const useWizardStore = defineStore('wizard', {
     },
 
     /**
+     * 判定哪些候选是「谁」（人名 / 组织名 / 团队名）。
+     *
+     * 这是整条流水线里**唯一**交给模型的判断。实测依据见 whoJudge.ts 顶部注释：
+     * 让它做归并归纳会崩，只问「是不是人名/组织名」它很准（9b 10/10、0 误伤）。
+     * 模型不可用就退回后缀词典，功能不消失，只是会漏掉「海油发展」「集团」这类
+     * 没有组织后缀的简称。
+     */
+    async judgeWho(cands: Candidate[]): Promise<Set<string>> {
+      const data = useDataStore()
+      const s = data.settings
+      let base: Map<string, WhoKind> = new Map()
+      if (s.llmEnabled && cands.length > 0) {
+        this.ai.current = '正在让本地模型分辨哪些词是人名/组织名…'
+        try {
+          base = await judgeWhoWithLlm(cands, {
+            baseUrl: s.llmBaseUrl,
+            model: s.llmModel,
+            apiKey: s.llmApiKey,
+          })
+          this.ai.current = `模型判定了 ${base.size} 个词，正在分组…`
+        } catch {
+          this.ai.current = '模型没有响应，改用后缀规则识别组织名…'
+          base = new Map()
+        }
+      }
+      return expandWho(augmentWithOrgRule(base, cands), cands)
+    },
+
+    /**
      * 生成分类方案：从文件名里涌现事项 → 保守分组 → 装配归属提案
      *
      * 全程纯 CPU（几百毫秒），不调模型、不写文件。产出只是一份「提案」，
@@ -238,6 +275,7 @@ export const useWizardStore = defineStore('wizard', {
       this.error = ''
       this.summary = null
       this.proposal = null
+      this.whoExcluded = []
       this.cancelled = { cancelled: false }
       this.ai = {
         active: true,
@@ -262,7 +300,12 @@ export const useWizardStore = defineStore('wizard', {
         // 纯英文短词（ppt/work）和纯格式词（演讲稿/申请表）不当事项，否则确认页全是垃圾
         const cn = (s: string) => (s.match(/[\u4e00-\u9fff]/g) ?? []).length
         const useful = cands.filter((c) => cn(c.term) >= 2 && !DOC_KIND_WORDS.has(c.term))
-        const groups = groupBySurface(useful).filter((g) => g.weight >= 3)
+
+        // 哪些词是「谁」（人名/组织名）—— 唯一交给模型的一步，模型挂了就用后缀规则兜
+        const who = await this.judgeWho(useful)
+        this.whoExcluded = useful.filter((c) => who.has(c.term)).map((c) => c.term)
+
+        const groups = groupBySurface(useful, { who }).filter((g) => g.weight >= 3)
 
         const p = buildProposal(files, groups)
         this.proposal = p
@@ -382,6 +425,7 @@ export const useWizardStore = defineStore('wizard', {
       this.migrating = false
       this.summary = null
       this.proposal = null
+      this.whoExcluded = []
       this.error = ''
       this.ai = emptyAi()
       this.progress = { processed: 0, total: 0, currentPath: '', skipped: 0 }

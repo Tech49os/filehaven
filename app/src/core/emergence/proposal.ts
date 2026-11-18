@@ -16,10 +16,12 @@ export interface ProposalTopic {
   /** 代表文件名（确认页展示，最多 5 个） */
   samples: string[]
   /**
-   * 兜底类：名字本身只是文种（演讲稿 / 操作手册 / 进展汇报）。
-   * 只有其他事项都不认领的文件才会落进来，界面上单独折叠显示。
+   * 兜底类：只有其他事项都不认领的文件才会落进来，界面上单独折叠显示。
+   *  weakReason='doc' 名字本身只是文种（演讲稿 / 操作手册）
+   *  weakReason='who' 名字是人名/组织名（说不出「哪件事」，但仍给用户留着）
    */
   weak?: boolean
+  weakReason?: 'doc' | 'who'
 }
 
 export interface Proposal {
@@ -177,6 +179,7 @@ export function buildProposal(files: FileItem[], groups: TopicGroup[]): Proposal
     fileIds: [],
     samples: [],
     weak: g.weak,
+    weakReason: g.weakReason,
   }))
   return fill(files, topics)
 }

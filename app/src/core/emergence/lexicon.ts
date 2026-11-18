@@ -71,6 +71,15 @@ export function isDocKindPhrase(term: string): boolean {
 }
 
 /**
+ * 光秃秃的组织泛称：这类词单独出现时不可能是一件具体的事。
+ * 全是语言级词汇（任何行业都这么叫），不含行业名。
+ */
+export const BARE_ORG_WORDS = new Set([
+  '集团', '公司', '单位', '部门', '总部', '分公司', '子公司', '总公司',
+  '董事会', '办公室', '项目组', '技术室', '工作组',
+])
+
+/**
  * 判断一个词是否是组织名。
  *
  * 反例说明为什么不能一刀切：`油化厂`、`钻采院` 也以组织后缀结尾，
@@ -78,6 +87,7 @@ export function isDocKindPhrase(term: string): boolean {
  * 多字后缀要求前面至少 2 个字。
  */
 export function isOrgName(term: string): boolean {
+  if (BARE_ORG_WORDS.has(term)) return true
   for (const suf of ORG_SUFFIXES) {
     if (!term.endsWith(suf)) continue
     const extra = term.length - suf.length

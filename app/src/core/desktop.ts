@@ -261,6 +261,9 @@ export async function llmHttp(
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // 浏览器环境（开发预览）没有 Rust 那层超时，必须自己兜住：
+    // 曾经因为这里没有超时，模型被挤出显存后请求挂了 59 分钟都没返回
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return await res.json()

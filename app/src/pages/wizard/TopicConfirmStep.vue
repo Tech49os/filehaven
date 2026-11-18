@@ -120,13 +120,16 @@ async function regen() {
         </button>
         <div v-if="showWeak" class="tc-weak-body">
           <p class="tc-weak-desc">
-            像「演讲稿」「操作手册」这种名字，只说明文档性质。它们的文件本来就没写清属于哪件事，
-            删掉后这些文件会回到未归类，在下一步手动指定。
+            两类：一是「演讲稿」「操作手册」这种只说明文档性质的名字；
+            二是「海油发展」这种人名/单位名——它回答的是「谁在办」，不是「哪件事」。
+            它们的文件都没写清属于哪件事，删掉后会回到未归类，在下一步手动指定；
+            如果其中有你其实想单独成类的，改个名字留在上面就行。
           </p>
           <button class="tc-btn ghost sm" @click="dropWeak">全部删除</button>
           <div v-for="t in weak" :key="t.id" class="tc-item">
             <div class="tc-row">
               <button class="tc-name" @click="startEdit(t)">{{ t.name }}</button>
+              <span class="tc-badge">{{ t.weakReason === 'who' ? '人名/单位' : '仅文种' }}</span>
               <span class="tc-count">{{ t.fileIds.length }} 份</span>
               <div class="tc-actions">
                 <button class="tc-del" @click="w.removeTopic(t.id)">删除</button>
@@ -298,6 +301,14 @@ async function regen() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.tc-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--c-hover);
+  color: var(--c-text-3);
+  flex: 0 0 auto;
 }
 .tc-empty {
   font-size: 12px;
