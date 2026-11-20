@@ -1,7 +1,7 @@
 {
   "name": "filemanager-v2",
   "private": true,
-  "version": "0.3.0-alpha.5",
+  "version": "0.4.0-alpha.1",
   "type": "module",
   "description": "本地智能文件归档客户端 v2（人机协作整理）",
   "scripts": {

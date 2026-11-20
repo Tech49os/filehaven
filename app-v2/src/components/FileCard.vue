@@ -14,6 +14,7 @@ import AppIcon from './AppIcon.vue'
 import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
 import { imageSrc } from '../core/preview'
+import { shortPath } from '../core/text'
 import type { BatchItem, DecideAck, FilePreview } from '../core/types'
 
 const props = withDefaults(
@@ -167,7 +168,8 @@ function cancelRename() {
     <!-- 路径与打开动作单独一行：这是「这份文件到底在哪」的答案 -->
     <div class="pathrow">
       <span class="plabel">位置</span>
-      <span class="mono pval" :title="f.absPath">{{ f.absPath }}</span>
+      <!-- 中间省略：左边留盘符、右边留「哪一份」，title 里是全文（T5.2） -->
+      <span class="mono pval" :title="f.absPath">{{ shortPath(f.absPath) }}</span>
       <button class="act" :disabled="busy" title="用系统默认程序打开（O）" @click="emit('open')">
         <span class="kbd">O</span>打开
       </button>

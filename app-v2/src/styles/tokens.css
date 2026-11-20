@@ -29,8 +29,16 @@
   --c-footerbar: #f6f6f8;
   --c-field: #f5f5f7;
   --c-text: #1d1d1f;
-  --c-text-2: #86868b;
-  --c-text-3: #aeaeb2;
+  /* 文字三级：
+     P1 的 #86868b / #aeaeb2 在 #f5f5f7 上只有 3.33:1 和 2.03:1，
+     11~12px 的提示字（文件大小、路径、理由、状态）根本看不清（P1 M8 已记录）。
+     P2 T5.1 按 WCAG AA 小字 4.5:1 达标重定，实测值见 test/contrast.py：
+       --c-text-2 #5f5f64 → 5.83（bg） / 5.69（sidebar） / 6.35（white）
+       --c-text-3 #6e6e73 → 4.66（bg） / 4.54（sidebar） / 5.07（white）
+     两个都往上提，是为了保住「主要 > 次要 > 更次要」的层次 ——
+     只提 text-3 会让它比 text-2 还深，层次直接倒挂。 */
+  --c-text-2: #5f5f64;
+  --c-text-3: #6e6e73;
   --c-border: rgba(0, 0, 0, 0.05);
   --c-border-strong: rgba(0, 0, 0, 0.08);
   --c-divider: rgba(0, 0, 0, 0.04);

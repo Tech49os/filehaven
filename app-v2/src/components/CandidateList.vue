@@ -35,7 +35,7 @@ const emit = defineEmits<{ (e: 'pick', n: 1 | 2 | 3): void }>()
         <span class="key">{{ i === 0 ? '回车' : i + 1 }}</span>
         <div class="body">
           <div class="line">
-            <span class="path">{{ c.relPath }}</span>
+            <span class="path" :title="c.relPath">{{ c.relPath }}</span>
             <span v-if="c.uncertain" class="tag warn">不太确定</span>
           </div>
           <p class="reason">{{ c.reason }}</p>
@@ -119,6 +119,9 @@ const emit = defineEmits<{ (e: 'pick', n: 1 | 2 | 3): void }>()
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* flex 子项默认 min-width:auto，不显式给 0 的话 ellipsis 永远不生效 */
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .tag.warn {
@@ -130,11 +133,17 @@ const emit = defineEmits<{ (e: 'pick', n: 1 | 2 | 3): void }>()
   color: var(--c-warning-deep);
 }
 
+/* 理由最多 2 行（T5.2）：候选区高度必须稳定，
+   长理由一撑就把下面的候选和按钮顶出屏幕，键盘 1/2/3 打着打着焦点就跑了 */
 .reason {
   margin: 3px 0 0;
   font-size: 12px;
   color: var(--c-text-2);
   line-height: 1.55;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .note {

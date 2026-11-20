@@ -230,3 +230,44 @@ describe('整理台卡片：summary 与标签层级', () => {
     expect(basic.find('.taglvl').text()).toBe('初步')
   })
 })
+
+// ------------------------------------------------ 长名字 / 长路径（P2 T5.2）
+
+describe('长文件名与长路径：单行不换高、省略但 title 有全文', () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+  })
+
+  const longName =
+    '2026年度智能工厂平台安全生产大检查暨消防设施专项验收工作情况汇报（第三次修订版）最终定稿v3.docx'
+
+  it('120 字文件名也不许换行：单行 ellipsis + title 全文', () => {
+    const w = mount(FileCard, {
+      props: {
+        item: item({ name: longName }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+      },
+    })
+    const h = w.find('.name')
+    expect(h.text()).toBe(longName) // 文本不裁，靠 CSS 截
+    expect(h.attributes('title')).toBe(longName)
+  })
+
+  it('长路径中间省略：左边留盘符，右边留哪一份，title 里是全文', () => {
+    // 用正斜杠形式：Tauri 侧回传的 absPath 也是 `C:/Users/...` 这种
+    const abs = 'C:/Users/kingb/Desktop/2026/管理/安全检查通知.docx'
+    const w = mount(FileCard, {
+      props: {
+        item: item({ absPath: abs }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+      },
+    })
+    const p = w.find('.pval')
+    expect(p.text()).toBe('C:/…/管理/安全检查通知.docx')
+    expect(p.attributes('title')).toBe(abs)
+  })
+})

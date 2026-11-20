@@ -1902,7 +1902,9 @@ fn apply_watch_batch(app: &AppHandle, paths: Vec<std::path::PathBuf>) -> usize {
                 continue;
             };
             let one = [meta];
-            match index::upsert_files(&mut guard, root_id, &one) {
+            // 必须用 watched 版：普通 upsert 会做「本轮未见即丢失」的全局判定，
+            // 而这一批只有刚变的几份 —— 用它等于把库里其余文件全打成 missing
+            match index::upsert_files_watched(&mut guard, root_id, &one) {
                 Ok(st) => {
                     if st.inserted > 0 {
                         // 新文件要立刻有基础标签，否则进不了池

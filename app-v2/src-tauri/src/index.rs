@@ -484,6 +484,30 @@ pub fn upsert_files(
     root_id: i64,
     files: &[ScannedFile],
 ) -> Result<UpsertStats, CmdError> {
+    upsert_files_impl(conn, root_id, files, true)
+}
+
+/// 监听批次专用：只落这一批，**不做「本轮未见即丢失」的全局判定**。
+///
+/// 监听一次只送来 1~N 份新文件，如果走 `upsert_files` 的全局口径，
+/// 「这一批没见到的」就等于「整个源区除了这几份全丢了」——
+/// 实测一次丢一份新文件，就会把库里所有 labeled / pending_confirm 打成 missing。
+/// 监听自己已经用 `exists()` 判过文件消失（走 `mark_missing_if_pending`），
+/// 那里有状态守卫，不需要这里再来一次。
+pub fn upsert_files_watched(
+    conn: &mut Connection,
+    root_id: i64,
+    files: &[ScannedFile],
+) -> Result<UpsertStats, CmdError> {
+    upsert_files_impl(conn, root_id, files, false)
+}
+
+fn upsert_files_impl(
+    conn: &mut Connection,
+    root_id: i64,
+    files: &[ScannedFile],
+    mark_missing: bool,
+) -> Result<UpsertStats, CmdError> {
     let root_path: String = conn.query_row(
         "SELECT path FROM source_roots WHERE id=?1",
         [root_id],
@@ -573,12 +597,23 @@ pub fn upsert_files(
         tx.commit()?;
     }
 
-    let missing = conn.execute(
-        "UPDATE files SET status='missing'
-         WHERE source_root_id=?1 AND last_seen_at < ?2
-           AND status NOT IN ('migrated','skipped','missing')",
-        params![root_id, now],
-    )?;
+    // 「本次没见到」只对 3 个状态生效（计划 §3.3 / T3.5 同一口径）。
+    //
+    // 这里的白名单比黑名单短，但必须写成白名单：P1 原来排的是
+    // `NOT IN ('migrated','skipped','missing')`，于是 `confirmed`（已确认、还没迁移）
+    // 和 `parked`（待定区）只要源文件被人挪了一下，就会被扫成 missing ——
+    // e2e 里 3 份 parked 直接整批消失过一次。迁移会把源文件搬进隔离区，
+    // 按「未见即 missing」处理，还会把刚迁移的整批打成丢失。
+    let missing = if mark_missing {
+        conn.execute(
+            "UPDATE files SET status='missing'
+             WHERE source_root_id=?1 AND last_seen_at < ?2
+               AND status IN ('queued','labeled','pending_confirm')",
+            params![root_id, now],
+        )?
+    } else {
+        0
+    };
     stats.missing = missing;
     Ok(stats)
 }

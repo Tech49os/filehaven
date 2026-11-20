@@ -24,3 +24,14 @@ app-v2/test/e2e/
 .e2e-webview2/
 .e2e-wv2/
 .e2e-wv2-*/
+
+# P2 端到端隔离库与语料（run-e2e.py 的 p1/p2/p2r 三段每次都会新建，可用 seed 重建）
+.e2e-wv2-*/
+.e2e-*-data-*/
+.e2e-*-wv2-*/
+.e2e2-src/
+.e2e2-archive/
+.e2e2-src-restart/
+.e2e2-archive-restart/
+# e2e 的运行日志：每次跑都覆盖，随时可重生成（结论写进 P2_执行状态.md）
+app-v2/test/e2e-*-log.txt

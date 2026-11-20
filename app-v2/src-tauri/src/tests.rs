@@ -3279,3 +3279,114 @@ mod p2_m4 {
         assert_eq!(status_of(&conn, id), Status::Parked, "失败不能改动状态");
     }
 }
+
+// ================================================================ 扫描判丢失的白名单
+
+mod scan_missing_guard {
+    use crate::index as db;
+    use crate::index::Status;
+    use crate::model::ScannedFile;
+
+    /// 回归（2026-11-20 e2e 现场）：扫描判「本次没见到」时，
+    /// `confirmed`（已确认未迁移）和 `parked`（待定区）绝不能被扫成 missing。
+    /// P1 写的是黑名单 `NOT IN ('migrated','skipped','missing')`，于是这两类
+    /// 只要源文件被人挪一下，就在下一次扫描里整批消失 —— 加了启动自动扫描后必现。
+    #[test]
+    fn scan_never_marks_confirmed_or_parked_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scanroot").unwrap();
+
+        for (name, st) in [
+            ("a.docx", Status::Queued),
+            ("b.docx", Status::Labeled),
+            ("c.docx", Status::PendingConfirm),
+            ("d.docx", Status::Confirmed),
+            ("e.docx", Status::Parked),
+            ("f.docx", Status::Skipped),
+            ("g.docx", Status::Migrated),
+        ] {
+            db::insert_test_file_kind(&conn, root.id, name, "docx", "word", st).unwrap();
+        }
+
+        // 这一轮扫描一份都没见到（源文件全被挪走）
+        let stats = db::upsert_files(&mut conn, root.id, &[]).unwrap();
+        assert_eq!(stats.missing, 3, "只有 queued/labeled/pending_confirm 该变 missing");
+
+        let after: Vec<(String, String)> = conn
+            .prepare("SELECT name, status FROM files ORDER BY name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let get = |n: &str| after.iter().find(|(x, _)| x == n).unwrap().1.clone();
+        assert_eq!(get("a.docx"), "missing");
+        assert_eq!(get("b.docx"), "missing");
+        assert_eq!(get("c.docx"), "missing");
+        assert_eq!(get("d.docx"), "confirmed", "已确认未迁移不能被扫成丢失");
+        assert_eq!(get("e.docx"), "parked", "待定区的文件不能被扫成丢失");
+        assert_eq!(get("f.docx"), "skipped");
+        assert_eq!(get("g.docx"), "migrated");
+    }
+}
+
+mod watch_upsert_scope {
+    use crate::index as db;
+    use crate::index::Status;
+    use crate::model::ScannedFile;
+
+    fn mk(name: &str) -> ScannedFile {
+        ScannedFile {
+            name: name.into(),
+            path: format!("C:/t/{name}"), // 必须与 insert_test_file_kind 的路径一致
+            ext: "docx".into(),
+            kind: "word".into(),
+            size: 100,
+            mtime: 1_700_000_000_000,
+        }
+    }
+
+    /// 回归（2026-11-20 e2e 现场）：监听批次一次只送 1~N 份，
+    /// 若走普通 upsert 的「本轮未见即丢失」口径，会把库里**其余全部**
+    /// labeled / pending_confirm 打成 missing（实测丢 1 份新文件 → 3 份过期）。
+    #[test]
+    fn watched_upsert_never_touches_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/t").unwrap();
+        for (name, st) in [
+            ("a.docx", Status::Labeled),
+            ("b.docx", Status::PendingConfirm),
+            ("c.docx", Status::Queued),
+        ] {
+            db::insert_test_file_kind(&conn, root.id, name, "docx", "word", st).unwrap();
+        }
+        // 全量扫描一遍，把 last_seen_at 拉到同一条线上
+        let all = vec![mk("a.docx"), mk("b.docx"), mk("c.docx")];
+        db::upsert_files(&mut conn, root.id, &all).unwrap();
+
+        let stats = db::upsert_files_watched(&mut conn, root.id, &[mk("new.docx")]).unwrap();
+        assert_eq!(stats.inserted, 1);
+        assert_eq!(stats.missing, 0, "监听批次不许引发全局 missing 判定");
+
+        let after: Vec<(String, String)> = conn
+            .prepare("SELECT name, status FROM files ORDER BY name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let get = |n: &str| {
+            after
+                .iter()
+                .find(|(x, _)| x == n)
+                .map(|(_, st)| st.clone())
+                .unwrap_or_else(|| panic!("没有这一行：{n}（实际 {after:?}）"))
+        };
+        assert_eq!(get("a.docx"), "labeled", "全程只该有这一份 labeled");
+        assert_eq!(get("b.docx"), "pending_confirm");
+        assert_eq!(get("c.docx"), "queued");
+        assert_eq!(get("new.docx"), "queued");
+    }
+}
