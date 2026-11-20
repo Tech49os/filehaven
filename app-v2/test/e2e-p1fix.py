@@ -231,6 +231,9 @@ def verify():
     # ---- P1d：不刷批次 / 只报待确认 / 改名 / 目录联想（2026-11-20 第二轮反馈）
     ok &= verify_p1d(p)
 
+    # ---- P1e：还有多少待整理 / 待迁移列表不被压扁（2026-11-20 第三轮反馈）
+    ok &= verify_p1e(p)
+
     # ---- P1c：目录建议能听人话
     ok &= verify_dirsuggest(p)
 
@@ -378,6 +381,62 @@ def verify_p1d(p) -> bool:
         ok &= check('N 输入框能联想已有目录', False, str(e))
 
     p.screenshot('D:/filemanager/app-v2/test/shot-p1d.png')
+    return ok
+
+
+def verify_p1e(p) -> bool:
+    """第三轮反馈：① 待迁移文件多了排版错乱 ② 还有多少待整理没入口"""
+    ok = True
+
+    # ---- 侧栏：整理台的角标必须是数字（不是 NaN，也不是缺席）
+    p.click_text('整理台', 'button', exact=False)
+    time.sleep(1.0)
+    badge = p.eval("""(() => {
+      const rows = Array.from(document.querySelectorAll('.nav'));
+      const r = rows.find(n => (n.textContent || '').trim().startsWith('整理台'));
+      const b = r && r.querySelector('.badge');
+      return b ? b.textContent.trim() : '';
+    })()""")
+    ok &= check('侧栏「整理台」带待整理角标', badge.isdigit(), repr(badge))
+
+    # ---- 顶部：全库口径的「还有 N 份待整理」
+    rest = p.eval("document.querySelector('.ws .rest')?.textContent?.trim() ?? ''")
+    ok &= check('顶部说明还有多少份待整理', ('还有' in rest and '待整理' in rest) or '整理完了' in rest, rest)
+
+    # ---- 待迁移：分组不被压扁、底部条不压列表、行内各列对齐
+    p.click_text('待迁移', 'button', exact=False)
+    time.sleep(1.5)
+    geo = p.eval("""(() => {
+      const sc = document.querySelector('.scroll');
+      const g = document.querySelector('.groups');
+      const foot = document.querySelector('.mg > .foot');
+      const rows = Array.from(document.querySelectorAll('.frow'));
+      const uniq = (sel) => Array.from(new Set(rows.map(r => {
+        const e = r.querySelector(sel);
+        return e ? Math.round(e.getBoundingClientRect().left) : -1;
+      })));
+      sc.scrollTop = 99999;
+      const last = rows[rows.length - 1];
+      const lr = last ? last.getBoundingClientRect() : null;
+      const fr = foot ? foot.getBoundingClientRect() : null;
+      const sr = sc.getBoundingClientRect();
+      return {
+        rows: rows.length,
+        squashed: !!g && g.clientHeight + 1 < g.scrollHeight,
+        fsize: uniq('.fsize'), fst: uniq('.fst'),
+        footOverlap: !!(fr && lr && lr.bottom > fr.top + 1),
+        footBelow: !!fr && fr.top >= sr.bottom - 1,
+      };
+    })()""") or {}
+    ok &= check('待迁移渲染出文件行', (geo.get('rows') or 0) > 0, str(geo)[:200])
+    ok &= check('分组没被压扁（不会再挤成一团）', not geo.get('squashed'), str(geo)[:200])
+    ok &= check('体积列对齐', len(geo.get('fsize') or []) == 1, str(geo.get('fsize')))
+    ok &= check('状态列对齐', len(geo.get('fst') or []) == 1, str(geo.get('fst')))
+    ok &= check('底部固定条不压列表', not geo.get('footOverlap') and geo.get('footBelow'), str(geo)[:200])
+
+    p.screenshot('D:/filemanager/app-v2/test/shot-p1e.png')
+    p.click_text('整理台', 'button', exact=False)
+    time.sleep(0.8)
     return ok
 
 

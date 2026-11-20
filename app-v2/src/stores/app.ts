@@ -13,7 +13,7 @@ import type { BootState, Counts, ModelStatus } from '../core/types'
 const EMPTY_COUNTS: Counts = {
   queued: 0,
   labeled: 0,
-  pending_confirm: 0,
+  pendingConfirm: 0,
   confirmed: 0,
   migrated: 0,
   parked: 0,
@@ -41,7 +41,7 @@ export const useAppStore = defineStore('app', () => {
   const parkedCount = computed(() => counts.value.parked)
   /** 还没处理的（含排队的） */
   const pendingTotal = computed(
-    () => counts.value.labeled + counts.value.pending_confirm + counts.value.queued,
+    () => counts.value.labeled + counts.value.pendingConfirm + counts.value.queued,
   )
 
   /**

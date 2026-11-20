@@ -33,7 +33,7 @@ const { useAppStore } = await import('../../stores/app')
 const EMPTY = {
   queued: 0,
   labeled: 0,
-  pending_confirm: 0,
+  pendingConfirm: 0,
   confirmed: 0,
   migrated: 0,
   parked: 0,

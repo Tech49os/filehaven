@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import cdp  # noqa: E402
 
-APP = 'D:/filemanager/发布/文件管家_v0.3.0-alpha.4.exe'
+APP = 'D:/filemanager/发布/文件管家_v0.3.0-alpha.5.exe'
 STAMP = time.strftime('%H%M%S')
 env = dict(os.environ)
 env['FILEBUTLER_DATA_DIR'] = f'D:/filemanager/.e2e-data-{STAMP}'

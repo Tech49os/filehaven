@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-APP = 'D:/filemanager/发布/文件管家_v0.3.0-alpha.4.exe'
+APP = 'D:/filemanager/发布/文件管家_v0.3.0-alpha.5.exe'
 LOG = Path('D:/filemanager/app-v2/test/e2e-log.txt')
 STAMP = time.strftime('%H%M%S')
 DATA = f'D:/filemanager/.e2e-data-{STAMP}'

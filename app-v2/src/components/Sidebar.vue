@@ -15,10 +15,21 @@ interface NavItem {
   badge?: number
   /** 角标为 0 时也显示（待迁移/待定区需要让用户看到 0） */
   alwaysBadge?: boolean
+  /** 信息型角标：灰底不抢注意力（整理台是常驻工作量，不是待办告警） */
+  soft?: boolean
 }
 
 const items = computed<NavItem[]>(() => [
-  { path: '/workspace', label: '整理台', icon: 'dashboard' },
+  {
+    path: '/workspace',
+    label: '整理台',
+    icon: 'dashboard',
+    // 「还有多少文件待整理」原来只写在整理台里的一句「池里还有 N 份」，
+    // 人不在那个页面就看不到。挂到侧栏，任何页面都知道还剩多少
+    badge: app.pendingTotal,
+    alwaysBadge: true,
+    soft: true,
+  },
   {
     path: '/migration',
     label: '待迁移',
@@ -60,6 +71,7 @@ const modelTip = computed(() => {
         class="nav"
         :class="{ on: isOn(it.path) }"
         :aria-current="isOn(it.path) ? 'page' : undefined"
+        :title="it.soft ? `还有 ${it.badge ?? 0} 份没定去向` : undefined"
         @click="go(it.path)"
       >
         <AppIcon :name="it.icon" :size="16" />
@@ -67,7 +79,7 @@ const modelTip = computed(() => {
         <span
           v-if="it.alwaysBadge || (it.badge ?? 0) > 0"
           class="badge"
-          :class="{ zero: (it.badge ?? 0) === 0 }"
+          :class="{ zero: (it.badge ?? 0) === 0, soft: it.soft }"
           >{{ it.badge ?? 0 }}</span
         >
       </button>
@@ -172,6 +184,13 @@ nav {
 .badge.zero {
   background: rgba(0, 0, 0, 0.08);
   color: var(--c-text-2);
+}
+/* 整理台的角标是「还剩多少活」的常驻数字，不是催办：
+   灰底、不加粗外扩，读完心里有数就行 */
+.badge.soft {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--c-text-2);
+  font-weight: 400;
 }
 
 .foot {

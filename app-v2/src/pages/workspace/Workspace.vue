@@ -61,10 +61,20 @@ const pendingCount = computed(
 /** 刚重算完的一句话反馈（别弹窗，就一行小字） */
 const rescoreNote = ref<string | null>(null)
 
+/**
+ * 全库还剩多少份没定去向（排队 + 已标签 + 待确认）。
+ *
+ * 这是「还有多少文件待整理」的唯一口径 —— 批内那个 `remainingInPool` 只是
+ * 开批那一刻的池底，用户要的是「我总共还要定多少份」。
+ */
+const poolLeft = computed(() => app.pendingTotal)
+
 onMounted(async () => {
   // 有批次就接着用：切走再回来不该重来一遍（2026-11-20 反馈）
   await store.ensureLoaded(12)
   void syncDirs()
+  // 「还有 N 份待整理」读的是全库计数，进页面得跟库对一次
+  void app.refreshBoot()
   window.addEventListener('keydown', onKey)
 })
 
@@ -272,7 +282,10 @@ function goSuggest() {
       </div>
       <div class="acts">
         <span v-if="rescoreNote" class="note">{{ rescoreNote }}</span>
-        <span v-if="store.remaining > 0" class="rest">池里还有 {{ store.remaining }} 份</span>
+        <!-- 「还有多少文件待整理」以前只在批次里说「池里还有 N 份」，
+             池子到底多大、还剩多少得靠猜。这里给全库口径，跟着判定实时减 -->
+        <span v-if="poolLeft > 0" class="rest">还有 {{ poolLeft }} 份待整理</span>
+        <span v-else-if="store.total > 0" class="rest done">全部整理完了</span>
         <!-- 窄窗时右栏收进抽屉，这里给一个入口（宽窗不需要，右栏一直在） -->
         <button
           v-if="narrow"
@@ -486,6 +499,10 @@ function goSuggest() {
 .rest {
   font-size: 12px;
   color: var(--c-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.rest.done {
+  color: var(--c-success-deep);
 }
 
 .note {

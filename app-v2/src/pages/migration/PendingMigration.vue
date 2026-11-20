@@ -101,93 +101,101 @@ async function reload() {
 
     <p v-if="store.error" class="err" role="alert">{{ store.error }}</p>
 
-    <!-- 标注后被改：红色拦截，必须先处理 -->
-    <section v-if="store.changed.length > 0" class="warn">
-      <div class="wtitle">
-        <AppIcon name="shield" :size="14" />
-        有 {{ store.changed.length }} 份在标注之后被改过，先处理再搬
-      </div>
-      <ul class="wlist">
-        <li v-for="c in store.changed" :key="c.fileId" class="wrow">
-          <span class="wname ellipsis" :title="c.name">{{ c.name }}</span>
-          <span class="wwhy">{{ changedWhy(c.why) }}</span>
-          <button class="btn small" @click="onRequeue(c.fileId)">重新确认</button>
-        </li>
-      </ul>
-      <p class="whint">
-        重新确认会把它退回整理台，并按现在的文件内容重新归档 —— 我们不会拿旧的判断去搬新的内容。
-      </p>
-    </section>
-
-    <!-- 上次的结果 / 撤销入口 -->
-    <section v-if="store.result" class="result ok">
-      <AppIcon name="check" :size="14" />
-      <span>已迁移 {{ store.result.copied }} 份</span>
-      <span v-if="store.result.failed.length" class="bad">
-        · 失败 {{ store.result.failed.length }} 份
-      </span>
-      <span class="dim">归档副本已逐个校验，源文件在隔离区里，随时可撤回</span>
-      <button class="btn small" :disabled="store.busy" @click="onUndo">撤销这次迁移</button>
-      <button class="btn small" @click="router.push('/browser')">去浏览</button>
-    </section>
-    <section v-else-if="store.undoReport" class="result">
-      <AppIcon name="undo" :size="14" />
-      <span>已还原 {{ store.undoReport.restored }} 份</span>
-      <span v-if="store.undoReport.failed.length" class="bad">
-        · 失败 {{ store.undoReport.failed.length }} 份
-      </span>
-      <button class="btn small" @click="router.push('/workspace')">回整理台</button>
-    </section>
-    <ul v-if="store.result?.failed.length" class="flist">
-      <li v-for="f in store.result.failed" :key="f.fileId">
-        <span class="ellipsis">{{ f.name }}</span>
-        <span class="why">{{ f.reason }}</span>
-      </li>
-    </ul>
-
-    <!-- 分组清单 -->
-    <div v-if="!store.empty" class="groups">
-      <section v-for="g in store.groups" :key="g.dirId" class="group">
-        <header class="ghead">
-          <input
-            type="checkbox"
-            :checked="store.groupSelected(g.dirId)"
-            :aria-label="`选择 ${g.relPath} 整个目录`"
-            @change="store.toggleGroup(g.dirId)"
-          />
-          <AppIcon name="folder" :size="14" />
-          <span class="gname ellipsis" :title="g.relPath">{{ g.relPath }}</span>
-          <span v-if="g.isNew" class="tag">新建目录</span>
-          <span class="gmeta">{{ g.files.length }} 份 · {{ formatSize(g.bytes) }}</span>
-        </header>
-        <ul class="flist-body">
-          <li v-for="f in g.files" :key="f.id" class="frow">
-            <input
-              type="checkbox"
-              :checked="store.isSelected(f.id)"
-              :aria-label="`选择 ${f.name}`"
-              @change="store.toggle(f.id)"
-            />
-            <span class="fname ellipsis" :title="nameHint(f)">{{ showName(f) }}</span>
-            <span v-if="f.targetName" class="tag ren">改名</span>
-            <span class="fsize">{{ formatSize(f.size) }}</span>
-            <span class="fst">{{ statusLabel(f.status) }}</span>
-            <span v-if="conflictOf(f.id)" class="conflict">
-              同名，将存为 {{ conflictOf(f.id) }}
-            </span>
+    <!-- 可滚动的只有中间这一块：头部和底部固定条都不参与滚动。
+         之前整页滚 + 底部用 sticky，文件一多最后几行就被压在固定条底下 -->
+    <div class="scroll">
+      <!-- 标注后被改：红色拦截，必须先处理 -->
+      <section v-if="store.changed.length > 0" class="warn">
+        <div class="wtitle">
+          <AppIcon name="shield" :size="14" />
+          有 {{ store.changed.length }} 份在标注之后被改过，先处理再搬
+        </div>
+        <ul class="wlist">
+          <li v-for="c in store.changed" :key="c.fileId" class="wrow">
+            <span class="wname ellipsis" :title="c.name">{{ c.name }}</span>
+            <span class="wwhy">{{ changedWhy(c.why) }}</span>
+            <button class="btn small" @click="onRequeue(c.fileId)">重新确认</button>
           </li>
         </ul>
+        <p class="whint">
+          重新确认会把它退回整理台，并按现在的文件内容重新归档 —— 我们不会拿旧的判断去搬新的内容。
+        </p>
       </section>
-    </div>
 
-    <EmptyState
-      v-else-if="!store.loading"
-      icon="check"
-      title="没有待迁移的文件"
-      desc="在整理台确认过的文件会汇总到这里：先看分组、再看告警，最后一眼就能搬。"
-    >
-      <button class="btn primary" @click="router.push('/workspace')">去整理台</button>
-    </EmptyState>
+      <!-- 上次的结果 / 撤销入口 -->
+      <section v-if="store.result" class="result ok">
+        <AppIcon name="check" :size="14" />
+        <span>已迁移 {{ store.result.copied }} 份</span>
+        <span v-if="store.result.failed.length" class="bad">
+          · 失败 {{ store.result.failed.length }} 份
+        </span>
+        <span class="dim">归档副本已逐个校验，源文件在隔离区里，随时可撤回</span>
+        <button class="btn small" :disabled="store.busy" @click="onUndo">撤销这次迁移</button>
+        <button class="btn small" @click="router.push('/browser')">去浏览</button>
+      </section>
+      <section v-else-if="store.undoReport" class="result">
+        <AppIcon name="undo" :size="14" />
+        <span>已还原 {{ store.undoReport.restored }} 份</span>
+        <span v-if="store.undoReport.failed.length" class="bad">
+          · 失败 {{ store.undoReport.failed.length }} 份
+        </span>
+        <button class="btn small" @click="router.push('/workspace')">回整理台</button>
+      </section>
+      <ul v-if="store.result?.failed.length" class="flist">
+        <li v-for="f in store.result.failed" :key="f.fileId">
+          <span class="ellipsis">{{ f.name }}</span>
+          <span class="why">{{ f.reason }}</span>
+        </li>
+      </ul>
+
+      <!-- 分组清单 -->
+      <div v-if="!store.empty" class="groups">
+        <section v-for="g in store.groups" :key="g.dirId" class="group">
+          <header class="ghead">
+            <input
+              type="checkbox"
+              :checked="store.groupSelected(g.dirId)"
+              :aria-label="`选择 ${g.relPath} 整个目录`"
+              @change="store.toggleGroup(g.dirId)"
+            />
+            <AppIcon name="folder" :size="14" />
+            <span class="gname ellipsis" :title="g.relPath">{{ g.relPath }}</span>
+            <span v-if="g.isNew" class="tag">新建目录</span>
+            <span class="gmeta">{{ g.files.length }} 份 · {{ formatSize(g.bytes) }}</span>
+          </header>
+          <ul class="flist-body">
+            <li v-for="f in g.files" :key="f.id" class="frow">
+              <input
+                type="checkbox"
+                :checked="store.isSelected(f.id)"
+                :aria-label="`选择 ${f.name}`"
+                @change="store.toggle(f.id)"
+              />
+              <!-- 名字和「改名」标签住在同一格里。
+                   标签如果自己占一格，带改名的行就比别的行多一列，往下越排越乱 -->
+              <span class="fnamewrap">
+                <span class="fname ellipsis" :title="nameHint(f)">{{ showName(f) }}</span>
+                <span v-if="f.targetName" class="tag ren">改名</span>
+              </span>
+              <span class="fsize">{{ formatSize(f.size) }}</span>
+              <span class="fst">{{ statusLabel(f.status) }}</span>
+              <span v-if="conflictOf(f.id)" class="conflict">
+                同名，将存为 {{ conflictOf(f.id) }}
+              </span>
+            </li>
+          </ul>
+        </section>
+      </div>
+
+      <EmptyState
+        v-else-if="!store.loading"
+        icon="check"
+        title="没有待迁移的文件"
+        desc="在整理台确认过的文件会汇总到这里：先看分组、再看告警，最后一眼就能搬。"
+      >
+        <button class="btn primary" @click="router.push('/workspace')">去整理台</button>
+      </EmptyState>
+    </div>
 
     <!-- 底部固定条 -->
     <footer v-if="!store.empty" class="foot">
@@ -216,7 +224,20 @@ async function reload() {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow: auto;
+  /* 只让中间那块滚：整页滚的话，底部固定条只能靠 sticky，
+     文件一多它就压在最后几行上 */
+  overflow: hidden;
+}
+
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* 滚动条别贴着卡片边 */
+  padding-right: 4px;
 }
 
 .top {
@@ -341,7 +362,11 @@ async function reload() {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 0;
+  /* 关键：不许被压扁。
+     .mg 是滚动容器也是 flex 列，文件一多，总高度超出后只有 min-height:0 的
+     这一块能被压缩 —— 它一矮，里面的分组盒就溢出到外面，压到底部固定条上，
+     看起来就是「文件多了排版错乱」。让它保持内容高度，整页滚动才对。 */
+  flex: 0 0 auto;
 }
 .group {
   background: var(--c-surface);
@@ -399,6 +424,12 @@ async function reload() {
 .frow:hover {
   background: var(--c-hover);
 }
+.fnamewrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
 .fname {
   min-width: 0;
 }
@@ -416,9 +447,7 @@ async function reload() {
 }
 
 .foot {
-  position: sticky;
-  bottom: 0;
-  margin-top: auto;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 10px;

@@ -1,14 +1,21 @@
 # 项目长期约定（文件管家 / 本地智能文件归档客户端）
 
-## 当前阶段：P1 完成 + 三轮实测反馈修复，已出包 v0.3.0-alpha.4（2026-11-20 14:47，分支 `feat/p1`）
+## 当前阶段：P1 完成 + 四轮实测反馈修复，已出包 v0.3.0-alpha.5（2026-11-20 15:45，分支 `feat/p1`）
 
 `设计文档_v1.1_人机协作整理.md` + `设计文档_P1_详细设计_v1.0.md` + `P1_实施计划_任务清单_v1.0.md`（58 任务 9 里程碑）。
 **M0~M8 全部完成并提交**，代码在 `app-v2/`（旧 `app/` 保留不动）。
 功能链：引导（源区/归档区/目录方案）→ 整理台（推荐+理由+键盘流水线）→ 待迁移（分组/冲突/已改拦截）
 → 三段式迁移（复制/SHA-256/隔离区，每文件一事务）→ 撤销（逆序还原，sha 不符只记该条失败）。
-发布件：`发布/文件管家_v0.3.0-alpha.4.exe`（7.0MB）+ `文件管家_0.3.0-alpha.4_x64-setup.exe`（2.58MB NSIS）。
-验收：`验收清单_P1.md` 14 条全过；隔离库端到端 `app-v2/test/e2e-p1fix.py` 已扩到 **35 条**（对发布版 exe 全过）。
-测试基线：`cargo test` **118** passed、`vitest` **118** passed（18 文件）、`vue-tsc` 零错误、`app:build` 通过。
+发布件：`发布/文件管家_v0.3.0-alpha.5.exe`（7.0MB）+ `文件管家_0.3.0-alpha.5_x64-setup.exe`（2.58MB NSIS）。
+验收：`验收清单_P1.md` 14 条全过；隔离库端到端 `app-v2/test/e2e-p1fix.py` 已扩到 **42 条**（对发布版 exe 全过）。
+测试基线：`cargo test` **118** passed、`vitest` **126** passed（19 文件）、`vue-tsc` 零错误、`app:build` 通过。
+汇总文档：`BUG修复汇总_v0.3.0-alpha.5.md`（四轮 15 条反馈的现象/真因/改法/证据）。
+
+**alpha.5 修的两件事**（明细见 `.workbuddy/memory/2026-11-20.md` 第四轮）：
+① 待迁移文件多了排版错乱 = 「改名」标签自占一格（4 格变 5 格）+ `.groups` 是滚动 flex 列里
+唯一可压缩的子项被压扁溢出 → 标签进名字格、滚动收敛到 `.scroll`、`.groups{flex:0 0 auto}`；
+② 「还有多少待整理」没入口 → 侧栏整理台加灰底角标 + 顶部「还有 N 份待整理」。
+顺带修 `Counts` camelCase 与前端蛇形不一致导致角标 **NaN**。
 
 **alpha.4 修的七件事**（明细见 `.workbuddy/memory/2026-11-20.md` 第三轮）：
 ① 42MB pptx 读不出正文 → `extract` 不再按**文件总大小**放弃，Office 改按 entry 限读 8MB；
@@ -36,6 +43,12 @@
   别拿截图像素猜（我猜错过一次，差了 17px）。
 - **位置列不要写死偏移**：`SELECT {FILE_COLS}, d.id` 后面接的列，偏移必须由列数算；加一列就全错位。
 - **跑 e2e 别把输出接管道**：应用是常驻子进程，`| tail` 会一直不返回；用 `test/run-e2e.py`（落日志 + 时间戳数据目录）。
+- **同名类选择器要限定作用域**：侧栏和待迁移底部都叫 `.foot`，`querySelector('.foot')` 量到的是侧栏，
+  白追过一轮「重叠 25px」。CDP 测量一律写全路径（`.mg > .foot`）。
+- **`min-height:0` 在滚动 flex 列里是陷阱**：只有一个子项允许压缩时，超高后只有它被压扁，
+  里面的内容不缩、溢出画到别处（待迁移就这么糊的）。要么 `flex:0 0 auto`，要么单独开滚动容器。
+- **Rust serde camelCase ↔ TS 类型必须对齐**：`pending_confirm` vs `pendingConfirm` → `undefined` → 界面显示 NaN，
+  编译期零提示。测试要喂「线上真实形状」的数据。
 
 **隔离验证**：`FILEBUTLER_DATA_DIR=<空目录>` + `WEBVIEW2_USER_DATA_FOLDER=<独立目录>`
 可开一个不碰用户真实索引库的实例（`APPDATA` 改不动，`dirs` 走 `SHGetKnownFolderPath`）。

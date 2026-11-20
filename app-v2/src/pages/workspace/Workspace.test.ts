@@ -108,7 +108,7 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
       counts: {
         queued: 0,
         labeled: 0,
-        pending_confirm: 12,
+        pendingConfirm: 12,
         confirmed: 0,
         migrated: 0,
         parked: 0,
@@ -143,7 +143,8 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     const top = w.find('.title').text()
     expect(top).toBe('待确认 2 份')
     expect(top).not.toContain('第 3 批')
-    expect(w.text()).toContain('池里还有 37 份')
+    // 全库口径的「还有多少待整理」由下面专门的用例覆盖，这里只确认不是旧的批次话术
+    expect(w.text()).not.toContain('池里还有')
     // 卡片上每份都要有理由，不许出现「无理由」的候选
     expect(w.text()).toContain('安全检查 的匹配理由')
     // 切到第 2 份，不确定的候选要有橙色徽标
@@ -408,5 +409,78 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     await flushPromises()
     expect(nextBatch).toHaveBeenCalledTimes(2)
     expect(again.find('.name').text()).toBe('a.docx')
+  })
+
+  // 2026-11-20 第三轮反馈：「还有多少文件待整理没有入口」——
+  // 顶部原来只有一个批次内的「池里还有 N 份」，池子到底还剩多少得靠猜
+  it('顶部说清「还有多少份待整理」，点确认后数字跟着库走', async () => {
+    nextBatch.mockResolvedValue(
+      view({ items: [item(1, 'a.docx', [cand(7, '安全检查')])], remainingInPool: 3 }),
+    )
+    bootState.mockResolvedValueOnce({
+      configured: true,
+      archiveRoot: 'D:/文档归档',
+      sourceRoots: [{ id: 1, path: 'C:/桌面', enabled: true }],
+      counts: {
+        queued: 3,
+        labeled: 0,
+        pendingConfirm: 9,
+        confirmed: 0,
+        migrated: 0,
+        parked: 0,
+        skipped: 0,
+        missing: 0,
+      },
+      model: { reachable: true, model: 'qwen2.5:7b' },
+    })
+    const w = mount(Workspace)
+    await flushPromises()
+
+    expect(w.find('.rest').text()).toContain('还有 12 份待整理')
+
+    // 判定之后再刷一次启动态：12 → 11
+    bootState.mockResolvedValueOnce({
+      configured: true,
+      archiveRoot: 'D:/文档归档',
+      sourceRoots: [{ id: 1, path: 'C:/桌面', enabled: true }],
+      counts: {
+        queued: 3,
+        labeled: 0,
+        pendingConfirm: 8,
+        confirmed: 1,
+        migrated: 0,
+        parked: 0,
+        skipped: 0,
+        missing: 0,
+      },
+      model: { reachable: true, model: 'qwen2.5:7b' },
+    })
+    await w.find('.mid .ft .btn.primary').trigger('click')
+    await flushPromises()
+    expect(w.find('.rest').text()).toContain('还有 11 份待整理')
+  })
+
+  it('池子清空了就说整理完了，不挂一个 0', async () => {
+    nextBatch.mockResolvedValue(view({ items: [item(1, 'a.docx', [cand(7, '安全检查')])] }))
+    bootState.mockResolvedValue({
+      configured: true,
+      archiveRoot: 'D:/文档归档',
+      sourceRoots: [{ id: 1, path: 'C:/桌面', enabled: true }],
+      counts: {
+        queued: 0,
+        labeled: 0,
+        pendingConfirm: 0,
+        confirmed: 1,
+        migrated: 0,
+        parked: 0,
+        skipped: 0,
+        missing: 0,
+      },
+      model: { reachable: true, model: 'qwen2.5:7b' },
+    })
+    const w = mount(Workspace)
+    await flushPromises()
+    expect(w.find('.rest').text()).toContain('全部整理完了')
+    expect(w.find('.rest').text()).not.toContain('0')
   })
 })

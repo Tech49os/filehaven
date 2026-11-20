@@ -94,7 +94,7 @@ describe('待迁移页（T7.6）', () => {
       counts: {
         queued: 0,
         labeled: 0,
-        pending_confirm: 0,
+        pendingConfirm: 0,
         confirmed: 3,
         migrated: 0,
         parked: 0,
@@ -195,5 +195,77 @@ describe('待迁移页（T7.6）', () => {
     const w = mount(PendingMigration)
     await flushPromises()
     expect(w.text()).toContain('没有待迁移的文件')
+  })
+
+  // 2026-11-20 第三轮反馈：「待迁移区文件多了之后排版错乱」。
+  // 直接原因是行里多了一个「改名」标签 —— 它自己占了一个格子，
+  // 于是带改名的行和别的行行不对齐，越往下越乱。
+  it('带改名的行也不多占一格：每行永远只有四格', async () => {
+    const renamed: FileRow = { ...file(4, 'IMG_2043.docx', 512), targetName: '配电箱巡检记录.docx' }
+    migrationPreview.mockResolvedValue(
+      preview({
+        groups: [
+          {
+            dirId: 7,
+            relPath: '安全检查',
+            isNew: false,
+            files: [file(1, '安全检查通知.docx', 2048), renamed],
+            bytes: 2560,
+          },
+        ],
+        nameConflicts: [],
+        totalFiles: 2,
+      }),
+    )
+    const w = mount(PendingMigration)
+    await flushPromises()
+
+    const rows = w.findAll('.frow')
+    expect(rows.length).toBe(2)
+    for (const r of rows) {
+      // 勾选框 / 名字（含改名标签）/ 体积 / 状态
+      expect(r.element.children.length).toBe(4)
+    }
+    // 标签必须待在名字格里，跟着名字走
+    expect(rows[0].find('.fnamewrap .tag').exists()).toBe(false)
+    expect(rows[1].find('.fnamewrap .tag').text()).toBe('改名')
+    expect(rows[1].find('.fnamewrap .fname').text()).toBe('配电箱巡检记录.docx')
+    // 体积与状态各自落在自己的格子里
+    const cells = Array.from(rows[1].element.children).map((c) => c.className)
+    expect(cells).toEqual(['', 'fnamewrap', 'fsize', 'fst'])
+  })
+
+  // 同一份清单里既有带标签的又有不带标签的，四种格子必须都是同一个位置
+  it('混排时体积与状态列不错位', async () => {
+    const renamed: FileRow = { ...file(4, 'b.docx', 512), targetName: '新名字.docx' }
+    migrationPreview.mockResolvedValue(
+      preview({
+        groups: [
+          {
+            dirId: 7,
+            relPath: '合同',
+            isNew: false,
+            files: [
+              file(1, 'a.docx', 2048),
+              renamed,
+              { ...file(2, 'c.docx', 256), targetName: '另一个新名.docx' },
+            ],
+            bytes: 2816,
+          },
+        ],
+        nameConflicts: [],
+        totalFiles: 3,
+      }),
+    )
+    const w = mount(PendingMigration)
+    await flushPromises()
+    // 三行的「四格结构」一致，靠 CSS 的固定列宽就自然对齐
+    const shapes = w.findAll('.frow').map((r) =>
+      Array.from(r.element.children).map((c) => c.className),
+    )
+    expect(shapes[0].length).toBe(4)
+    expect(shapes[1].length).toBe(4)
+    expect(shapes[2].length).toBe(4)
+    expect(shapes[1][1]).toBe('fnamewrap')
   })
 })

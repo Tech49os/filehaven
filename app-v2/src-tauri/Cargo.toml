@@ -1,6 +1,6 @@
 [package]
 name = "filemanager-v2"
-version = "0.3.0-alpha.4"
+version = "0.3.0-alpha.5"
 description = "本地智能文件归档客户端 v2"
 edition = "2021"
 rust-version = "1.77"

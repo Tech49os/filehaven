@@ -34,7 +34,7 @@ export interface SourceRoot {
 export interface Counts {
   queued: number
   labeled: number
-  pending_confirm: number
+  pendingConfirm: number
   confirmed: number
   migrated: number
   parked: number

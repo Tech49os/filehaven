@@ -18,6 +18,7 @@ app-v2/test/e2e/
 .e2e-data/
 .e2e-data-*/
 .e2e-src/
+.e2e-src-mg-*/
 .e2e-archive/
 .e2e-appdata/
 .e2e-webview2/
