@@ -146,6 +146,19 @@ const targetPath = computed(() => {
   box-shadow: var(--sh-card);
   padding: 18px 20px;
   min-height: 0;
+  /* 换一份文件 = 组件重挂（key 变了），这一下淡入就是「换张卡」的反馈 */
+  animation: card-in var(--dur) var(--ease-out) both;
+  transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
+}
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .card.done {
   border-color: rgba(40, 200, 64, 0.35);
@@ -279,6 +292,17 @@ const targetPath = computed(() => {
   background: var(--c-success-bg);
   color: var(--c-success-deep);
   font-size: 13px;
+  animation: result-in var(--dur) var(--ease-out) both;
+}
+@keyframes result-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .result.dim {
   background: var(--c-warning-bg);

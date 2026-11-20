@@ -70,4 +70,20 @@ describe('app store', () => {
     expect(s.error).toBe('数据库锁已损坏')
     expect(s.counts.confirmed).toBe(2)
   })
+
+  it('默认刷新不探模型（判定后每次都会调，探活是同步 HTTP 会卡手）', async () => {
+    bootState.mockResolvedValue(state(1))
+    const s = useAppStore()
+    await s.refreshBoot()
+    await s.refreshBoot()
+    expect(bootState.mock.calls[0]).toEqual([false])
+    expect(bootState.mock.calls[1]).toEqual([false])
+  })
+
+  it('启动首调带 probe，真去问一次模型', async () => {
+    bootState.mockResolvedValueOnce(state(1))
+    const s = useAppStore()
+    await s.refreshBoot({ probe: true })
+    expect(bootState.mock.calls[0]).toEqual([true])
+  })
 })

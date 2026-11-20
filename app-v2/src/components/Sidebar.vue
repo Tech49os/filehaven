@@ -98,7 +98,6 @@ const modelTip = computed(() => {
   display: flex;
   flex-direction: column;
   padding: 10px 10px 0;
-  backdrop-filter: blur(30px) saturate(180%);
 }
 
 .group-title {

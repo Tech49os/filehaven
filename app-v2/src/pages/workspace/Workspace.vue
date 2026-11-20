@@ -202,8 +202,11 @@ function goSuggest() {
 
       <!-- 中：当前卡 -->
       <main class="mid">
+        <!-- key 换 → 组件重挂 → 卡片自带走入场动画（见 FileCard .card 的 animation）。
+             不用 <Transition> 是刻意的：out-in 期间容器会塌一下，下面那行快捷键会跟着跳 -->
         <FileCard
           v-if="store.current"
+          :key="store.current.file.id"
           :item="store.current"
           :dir-count="store.dirCount"
           :position="{ index: store.index, total: store.total }"
@@ -239,13 +242,13 @@ function goSuggest() {
       <!-- 右：本批已确认 -->
       <aside class="right">
         <h3>本批已确认 {{ store.confirmedList.length }}</h3>
-        <ul class="done">
+        <TransitionGroup tag="ul" name="rise" class="done">
           <li v-for="it in store.confirmedList" :key="it.file.id" class="drow">
             <AppIcon name="check" :size="12" />
             <span class="dname ellipsis" :title="it.file.name">{{ it.file.name }}</span>
           </li>
           <li v-if="store.confirmedList.length === 0" class="none">还没确认任何一份</li>
-        </ul>
+        </TransitionGroup>
 
         <template v-if="parkedInBatch.length > 0">
           <h3 class="mt">先放着 {{ parkedInBatch.length }}</h3>
@@ -391,6 +394,7 @@ h3.mt {
   font-size: 12px;
   cursor: default;
   overflow: hidden;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 .qrow:hover {
   background: var(--c-hover);

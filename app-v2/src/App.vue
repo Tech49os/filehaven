@@ -17,7 +17,8 @@ const title = computed(() => (route.meta.title as string | undefined) ?? '文件
  * 只做一次，之后由页面自己跳，避免和用户的操作抢方向。
  */
 onMounted(async () => {
-  await app.refreshBoot()
+  // 启动首调才探模型（之后每次判定后的刷新都不探，见 stores/app.ts）
+  await app.refreshBoot({ probe: true })
   if (!app.ready) return
   const onOnboarding = route.path.startsWith('/onboarding')
   if (!app.configured && !onOnboarding) {
@@ -44,7 +45,9 @@ watch(
       <div class="main">
         <p v-if="app.error" class="err" role="alert">{{ app.error }}</p>
         <RouterView v-slot="{ Component }">
-          <component :is="Component" />
+          <Transition name="page" mode="out-in">
+            <component :is="Component" :key="route.path" />
+          </Transition>
         </RouterView>
       </div>
     </div>
@@ -73,6 +76,75 @@ body,
 :focus-visible {
   outline: 2px solid var(--c-primary);
   outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------
+   动效基线（刻意很轻：只做「东西从哪来」，不做表演）
+   ------------------------------------------------------------ */
+
+/* 页面切换：淡入 + 4px 上浮。离开比进入快，操作才跟手 */
+.page-enter-active {
+  transition: opacity var(--dur-page) var(--ease-out),
+    transform var(--dur-page) var(--ease-out);
+}
+.page-leave-active {
+  transition: opacity var(--dur-fast) linear, transform var(--dur-fast) linear;
+}
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-3px);
+}
+
+/* 卡片换代：换一份文件时不是「啪」地跳变，而是原地淡换 */
+.card-enter-active {
+  transition: opacity var(--dur-page) var(--ease-out),
+    transform var(--dur-page) var(--ease-out);
+}
+.card-leave-active {
+  transition: opacity 70ms linear;
+}
+.card-enter-from {
+  opacity: 0;
+  transform: translateY(5px) scale(0.995);
+}
+.card-leave-to {
+  opacity: 0;
+}
+
+/* 列表项出现：一行一行浮上来（很短，够看出「多了东西」） */
+.rise-enter-active {
+  transition: opacity var(--dur) var(--ease-out), transform var(--dur) var(--ease-out);
+}
+.rise-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+/* 按压反馈：所有按钮点到就有反应，这是「不卡」的主要来源 */
+button:not(:disabled) {
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease,
+    transform var(--dur-fast) var(--ease-out), opacity var(--dur-fast) ease;
+}
+button:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+/* 系统和用户说了「别动」，就真的别动 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  button:not(:disabled):active {
+    transform: none;
+  }
 }
 </style>
 

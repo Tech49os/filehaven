@@ -48,8 +48,15 @@ export function diskFreeGb(path: string) {
 
 // ---------------------------------------------------------------- 启动 / 配置
 
-export function bootState() {
-  return invoke<BootState>('boot_state')
+/**
+ * 启动状态。
+ *
+ * `probeModel` 只在**启动首调**传 true —— 探活是同步 HTTP（最长 3s），
+ * 而本函数在每次判定后都会被调来刷计数，挂在那就等于每按一次回车卡一下。
+ * false 时后端直接返回上次的探活结果。
+ */
+export function bootState(probeModel = false) {
+  return invoke<BootState>('boot_state', { probeModel })
 }
 
 export function addSourceRoot(path: string) {

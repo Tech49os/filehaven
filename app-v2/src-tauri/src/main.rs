@@ -117,29 +117,36 @@ async fn disk_free_gb(path: String) -> Option<f64> {
         .flatten()
 }
 
+/// 直接问内核，**绝不起子进程**。
+///
+/// 早先的实现是 `Command::new("powershell").output()` —— 本程序是
+/// `windows_subsystem = "windows"` 的 GUI 进程，起控制台程序会连带弹出黑框，
+/// 一闪即逝。凡是查空间的入口都会闪：设置页一进去（磁盘可用）、选归档区、
+/// 预演迁移、扫完刷新。改成 `GetDiskFreeSpaceExW` 后是微秒级、无副作用。
 fn free_gb(path: &str) -> Option<f64> {
     let p = PathBuf::from(path);
     let target = p.ancestors().find(|a| a.exists())?;
     #[cfg(target_os = "windows")]
     {
-        let out = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "(Get-PSDrive -Name '{}').Free",
-                    target.components().next().and_then(|c| match c {
-                        std::path::Component::Prefix(p) =>
-                            Some(p.as_os_str().to_string_lossy().trim_end_matches(':').to_string()),
-                        _ => None,
-                    })?
-                ),
-            ])
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout);
-        let bytes: f64 = s.trim().parse().ok()?;
-        Some(bytes / 1024.0 / 1024.0 / 1024.0)
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+        let mut wide: Vec<u16> = target.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let (mut to_caller, mut total, mut total_free) = (0u64, 0u64, 0u64);
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut to_caller,
+                &mut total,
+                &mut total_free,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let _ = (to_caller, total);
+        Some(total_free as f64 / 1024.0 / 1024.0 / 1024.0)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -151,14 +158,20 @@ fn free_gb(path: &str) -> Option<f64> {
 // ---------------------------------------------------------------- 启动状态
 
 /// 启动第一调：决定前端路由（引导 / 整理台）
+///
+/// `probe_model` 只在**启动首调**传 true。模型探活是同步 HTTP + 3s 超时，
+/// 而 `boot_state` 又被「每次判定后刷新计数」高频调用 —— 挂在别的路径上，
+/// 连按回车就会一顿一顿的（8GB 显存机器上尤其明显）。
 #[tauri::command]
-async fn boot_state(app: AppHandle) -> Result<BootState, CmdError> {
-    tauri::async_runtime::spawn_blocking(move || boot_state_inner(&app))
-        .await
-        .map_err(|e| CmdError::new(error::DB, format!("启动检查线程异常：{e}")))?
+async fn boot_state(app: AppHandle, probe_model: Option<bool>) -> Result<BootState, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        boot_state_inner(&app, probe_model.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("启动检查线程异常：{e}")))?
 }
 
-fn boot_state_inner(app: &AppHandle) -> Result<BootState, CmdError> {
+fn boot_state_inner(app: &AppHandle, probe_model: bool) -> Result<BootState, CmdError> {
     let state = app.state::<AppState>();
     let conn = lock_db(&state)?;
 
@@ -184,8 +197,14 @@ fn boot_state_inner(app: &AppHandle) -> Result<BootState, CmdError> {
     let model = setting(&conn, "ollama_model").unwrap_or_else(|| llm::DEFAULT_MODEL.to_string());
     drop(conn);
 
-    // 探活一次，3s 超时。模型没起不能挡住任何别的功能（验收 14）。
-    let reachable = llm::reachable(&base, Duration::from_secs(3));
+    // 模型没起不能挡住任何别的功能（验收 14）：探活失败只是标记不可达
+    let reachable = if probe_model {
+        let r = llm::reachable(&base, Duration::from_secs(3));
+        state.model_reachable.store(r, Ordering::Relaxed);
+        r
+    } else {
+        state.model_reachable.load(Ordering::Relaxed)
+    };
 
     Ok(BootState {
         configured: archive_root.is_some() && !source_roots.is_empty(),
@@ -625,6 +644,14 @@ async fn requeue_confirmed(app: AppHandle, file_id: i64) -> Result<(), CmdError>
     .map_err(|e| CmdError::new(error::DB, format!("重新确认线程异常：{e}")))?
 }
 
+/// 写备注（整理台双击「先放着」那一行）。空白等于清空。
+#[tauri::command]
+async fn save_note(app: AppHandle, file_id: i64, note: String) -> Result<(), CmdError> {
+    let state = app.state::<AppState>();
+    let conn = lock_db(&state)?;
+    index::set_note(&conn, file_id, &note)
+}
+
 // ---------------------------------------------------------------- 目录建议
 
 /// 模型请求超时
@@ -1020,10 +1047,15 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|app| {
-            let dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."));
+            // `FILEBUTLER_DATA_DIR` 只为端到端验证用：把库指到一个空目录，
+            // e2e 就不会碰到用户真实的索引库（与 FILEBUTLER_FAKE_FREE_GB 同一路数）。
+            let dir = match std::env::var("FILEBUTLER_DATA_DIR") {
+                Ok(d) if !d.trim().is_empty() => PathBuf::from(d),
+                _ => app
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| PathBuf::from(".")),
+            };
             std::fs::create_dir_all(&dir)?;
             let conn = index::open(&dir.join("index.db")).map_err(|e| e.to_string())?;
             app.manage(AppState::new(conn, dir));
@@ -1053,7 +1085,8 @@ fn main() {
             apply_migration,
             undo_migration,
             latest_migration,
-            requeue_confirmed
+            requeue_confirmed,
+            save_note
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

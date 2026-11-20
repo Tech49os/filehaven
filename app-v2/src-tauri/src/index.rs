@@ -810,6 +810,23 @@ pub fn close_batch_cmd(conn: &mut Connection, batch_id: i64) -> Result<CloseAck,
     })
 }
 
+/// 备注：空白一律写 NULL —— 库里不允许「没备注」有两种表示
+pub fn set_note(conn: &Connection, file_id: i64, note: &str) -> Result<(), CmdError> {
+    let v = note.trim();
+    let affected = if v.is_empty() {
+        conn.execute("UPDATE files SET note=NULL WHERE id=?1", [file_id])?
+    } else {
+        conn.execute("UPDATE files SET note=?1 WHERE id=?2", params![v, file_id])?
+    };
+    if affected == 0 {
+        return Err(CmdError::new(
+            "NOT_FOUND",
+            format!("文件不存在：{file_id}"),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- 批次
 
 const FILE_COLS: &str = "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note";

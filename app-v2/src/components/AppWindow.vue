@@ -58,7 +58,6 @@ function onClose() {
   padding: 0 8px 0 16px;
   background: var(--c-titlebar);
   border-bottom: 0.5px solid var(--c-border);
-  backdrop-filter: blur(20px);
   position: relative;
   user-select: none;
 }

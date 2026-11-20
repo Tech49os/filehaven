@@ -22,9 +22,11 @@
   /* 中性色 */
   --c-bg: #f5f5f7;
   --c-surface: #ffffff;
-  --c-sidebar: rgba(240, 240, 245, 0.7);
-  --c-titlebar: rgba(246, 246, 248, 0.85);
-  --c-footerbar: rgba(246, 246, 248, 0.6);
+  /* 侧栏/标题栏用不透明色：底下就是窗口自己的 --c-bg，blur 一层纯色
+     视觉上什么都不会变，却要 WebView2 每帧做一次毛玻璃合成 —— 纯浪费帧 */
+  --c-sidebar: #f2f2f7;
+  --c-titlebar: #f6f6f8;
+  --c-footerbar: #f6f6f8;
   --c-field: #f5f5f7;
   --c-text: #1d1d1f;
   --c-text-2: #86868b;
@@ -54,4 +56,10 @@
   /* 间距 */
   --pad-content: 22px 24px;
   --gap-grid: 16px;
+  /* 动效：短、快出、克制。页面切换 140ms，控件反馈 120ms */
+  --dur-fast: 110ms;
+  --dur: 160ms;
+  --dur-page: 140ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
 }

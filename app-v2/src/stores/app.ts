@@ -44,10 +44,16 @@ export const useAppStore = defineStore('app', () => {
     () => counts.value.labeled + counts.value.pending_confirm + counts.value.queued,
   )
 
-  async function refreshBoot(): Promise<BootState | null> {
+  /**
+   * 刷新启动态。`probe` 只在**启动首调**给 true。
+   *
+   * 默认不探模型：本函数在每次判定后都要调一次（数字不能撒谎），
+   * 而探活是同步 HTTP + 3s 超时 —— 放在这条路上就是「每按一次回车停一下」。
+   */
+  async function refreshBoot(opts: { probe?: boolean } = {}): Promise<BootState | null> {
     loading.value = true
     try {
-      boot.value = await ipc.bootState()
+      boot.value = await ipc.bootState(opts.probe === true)
       error.value = null
       return boot.value
     } catch (e) {

@@ -2087,3 +2087,88 @@ mod migration_flow {
         assert!(p2.changed_since_label.is_empty(), "{:?}", p2.changed_since_label);
     }
 }
+
+// ================================================================ 系统调用
+//
+// 回归：`free_gb` 曾用 `Get-PSDrive` 脚本查剩余空间。GUI 进程（windows_subsystem
+// = "windows"）起控制台子进程会**闪一个黑框** —— 用户反馈「点扫描弹出一个命令框」
+// 就是它。改成直接问内核后，必须快到不可能是起进程，这条测试就是那道护栏。
+
+mod system {
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn free_gb_does_not_spawn_a_process() {
+        let t0 = Instant::now();
+        let g = crate::free_gb("C:\\");
+        let dt = t0.elapsed();
+        assert!(g.is_some(), "读不到 C 盘剩余空间");
+        assert!(g.unwrap() > 0.0, "剩余空间不可能是 0");
+        // 子进程冷启动 250ms 起，直接问内核是微秒级；100ms 两头都有大余量
+        assert!(
+            dt < Duration::from_millis(100),
+            "耗时 {dt:?}，疑似仍在起子进程（黑框会再出现）"
+        );
+    }
+
+    #[test]
+    fn free_gb_walks_up_to_an_existing_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(crate::free_gb(&nested.to_string_lossy()).is_some());
+        // 叶子不存在时也要能沿祖先找到盘符
+        let ghost = nested.join("nope").join("deeper");
+        assert!(crate::free_gb(&ghost.to_string_lossy()).is_some());
+    }
+}
+
+// ================================================================ 备注
+//
+// 整理台「先放着 → 双击写备注」曾经调了一个后端没注册的 `save_note`，
+// 点下去报「命令不存在」。数据层的护栏放这儿。
+
+mod note {
+    use crate::index as db;
+    use crate::model::ScannedFile;
+
+    fn seeded() -> (tempfile::TempDir, tempfile::TempDir, rusqlite::Connection, i64) {
+        let src = tempfile::tempdir().unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dbdir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+        let p = src.path().join("合同.docx");
+        std::fs::write(&p, b"xxx").unwrap();
+        db::upsert_files(
+            &mut conn,
+            root.id,
+            &[ScannedFile {
+                name: "合同.docx".into(),
+                path: p.to_string_lossy().to_string(),
+                ext: "docx".into(),
+                kind: "word".into(),
+                size: 3,
+                mtime: 1_700_000_000_000,
+            }],
+        )
+        .unwrap();
+        let id = db::list_queued(&conn, Some(root.id)).unwrap()[0].0;
+        (src, dbdir, conn, id)
+    }
+
+    #[test]
+    fn set_note_writes_trimmed_value() {
+        let (_s, _d, conn, id) = seeded();
+        db::set_note(&conn, id, "  等法务确认  ").unwrap();
+        let row = db::file_row(&conn, id).unwrap().unwrap();
+        assert_eq!(row.note.as_deref(), Some("等法务确认"));
+    }
+
+    #[test]
+    fn set_note_blank_clears() {
+        let (_s, _d, conn, id) = seeded();
+        db::set_note(&conn, id, "先放着").unwrap();
+        db::set_note(&conn, id, "   ").unwrap();
+        assert_eq!(db::file_row(&conn, id).unwrap().unwrap().note, None);
+    }
+}

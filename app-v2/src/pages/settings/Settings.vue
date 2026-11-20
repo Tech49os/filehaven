@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import Card from '../../components/Card.vue'
 import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
@@ -7,8 +7,10 @@ import NewDirInput from '../../components/NewDirInput.vue'
 import { useAppStore } from '../../stores/app'
 import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
+import { onScanProgress } from '../../core/events'
 import { humanize, toCmdError } from '../../core/cmdError'
-import type { ScanReport } from '../../core/types'
+import type { ScanProgress, ScanReport } from '../../core/types'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const app = useAppStore()
 const dirs = useDirsStore()
@@ -33,13 +35,39 @@ async function onCreateDir(input: string) {
 }
 const scanning = ref(false)
 const report = ref<ScanReport | null>(null)
+const progress = ref<ScanProgress | null>(null)
 const freeGb = ref<number | null>(null)
 const err = ref<string | null>(null)
+const addedHint = ref('')
+const picking = ref(false)
+const probing = ref(false)
+
+/** 模型探活只在这里和启动时真跑（别把它挂回 refreshBoot 的默认路径） */
+async function probeModel() {
+  probing.value = true
+  try {
+    await app.refreshBoot({ probe: true })
+    if (!app.modelStatus.reachable) err.value = '模型没连上，先启动 Ollama 再点一次'
+    else err.value = null
+  } finally {
+    probing.value = false
+  }
+}
+
+let unlisten: UnlistenFn | null = null
 
 onMounted(async () => {
+  // 直接进 /settings（刷新、深链）时 store 还是空的，这里补一次，
+  // 否则源区列表会显示「还没有源区」而实际库里有 —— 用户会以为被清了
+  if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
+  unlisten = await onScanProgress((p) => {
+    progress.value = p
+  })
 })
+
+onUnmounted(() => unlisten?.())
 
 const scanLine = computed(() => {
   const r = report.value
@@ -47,9 +75,17 @@ const scanLine = computed(() => {
   return `扫了 ${r.scanned} 份 · 新增 ${r.inserted} · 更新 ${r.updated} · 跳过非资料型 ${r.skippedByRule} · 用时 ${r.elapsedMs}ms`
 })
 
+const progressLine = computed(() => {
+  const p = progress.value
+  if (!p || !scanning.value) return ''
+  if (p.total <= 0) return '正在读取文件夹…'
+  return `已处理 ${p.processed}/${p.total}（${Math.round((p.processed / p.total) * 100)}%）`
+})
+
 async function rescan() {
   scanning.value = true
   err.value = null
+  progress.value = null
   try {
     report.value = await ipc.scanAll()
     await app.refreshBoot()
@@ -60,10 +96,28 @@ async function rescan() {
   }
 }
 
+async function addRoot() {
+  picking.value = true
+  err.value = null
+  addedHint.value = ''
+  try {
+    const p = await ipc.pickDirectory('选择要整理的文件夹', app.sourceRoots[0]?.path)
+    if (!p) return
+    await ipc.addSourceRoot(p)
+    await app.refreshBoot()
+    addedHint.value = `已添加 ${p}，点「重新扫描」把里面的文件读进来`
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  } finally {
+    picking.value = false
+  }
+}
+
 async function removeRoot(id: number) {
   try {
     await ipc.removeSourceRoot(id)
     await app.refreshBoot()
+    addedHint.value = ''
   } catch (e) {
     err.value = humanize(toCmdError(e))
   }
@@ -86,9 +140,14 @@ async function removeRoot(id: number) {
 
     <Card title="源区">
       <template #action>
-        <button class="btn" :disabled="scanning" @click="rescan">
-          {{ scanning ? '扫描中…' : '重新扫描' }}
-        </button>
+        <div class="acts">
+          <button class="btn ghost" :disabled="picking || scanning" @click="addRoot">
+            <AppIcon name="plus" :size="12" /> 添加源区
+          </button>
+          <button class="btn" :disabled="scanning || picking" @click="rescan">
+            {{ scanning ? '扫描中…' : '重新扫描' }}
+          </button>
+        </div>
       </template>
       <ul class="list">
         <li v-for="s in app.sourceRoots" :key="s.id" class="item">
@@ -96,8 +155,13 @@ async function removeRoot(id: number) {
           <span class="mono ellipsis">{{ s.path }}</span>
           <button class="link" @click="removeRoot(s.id)">移除</button>
         </li>
-        <li v-if="app.sourceRoots.length === 0" class="empty">还没有源区</li>
+        <li v-if="app.sourceRoots.length === 0" class="empty">
+          还没有源区。
+          <button class="link inline" :disabled="picking" @click="addRoot">选一个文件夹</button>
+        </li>
       </ul>
+      <p v-if="progressLine" class="hint mono">{{ progressLine }}</p>
+      <p v-if="addedHint" class="hint ok">{{ addedHint }}</p>
       <p v-if="scanLine" class="hint ok">{{ scanLine }}</p>
       <p v-if="err" class="hint bad">{{ err }}</p>
     </Card>
@@ -121,6 +185,11 @@ async function removeRoot(id: number) {
     </Card>
 
     <Card title="本地模型">
+      <template #action>
+        <button class="btn ghost" :disabled="probing" @click="probeModel">
+          {{ probing ? '检测中…' : '重新检测' }}
+        </button>
+      </template>
       <div class="row">
         <i class="dot" :class="{ on: app.modelStatus.reachable }" />
         <span>{{ app.modelStatus.reachable ? '已连接' : '未连接' }}</span>
@@ -213,9 +282,31 @@ async function removeRoot(id: number) {
   background: var(--c-primary);
   color: #fff;
   box-shadow: var(--sh-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.btn.ghost {
+  background: var(--c-field);
+  color: var(--c-text);
+  box-shadow: none;
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--c-hover);
 }
 .btn:disabled {
   opacity: 0.6;
+}
+
+.acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .link {
@@ -225,6 +316,12 @@ async function removeRoot(id: number) {
   color: var(--c-primary);
   font-size: 12px;
   padding: 0 2px;
+}
+.link.inline {
+  margin-left: 2px;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .dot {

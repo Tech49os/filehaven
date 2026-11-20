@@ -5,11 +5,15 @@
 
 use rusqlite::Connection;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub app_dir: PathBuf,
+    /// 上一次模型探活的结果。探活是同步 HTTP（最长 3s），不能挂在
+    /// 「每次判定后刷新计数」这条高频路径上，所以只缓存、按需刷新。
+    pub model_reachable: AtomicBool,
 }
 
 impl AppState {
@@ -17,6 +21,7 @@ impl AppState {
         Self {
             db: Mutex::new(db),
             app_dir,
+            model_reachable: AtomicBool::new(false),
         }
     }
 }
