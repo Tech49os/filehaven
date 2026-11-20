@@ -1036,8 +1036,20 @@ pub fn pool_count(conn: &Connection) -> Result<i64, CmdError> {
     Ok(n)
 }
 
-/// 推荐用的目录特征：(id, name, rel_path, 该目录下已确认文件名)
-pub fn dir_feature_rows(conn: &Connection) -> Result<Vec<(i64, String, String, Vec<String>)>, CmdError> {
+/// 推荐用的目录特征（P2 T1.1：一次查全，禁 N+1）
+pub struct DirFeatureRow {
+    pub id: i64,
+    pub name: String,
+    pub rel_path: String,
+    /// 该目录下已确认文件名（最多 20 份，够 familyMatch 用）
+    pub confirmed_names: Vec<String>,
+    /// 类型分布：word/excel/ppt/pdf/…
+    pub kind_hist: HashMap<String, i64>,
+    /// 该目录已确认文件的 topic 标签
+    pub topic_tags: Vec<String>,
+}
+
+pub fn dir_feature_rows(conn: &Connection) -> Result<Vec<DirFeatureRow>, CmdError> {
     let mut dirs: Vec<(i64, String, String)> = Vec::new();
     {
         let mut stmt = conn.prepare("SELECT id, name, rel_path FROM archive_dirs ORDER BY depth, id")?;
@@ -1049,35 +1061,102 @@ pub fn dir_feature_rows(conn: &Connection) -> Result<Vec<(i64, String, String, V
         }
     }
 
-    let mut by_dir: HashMap<i64, Vec<String>> = HashMap::new();
+    // 一次查全：名字 + 类型（kind_hist 要算全量，不能只算前 20 份）
+    let mut by_dir: HashMap<i64, (Vec<String>, HashMap<String, i64>)> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT a.target_dir_id, f.name
+            "SELECT a.target_dir_id, f.name, f.kind
              FROM assignments a JOIN files f ON f.id = a.file_id
              WHERE a.target_dir_id IS NOT NULL
                AND f.status IN ('confirmed','migrated')
                AND a.id = (SELECT MAX(a2.id) FROM assignments a2 WHERE a2.file_id = a.file_id)
-             ORDER BY a.decided_at DESC
-             LIMIT 2000",
+             ORDER BY a.decided_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (d, n, k) = row?;
+            let e = by_dir.entry(d).or_default();
+            if e.0.len() < 20 {
+                e.0.push(n);
+            }
+            *e.1.entry(k).or_insert(0) += 1;
+        }
+    }
+
+    // 一次查全：topic 标签（P1 从没写过，但通道要通，M2 会往里写）
+    let mut tags_by_dir: HashMap<i64, Vec<String>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT a.target_dir_id, t.name
+             FROM assignments a
+             JOIN files f ON f.id = a.file_id
+             JOIN file_tags ft ON ft.file_id = f.id
+             JOIN tags t ON t.id = ft.tag_id AND t.kind = 'topic'
+             WHERE a.target_dir_id IS NOT NULL
+               AND f.status IN ('confirmed','migrated')
+               AND a.id = (SELECT MAX(a2.id) FROM assignments a2 WHERE a2.file_id = a.file_id)
+             GROUP BY a.target_dir_id, t.name",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
-            let (d, n) = row?;
-            let v = by_dir.entry(d).or_default();
-            if v.len() < 20 {
-                v.push(n);
-            }
+            let (d, t) = row?;
+            tags_by_dir.entry(d).or_default().push(t);
         }
     }
 
     Ok(dirs
         .into_iter()
         .map(|(id, name, rel)| {
-            let names = by_dir.remove(&id).unwrap_or_default();
-            (id, name, rel, names)
+            let (names, kind_hist) = by_dir.remove(&id).unwrap_or_default();
+            let topic_tags = tags_by_dir.remove(&id).unwrap_or_default();
+            DirFeatureRow {
+                id,
+                name,
+                rel_path: rel,
+                confirmed_names: names,
+                kind_hist,
+                topic_tags,
+            }
         })
         .collect())
 }
+
+/// 批量取 topic 标签：`file_id → [标签名]`（一次一条 SQL，禁 N+1）
+pub fn topic_tags_for(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>, CmdError> {
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    for chunk in ids.chunks(500) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let marks = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT ft.file_id, t.name
+             FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+             WHERE t.kind='topic' AND ft.file_id IN ({marks})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (fid, tag) = row?;
+            out.entry(fid).or_default().push(tag);
+        }
+    }
+    Ok(out)
+}
+
 
 pub fn count_status(conn: &Connection, status: Status) -> Result<i64, CmdError> {
     let n = conn.query_row(
@@ -1099,13 +1178,34 @@ pub fn insert_test_file(
     name: &str,
     status: Status,
 ) -> Result<i64, CmdError> {
+    insert_test_file_kind(conn, root_id, name, "docx", "word", status)
+}
+
+/// 同上，但能指定扩展名与类型（kind_hist 的测试要混 word/pdf）
+#[cfg(test)]
+pub fn insert_test_file_kind(
+    conn: &Connection,
+    root_id: i64,
+    name: &str,
+    ext: &str,
+    kind: &str,
+    status: Status,
+) -> Result<i64, CmdError> {
     let now = now_ms();
     conn.execute(
         "INSERT INTO files
            (source_root_id, abs_path, rel_path, name, ext, kind, size, mtime,
             tag_level, status, defer_count, discovered_at, last_seen_at, missing)
-         VALUES (?1, ?2, ?2, ?3, 'docx', 'word', 100, ?4, 'basic', ?5, 0, ?4, ?4, 0)",
-        params![root_id, format!("C:/t/{name}"), name, now, status.as_str()],
+         VALUES (?1, ?2, ?2, ?3, ?4, ?5, 100, ?6, 'basic', ?7, 0, ?6, ?6, 0)",
+        params![
+            root_id,
+            format!("C:/t/{name}"),
+            name,
+            ext,
+            kind,
+            now,
+            status.as_str()
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1115,6 +1215,29 @@ pub fn force_status(conn: &Connection, file_id: i64, status: Status) -> Result<(
     conn.execute(
         "UPDATE files SET status=?1 WHERE id=?2",
         params![status.as_str(), file_id],
+    )?;
+    Ok(())
+}
+
+/// 测试用：给一份文件挂一个 topic 标签（深度标签的完整流程走 `apply_deep_tag`）
+#[cfg(test)]
+pub fn insert_test_topic_tag(
+    conn: &Connection,
+    file_id: i64,
+    tag: &str,
+) -> Result<(), CmdError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'topic')",
+        params![tag],
+    )?;
+    let tid: i64 = conn.query_row(
+        "SELECT id FROM tags WHERE name=?1 AND kind='topic'",
+        params![tag],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1, ?2, 0.8)",
+        params![file_id, tid],
     )?;
     Ok(())
 }

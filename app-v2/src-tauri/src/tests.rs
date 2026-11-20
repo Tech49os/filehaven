@@ -718,59 +718,347 @@ mod recommend {
     use crate::tag;
     use std::collections::HashMap;
 
-    fn f(tokens: &[&str], stem: &str) -> rc::FileFeature {
+    /// 按真实分词器造文件特征（名字 → 词元），避免手写字面量和分词逻辑漂移
+    fn ft(stem: &str) -> rc::FileFeature {
         rc::FileFeature {
-            tokens: tokens.iter().map(|s| s.to_string()).collect(),
+            tokens: tag::tokenize(stem),
             stem: stem.into(),
+            kind: "word".into(),
             ..Default::default()
         }
     }
 
-    fn d(name: &str, name_tokens: &[&str], confirmed: &[&str], file_count: usize) -> rc::DirFeature {
-        rc::DirFeature {
-            name_tokens: name_tokens.iter().map(|s| s.to_string()).collect(),
-            dir_name: name.into(),
-            confirmed_tokens: confirmed.iter().map(|s| s.to_string()).collect(),
-            file_count,
+    fn f(tokens: &[&str], stem: &str) -> rc::FileFeature {
+        rc::FileFeature {
+            tokens: tokens.iter().map(|s| s.to_string()).collect(),
+            stem: stem.into(),
+            kind: "word".into(),
+            ..Default::default()
         }
     }
 
-    // T4.1 打分：手算期望值
-    #[test]
-    fn score_hand_computed() {
-        let file = f(&["安全检查", "通知"], "安全检查通知.docx");
-        let dir = d("安全检查", &["安全检查"], &["验收", "检查"], 3);
-        // 目录侧词元 = {安全检查, 验收, 检查} = 3 个，命中 {安全检查} = 1 个
-        // → 覆盖率 1/3 = 0.333；stem 含目录名（4 字 ≥3）→ ×1.3 → 0.433
-        let s = rc::score(&file, &dir);
-        assert!((s - 1.0 / 3.0 * 1.3).abs() < 1e-9, "实际 {s}");
-
-        // 子串命中必须高于同词元的无命中情况
-        let no_hit = d("费率清单", &["费率清单"], &[], 0);
-        assert!(s > rc::score(&file, &no_hit));
-        assert_eq!(rc::score(&file, &no_hit), 0.0);
-
-        // 空集 → 0
-        assert_eq!(rc::jaccard(&[], &["a".to_string()]), 0.0);
-        assert_eq!(rc::jaccard(&[], &[]), 0.0);
+    fn seg(name: &str) -> rc::DirSeg {
+        rc::DirSeg {
+            name: name.into(),
+            tokens: tag::tokenize(name),
+        }
     }
 
-    // T4.2 无理由即作废
+    /// 单段目录（路径就一层）
+    fn d(name: &str) -> rc::DirFeature {
+        rc::DirFeature {
+            segments: vec![seg(name)],
+            dir_name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 多段目录：`"信科/A/B"`，叶子段 = 最后一段
+    fn dpath(path: &str) -> rc::DirFeature {
+        let segments: Vec<rc::DirSeg> = path.split('/').map(seg).collect();
+        let dir_name = path.split('/').last().unwrap_or(path).to_string();
+        rc::DirFeature {
+            segments,
+            dir_name,
+            ..Default::default()
+        }
+    }
+
+    /// 已确认文件名 → 词元（**必须先去扩展名**，线上走 `stem_of`，否则 docx 会变成词元）
+    fn stem_of(n: &str) -> &str {
+        match n.rfind('.') {
+            Some(i) if i > 0 => &n[..i],
+            _ => n,
+        }
+    }
+
+    fn with_confirmed(mut dd: rc::DirFeature, names: &[&str]) -> rc::DirFeature {
+        for n in names {
+            dd.confirmed_files.push(tag::tokenize(stem_of(n)));
+            for t in tag::tokenize(stem_of(n)) {
+                if !dd.confirmed_tokens.contains(&t) {
+                    dd.confirmed_tokens.push(t);
+                }
+            }
+        }
+        dd.file_count = names.len();
+        dd
+    }
+
+    fn with_kinds(mut dd: rc::DirFeature, kinds: &[&str]) -> rc::DirFeature {
+        for k in kinds {
+            *dd.kind_hist.entry((*k).to_string()).or_insert(0) += 1;
+        }
+        dd
+    }
+
+    fn with_tags(mut dd: rc::DirFeature, tags: &[&str]) -> rc::DirFeature {
+        dd.topic_tags = tags.iter().map(|s| s.to_string()).collect();
+        dd
+    }
+
+    // ============================================================ T1.5 权重
+
+    // 不变量 1：缺项按比例重分配，权重和恒为 1.0
+    #[test]
+    fn weights_always_sum_to_one() {
+        for has_tag in [false, true] {
+            for has_family in [false, true] {
+                for has_kind in [false, true] {
+                    let w = rc::weights(has_tag, has_family, has_kind);
+                    let sum = w.name + w.tag + w.family + w.kind;
+                    assert!(
+                        (sum - 1.0).abs() < 1e-9,
+                        "权重和 {sum}（tag={has_tag} family={has_family} kind={has_kind}）"
+                    );
+                    // 可用项之间的相对序不许被打乱（缺项是 0，不参与比较）
+                    let seq: Vec<f64> = [w.name, w.tag, w.family, w.kind]
+                        .into_iter()
+                        .filter(|v| *v > 0.0)
+                        .collect();
+                    for i in 1..seq.len() {
+                        assert!(seq[i - 1] >= seq[i], "相对序被打乱：{seq:?}");
+                    }
+                }
+            }
+        }
+
+        // 四项齐全 → 设计文档原值
+        let w = rc::weights(true, true, true);
+        assert!((w.name - 0.40).abs() < 1e-9);
+        assert!((w.tag - 0.35).abs() < 1e-9);
+        assert!((w.family - 0.20).abs() < 1e-9);
+        assert!((w.kind - 0.05).abs() < 1e-9);
+
+        // 无标签 → 0.35 按 0.40:0.20:0.05 摊给其余三项（计划 §3.1 的 0.615/0.308/0.077）
+        let w = rc::weights(false, true, true);
+        assert!((w.name - 0.615_384_615).abs() < 1e-6, "name={}", w.name);
+        assert!((w.family - 0.307_692_307).abs() < 1e-6, "family={}", w.family);
+        assert!((w.kind - 0.076_923_076).abs() < 1e-6, "kind={}", w.kind);
+        assert_eq!(w.tag, 0.0);
+
+        // 只剩 name + kind → 按 0.40:0.05 归一
+        let w = rc::weights(false, false, true);
+        assert!((w.name - 0.888_888_888).abs() < 1e-6);
+        assert!((w.kind - 0.111_111_111).abs() < 1e-6);
+    }
+
+    // ============================================================ T1.2 name
+
+    // 不变量 2：同一个文件、同一个目录名，分数不随已确认文件数变化
+    #[test]
+    fn name_match_never_grows_with_history() {
+        let file = ft("安全检查通知");
+        let one = with_confirmed(d("安全检查"), &["检查报告2020.docx"]);
+        // 50 份全是无关词元：P1 的 dir_union 会把分母从 4 撑到 50+，分数自己往下掉
+        let fifty = with_confirmed(d("安全检查"), &vec!["检查报告2020.docx"; 50]);
+        assert_eq!(
+            rc::name_match(&file, &one),
+            rc::name_match(&file, &fifty),
+            "name 的分母只有目录侧，已确认文件再多也不许把分数拉下来"
+        );
+        assert!(rc::name_match(&file, &one) > 0.0);
+    }
+
+    // 手算：目录名 4 个字 → 4 个词元全被文件名覆盖 → 1.0 × 4/6 特异性 ×1.3 子串加成
+    #[test]
+    fn name_match_hand_computed() {
+        let file = ft("安全检查通知");
+        let dir = d("安全检查");
+        let m = rc::name_match(&file, &dir);
+        // 目录名 4 词元里命中 3 个（整段词元「安全检查」不在文件词元里，文件那边只有
+        // 它自己的整段「安全检查通知」和 2-gram）→ 3/4 × 特异性 4/6 × 子串加成 1.3
+        let want = (3.0 / 4.0) * (4.0 / 6.0) * 1.3;
+        assert!((m - want).abs() < 1e-9, "实际 {m}，期望 {want}");
+        assert!((m - 0.65).abs() < 1e-6);
+        // 空 token 的目录名（纯数字/单字）不许 panic，也不许给分
+        assert_eq!(rc::name_match(&file, &d("2026年")), 0.0);
+        assert_eq!(rc::name_match(&ft("2026"), &dir), 0.0);
+    }
+
+    // 段特异性：命中「真实事项名」必须赢过命中「2 个字的浅段」
+    #[test]
+    fn specific_segment_beats_generic_one() {
+        let file = ft("油田化工智能工厂项目进展情况汇报");
+        let shallow = dpath("信科/生产智能化项目组/汇报");
+        let deep = dpath("信科/生产智能化项目组/智能工厂项目/油田化学项目/验收");
+        let a = rc::name_match(&file, &shallow);
+        let b = rc::name_match(&file, &deep);
+        assert!(b > a, "真实目录应胜过只叫「汇报」的浅目录：deep={b} shallow={a}");
+    }
+
+    // ============================================================ T1.3 family
+
+    // ① 3 份同族 → 明显高于无关；③ 全无交集 → 0 且不可用
+    #[test]
+    fn family_match_top3_average() {
+        let file = ft("安全检查通知");
+        let same = with_confirmed(
+            d("验收"),
+            &["安全检查记录.docx", "安全检查报告.docx", "安全检查表.docx"],
+        );
+        let (s, has) = rc::family_match(&file, &same);
+        assert!(has);
+        // 每份已确认文件侧 6 / 6 / 5 个词元，命中 3 / 3 / 3 → 0.5 / 0.5 / 0.6
+        assert!((s - 0.533_333_333).abs() < 1e-6, "实际 {s}");
+
+        let none = with_confirmed(d("验收"), &["费率清单.xlsx", "招标公告.docx"]);
+        let (s2, has2) = rc::family_match(&file, &none);
+        assert_eq!(s2, 0.0);
+        assert!(!has2, "全无交集 → 该项视为不可用，交给重分配");
+
+        // 空目录
+        let (s3, has3) = rc::family_match(&file, &d("验收"));
+        assert_eq!(s3, 0.0);
+        assert!(!has3);
+    }
+
+    // ② 单份近重名不许把整目录拉满：3 份里 1 份同族只能拿 1/3
+    #[test]
+    fn one_similar_file_cannot_carry_the_dir() {
+        let file = ft("安全检查通知");
+        let one = with_confirmed(d("验收"), &["安全检查记录.docx"]);
+        let mixed = with_confirmed(
+            d("验收"),
+            &["安全检查记录.docx", "费率清单.xlsx", "招标公告.docx"],
+        );
+        let (a, _) = rc::family_match(&file, &one);
+        let (b, _) = rc::family_match(&file, &mixed);
+        assert!(a > b, "1 份同族应高于「1 份同族 + 2 份无关」：{a} vs {b}");
+        assert!(
+            (b - a / 3.0).abs() < 1e-9,
+            "1/3 的份数应给出 1/3 的分：{b} vs {}",
+            a / 3.0
+        );
+    }
+
+    // ============================================================ T1.4 kind
+
+    #[test]
+    fn kind_bias_shrinks_towards_half() {
+        let mut feat = ft("预提单");
+        // 1 份 xlsx 的目录里来一份 xlsx → (1+2)/(1+4) = 0.6，不是 1.0
+        let one = with_kinds(d("材料模板"), &["excel"]);
+        feat.kind = "excel".into();
+        assert!((rc::kind_bias(&feat, &one).0 - 0.6).abs() < 1e-9);
+
+        // 6 份 word 的目录：word → 0.8，pdf → 0.2
+        let six = with_kinds(d("验收"), &["word", "word", "word", "word", "word", "word"]);
+        feat.kind = "word".into();
+        assert!((rc::kind_bias(&feat, &six).0 - 0.8).abs() < 1e-9);
+        feat.kind = "pdf".into();
+        assert!((rc::kind_bias(&feat, &six).0 - 0.2).abs() < 1e-9);
+        assert!(rc::kind_bias(&feat, &six).1, "有类型分布就算可用");
+
+        // 空目录 → 0.5 且不可用
+        let (v, has) = rc::kind_bias(&feat, &d("验收"));
+        assert_eq!(v, 0.5);
+        assert!(!has);
+    }
+
+    // ============================================================ T1.6 合成
+
+    // 只有标签命中、名字完全不沾 → 仍要有主推，且理由说得清「标签」
+    #[test]
+    fn tag_only_hit_still_gives_a_readable_primary() {
+        let mut file = ft("扫描件001");
+        file.topic_tags = vec!["人才培训".into(), "继续教育".into()];
+        let dir = with_tags(
+            with_confirmed(
+                dpath("人事/人事培训"),
+                &["2026年培训计划.docx", "继续教育学时明细.xlsx"],
+            ),
+            &["人才培训", "继续教育", "学时"],
+        );
+        let mut other = dpath("信科/汇报");
+        other.topic_tags = vec!["汇报材料".into()];
+
+        let dirs = vec![(1, dir), (2, other)];
+        let (c, needs) = rc::candidates(&file, &dirs, &HashMap::new());
+        assert!(!needs);
+        assert_eq!(c[0].dir_id, 1, "标签是唯一线索时也要选对：{c:?}");
+        assert!(c[0].reason.contains("标签"), "理由要写「标签」：{}", c[0].reason);
+        assert!(
+            c[0].score >= rc::PRIMARY,
+            "两个标签全中应到主推线：{}",
+            c[0].score
+        );
+    }
+
+    // 四路各命中一次：命中类型与理由都要对得上
+    #[test]
+    fn four_hits_have_four_readable_reasons() {
+        let file = ft("安全检查通知");
+
+        // Name：叶子段命中（短名，只有共同词元，不构成子串）
+        assert_eq!(rc::detect_hit(&file, &d("检查")), rc::HitKind::Name);
+        let r = rc::reason(&file, &d("检查"), rc::HitKind::Name).unwrap();
+        assert!(r.contains("检查"), "{r}");
+
+        // Substring：文件名整段包含目录名（≥3 字）——必须优先于 Name
+        assert_eq!(
+            rc::detect_hit(&file, &d("安全检查")),
+            rc::HitKind::Substring
+        );
+
+        // Family：目录名不沾，但已确认文件同族
+        let fam = with_confirmed(d("验收"), &["安全检查记录.docx"]);
+        assert_eq!(rc::detect_hit(&file, &fam), rc::HitKind::Family);
+        let r = rc::reason(&file, &fam, rc::HitKind::Family).unwrap();
+        assert!(r.contains("同类"), "{r}");
+
+        // Empty：空目录
+        assert_eq!(rc::detect_hit(&file, &d("费率清单")), rc::HitKind::Empty);
+
+        // 祖先段命中时，理由必须说清「上级目录」，不然用户看不懂为什么推到这儿
+        let deep = dpath("信科/生产智能化项目组/智能工厂项目/验收");
+        let f2 = ft("智能工厂项目进展汇报");
+        assert_eq!(rc::detect_hit(&f2, &deep), rc::HitKind::Name);
+        let r = rc::reason(&f2, &deep, rc::HitKind::Name).unwrap();
+        assert!(r.contains("上级目录"), "{r}");
+    }
+
+    // 所有候选的理由都非空（验收 4 的代码级断言）
+    #[test]
+    fn every_candidate_has_a_reason() {
+        let file = ft("安全检查通知");
+        let dirs = vec![
+            (1, d("安全检查")),
+            (2, dpath("信科/汇报")),
+            (3, with_confirmed(d("验收"), &["安全检查记录.docx"])),
+            (4, d("费率清单")),
+        ];
+        let (c, _) = rc::candidates(&file, &dirs, &HashMap::new());
+        assert!(!c.is_empty());
+        for x in &c {
+            assert!(!x.reason.is_empty(), "候选 {} 没有理由", x.dir_id);
+        }
+    }
+
+    // T4.2 回归：能算出分但写不出理由 → 不进候选
     #[test]
     fn candidate_without_reason_is_dropped() {
-        let file = f(&["检", "通知"], "检通知.docx");
-        // 目录侧只有一个单字词元：能算出分（1/3），但凑不出能读的理由
-        let dir = d("检", &["检"], &[], 5);
-        assert!(rc::score(&file, &dir) > 0.0);
+        // 名字不沾、已确认文件也不沾，只有「类型分布」像 —— 有分，但说不出理由
+        let file = ft("预提单");
+        let dir = with_confirmed(with_kinds(d("费率清单"), &["word", "word", "word"]), &[
+            "报价单.docx",
+            "招标公告.docx",
+            "合同条款.docx",
+        ]);
+        let s = rc::score(&file, &dir);
+        assert!(s > 0.0, "类型偏置本身会出分（{s}）");
         assert_eq!(rc::detect_hit(&file, &dir), rc::HitKind::None);
         assert!(rc::reason(&file, &dir, rc::HitKind::None).is_none());
-        assert!(rc::rank(&file, &[(1, dir)]).is_empty(), "无理由的候选不该出现在 rank 里");
+        assert!(
+            rc::rank(&file, &[(1, dir)]).is_empty(),
+            "无理由的候选不该出现在 rank 里"
+        );
     }
 
-    // T4.3 0 / 1 目录分支与同分处理
+    // T4.3 回归：0 / 1 目录分支与同分处理
     #[test]
     fn rank_branches_and_tie_break() {
-        let file = f(&["安全检查", "通知"], "安全检查通知.docx");
+        let file = ft("安全检查通知");
         let paths: HashMap<i64, String> = HashMap::new();
 
         // 0 目录：不 panic、不报错、needsYou
@@ -779,11 +1067,7 @@ mod recommend {
         assert!(needs);
 
         // 1 目录：只有唯一备选，且不给主推
-        let (c, needs) = rc::candidates(
-            &file,
-            &[(7, d("安全检查", &["安全检查"], &[], 0))],
-            &paths,
-        );
+        let (c, needs) = rc::candidates(&file, &[(7, d("安全检查"))], &paths);
         assert_eq!(c.len(), 1);
         assert!(c[0].uncertain);
         assert!(needs);
@@ -791,13 +1075,29 @@ mod recommend {
         assert!(!c[0].reason.is_empty());
 
         // 同分按 file_count 降序
-        let a = d("安全检查", &["安全检查"], &[], 1);
-        let b = d("安全检查", &["安全检查"], &[], 9);
+        let a = with_confirmed(d("安全检查"), &["x1.docx"]);
+        let b = with_confirmed(
+            d("安全检查"),
+            &["x1.docx", "x2.docx", "x3.docx", "x4.docx", "x5.docx"],
+        );
         let ranked = rc::rank(&file, &[(1, a), (2, b)]);
         assert_eq!(ranked[0].0, 2, "同分应先选文件多的目录：{ranked:?}");
     }
 
-    // T4.4 阈值校准（真实语料，跑一遍看覆盖率）
+    // 第 2/3 名备选最多 2 个且不低于 ALT_MIN
+    #[test]
+    fn alts_are_limited() {
+        let file = ft("安全检查通知");
+        let dirs: Vec<(i64, rc::DirFeature)> = (1..=5)
+            .map(|i| (i, with_confirmed(d("安全检查"), &["x1.docx"])))
+            .collect();
+        let (c, needs) = rc::candidates(&file, &dirs, &HashMap::new());
+        assert!(!needs);
+        assert_eq!(c.len(), 1 + rc::MAX_ALTS);
+        let _: &Vec<Candidate> = &c;
+    }
+
+    // 阈值校准（真实语料，跑一遍看覆盖率）
     #[test]
     fn calibrate_thresholds_on_real_corpus() {
         #[derive(serde::Deserialize)]
@@ -815,17 +1115,7 @@ mod recommend {
         let dirs: Vec<(i64, rc::DirFeature)> = dir_names
             .iter()
             .enumerate()
-            .map(|(i, n)| {
-                (
-                    i as i64 + 1,
-                    rc::DirFeature {
-                        name_tokens: tag::tokenize(n),
-                        dir_name: n.to_string(),
-                        confirmed_tokens: vec![],
-                        file_count: 0,
-                    },
-                )
-            })
+            .map(|(i, n)| (i as i64 + 1, d(n)))
             .collect();
 
         let mut cover = [0usize; 4];
@@ -844,6 +1134,7 @@ mod recommend {
                 stem: stem.to_string(),
                 kind: k.to_string(),
                 mtime: raw.mtime,
+                ..Default::default()
             };
             let best = dirs
                 .iter()
@@ -884,12 +1175,10 @@ mod recommend {
             .map(|i| {
                 (
                     i as i64,
-                    rc::DirFeature {
-                        name_tokens: tag::tokenize(&format!("目录{i}号业务事项")),
-                        dir_name: format!("目录{i}号业务事项"),
-                        confirmed_tokens: vec!["安全检查".into(), "费率清单".into()],
-                        file_count: i as usize,
-                    },
+                    with_confirmed(
+                        with_kinds(d(&format!("目录{i}号业务事项")), &["word"]),
+                        &["安全检查记录.docx", "费率清单.xlsx"],
+                    ),
                 )
             })
             .collect();
@@ -911,19 +1200,6 @@ mod recommend {
         let ms = t0.elapsed().as_millis();
         println!("455 × 50 rank 用时 {ms}ms（命中 {acc}）");
         assert!(ms <= 300, "超预算：{ms}ms");
-    }
-
-    // 第 2/3 名备选最多 2 个且不低于 ALT_MIN
-    #[test]
-    fn alts_are_limited() {
-        let file = f(&["安全检查", "通知"], "安全检查通知.docx");
-        let dirs: Vec<(i64, rc::DirFeature)> = (1..=5)
-            .map(|i| (i, d("安全检查", &["安全检查"], &[], 1)))
-            .collect();
-        let (c, needs) = rc::candidates(&file, &dirs, &HashMap::new());
-        assert!(!needs);
-        assert_eq!(c.len(), 1 + rc::MAX_ALTS);
-        let _: &Vec<Candidate> = &c;
     }
 }
 
@@ -2526,5 +2802,88 @@ mod rename {
         let row = db::file_row(&conn, f).unwrap().unwrap();
         assert!(row.target_name.is_none());
         assert_eq!(db::effective_name(&row), "IMG_2043.docx");
+    }
+}
+
+// ================================================================ 目录特征（P2 T1.1）
+
+mod dir_feature {
+    use crate::index as db;
+    use crate::model::NewAssignment;
+
+    fn assign(conn: &rusqlite::Connection, file_id: i64, dir_id: i64, decision: &str) {
+        db::insert_assignment(
+            conn,
+            &NewAssignment {
+                file_id,
+                batch_id: None,
+                target_dir_id: Some(dir_id),
+                origin: "user_picked".into(),
+                confidence: None,
+                reason: None,
+                decision: decision.into(),
+                decided_at: db::now_ms(),
+            },
+        )
+        .unwrap();
+    }
+
+    // T1.1 一次查全：类型分布 + topic 标签，且不做 N+1
+    #[test]
+    fn dir_feature_rows_collect_kind_hist_and_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+
+        let a = db::insert_dir(&conn, None, "安全环保", "user").unwrap();
+        let b = db::insert_dir(&conn, None, "人事培训", "user").unwrap();
+
+        // 2 目录 / 5 份已确认：word 3、pdf 2，其中 2 份带 topic「安全检查」
+        let names = [
+            ("安全检查通知.docx", "docx", "word", true),
+            ("安全检查记录.docx", "docx", "word", true),
+            ("安全检查表.docx", "docx", "word", false),
+            ("消防验收报告.pdf", "pdf", "pdf", false),
+            ("环评批复.pdf", "pdf", "pdf", false),
+        ];
+        for (n, ext, kind, tagged) in names {
+            let fid = db::insert_test_file_kind(
+                &conn,
+                root.id,
+                n,
+                ext,
+                kind,
+                db::Status::Confirmed,
+            )
+            .unwrap();
+            assign(&conn, fid, a.id, "accepted");
+            if tagged {
+                db::insert_test_topic_tag(&conn, fid, "安全检查").unwrap();
+            }
+        }
+
+        // 人事培训只有 1 份，且是 parked —— 不该算进目录特征
+        let p = db::insert_test_file_kind(
+            &conn,
+            root.id,
+            "培训计划.docx",
+            "docx",
+            "word",
+            db::Status::Parked,
+        )
+        .unwrap();
+        assign(&conn, p, b.id, "parked");
+
+        let rows = db::dir_feature_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 2);
+        let sa = rows.iter().find(|r| r.rel_path == "安全环保").unwrap();
+        assert_eq!(sa.kind_hist.get("word").copied(), Some(3));
+        assert_eq!(sa.kind_hist.get("pdf").copied(), Some(2));
+        assert_eq!(sa.confirmed_names.len(), 5);
+        assert_eq!(sa.topic_tags, vec!["安全检查".to_string()]);
+
+        let hr = rows.iter().find(|r| r.rel_path == "人事培训").unwrap();
+        assert!(hr.confirmed_names.is_empty(), "parked 不算已确认");
+        assert!(hr.kind_hist.is_empty());
     }
 }

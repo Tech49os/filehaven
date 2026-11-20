@@ -17,6 +17,7 @@
 import json
 import sys
 
+# 后端会把自己的阈值写进产出（`thresholds`），这里只是兜底默认
 PRIMARY = 0.35
 UNCERTAIN_MIN = 0.20
 
@@ -35,6 +36,9 @@ def summarize(payload, uncertain_min=UNCERTAIN_MIN, label=""):
         for c in cases
         if not c["ranked"] or c["ranked"][0]["score"] < uncertain_min
     )
+    # 「给了候选的行里，主推对不对」——阈值越高，被压下去的低分行就不能算进分母
+    given = [c for c in cases if c["ranked"] and c["ranked"][0]["score"] >= uncertain_min]
+    top1_given = sum(1 for c in given if c["rank"] == 1)
     deep = [c for c in cases if c.get("hasDeepTags")]
     shallow = [c for c in cases if not c.get("hasDeepTags")]
     return {
@@ -46,6 +50,8 @@ def summarize(payload, uncertain_min=UNCERTAIN_MIN, label=""):
         "top1_n": top1,
         "top3_n": top3,
         "none_n": none,
+        "given_n": len(given),
+        "top1_given": ratio(top1_given, len(given)),
         "deep_n": len(deep),
         "shallow_n": len(shallow),
     }
@@ -60,7 +66,11 @@ def main():
     with open(path, encoding="utf-8") as f:
         payload = json.load(f)
 
-    s = summarize(payload, label="现行阈值")
+    th = payload.get("thresholds") or {}
+    primary = th.get("primary", PRIMARY)
+    umin = th.get("uncertainMin", UNCERTAIN_MIN)
+    print(f"阈值：PRIMARY={primary} UNCERTAIN_MIN={umin} ALT_MIN={th.get('altMin')}")
+    s = summarize(payload, uncertain_min=umin, label="现行阈值")
     print(
         f"cases={s['n']} dirs={payload.get('dirCount')}  "
         f"top1={s['top1']:.1f}% ({s['top1_n']}/{s['n']})  "
@@ -81,13 +91,16 @@ def main():
                   f"实得={got:10s} {sc}")
 
     if grid:
-        print("\n阈值网格（UNCERTAIN_MIN → 无候选占比；排名与阈值无关）：")
-        print("| UNCERTAIN_MIN | 无候选 | 说明 |")
-        print("|---|---|---|")
-        for i in range(0, 11):
+        print("\n阈值网格（排名与阈值无关，阈值只决定「给不给候选」）：")
+        print("| UNCERTAIN_MIN | 有候选 | 无候选 | 有候选时 top1 | 说明 |")
+        print("|---|---|---|---|---|")
+        for i in range(0, 13):
             t = round(i * 0.05, 2)
             g = summarize(payload, uncertain_min=t)
-            print(f"| {t:.2f} | {g['noCandidate']:.1f}% | {'P1 现行' if abs(t - 0.20) < 1e-9 else ''} |")
+            print(
+                f"| {t:.2f} | {100 - g['noCandidate']:.1f}% | {g['noCandidate']:.1f}% "
+                f"| {g['top1_given']:.1f}% | {'现行' if abs(t - umin) < 1e-9 else ''} |"
+            )
     return 0
 
 

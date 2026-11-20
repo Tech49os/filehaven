@@ -891,41 +891,91 @@ struct ScoredPool {
     dir_count: usize,
 }
 
-fn scored_pool(conn: &rusqlite::Connection) -> Result<ScoredPool, CmdError> {
-    let dir_rows = index::dir_feature_rows(conn)?;
-    let mut rel_paths: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-    let mut dirs: Vec<(i64, recommend::DirFeature)> = Vec::new();
-    for (id, name, rel, confirmed_names) in &dir_rows {
-        rel_paths.insert(*id, rel.clone());
-        let mut confirmed: Vec<String> = Vec::new();
-        for n in confirmed_names {
-            for t in tag::tokenize(stem_of(n)) {
-                if !confirmed.contains(&t) {
-                    confirmed.push(t);
-                }
+/// 目录行 → `DirFeature`。评测（`--eval`）与真实池**必须走同一个函数**，
+/// 否则「评测说变准了、线上没变」这种事会看不出来。
+///
+/// `rel_path` 拆成各段：nameMatch 认的就是「路径上每一段」，只取叶子段会漏掉
+/// 真实线索（详见 `recommend.rs` 头部第 5 条）。
+fn dir_feature_of(
+    rel_path: &str,
+    name: &str,
+    confirmed_names: &[String],
+    kind_hist: &HashMap<String, i64>,
+    topic_tags: &[String],
+) -> recommend::DirFeature {
+    let seg_names: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+    let seg_names = if seg_names.is_empty() { vec![name] } else { seg_names };
+    let segments: Vec<recommend::DirSeg> = seg_names
+        .iter()
+        .map(|s| recommend::DirSeg {
+            name: (*s).to_string(),
+            tokens: tag::tokenize(s),
+        })
+        .collect();
+
+    let mut confirmed_tokens: Vec<String> = Vec::new();
+    let mut confirmed_files: Vec<Vec<String>> = Vec::new();
+    for n in confirmed_names {
+        let toks = tag::tokenize(stem_of(n));
+        for t in &toks {
+            if !confirmed_tokens.contains(t) {
+                confirmed_tokens.push(t.clone());
             }
         }
+        confirmed_files.push(toks);
+    }
+
+    recommend::DirFeature {
+        segments,
+        dir_name: name.to_string(),
+        confirmed_tokens,
+        confirmed_files,
+        file_count: confirmed_names.len(),
+        kind_hist: kind_hist.clone(),
+        topic_tags: topic_tags.to_vec(),
+    }
+}
+
+fn file_feature_of(name: &str, kind: &str, mtime: i64, topic_tags: Vec<String>) -> recommend::FileFeature {
+    let stem = stem_of(name).to_string();
+    recommend::FileFeature {
+        tokens: tag::tokenize(&stem),
+        stem,
+        kind: kind.to_string(),
+        mtime,
+        topic_tags,
+    }
+}
+
+fn scored_pool(conn: &rusqlite::Connection) -> Result<ScoredPool, CmdError> {
+    let dir_rows = index::dir_feature_rows(conn)?;
+    let mut rel_paths: HashMap<i64, String> = HashMap::new();
+    let mut dirs: Vec<(i64, recommend::DirFeature)> = Vec::new();
+    for row in &dir_rows {
+        rel_paths.insert(row.id, row.rel_path.clone());
         dirs.push((
-            *id,
-            recommend::DirFeature {
-                name_tokens: tag::tokenize(name),
-                dir_name: name.clone(),
-                confirmed_tokens: confirmed,
-                file_count: confirmed_names.len(),
-            },
+            row.id,
+            dir_feature_of(
+                &row.rel_path,
+                &row.name,
+                &row.confirmed_names,
+                &row.kind_hist,
+                &row.topic_tags,
+            ),
         ));
     }
 
     let pool = index::pool_rows(conn)?;
+    let ids: Vec<i64> = pool.iter().map(|r| r.id).collect();
+    let tags = index::topic_tags_for(conn, &ids)?;
     let mut items = Vec::with_capacity(pool.len());
     for row in &pool {
-        let stem = stem_of(&row.name);
-        let feat = recommend::FileFeature {
-            tokens: tag::tokenize(stem),
-            stem: stem.to_string(),
-            kind: row.kind.clone(),
-            mtime: row.mtime,
-        };
+        let feat = file_feature_of(
+            &row.name,
+            &row.kind,
+            row.mtime,
+            tags.get(&row.id).cloned().unwrap_or_default(),
+        );
         let (cands, needs) = recommend::candidates(&feat, &dirs, &rel_paths);
         items.push((row.clone(), cands, needs));
     }
@@ -1214,39 +1264,34 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
         let mut rel_paths: HashMap<i64, String> = HashMap::new();
         for (i, d) in set.dirs.iter().enumerate() {
             let id = i as i64 + 1;
-            let mut names: Vec<&String> = d.file_names.iter().collect();
+            let mut names: Vec<String> = d.file_names.clone();
+            let mut kinds: Vec<String> = d.kinds.clone();
             if d.rel_path == c.expect_dir {
-                if let Some(p) = names.iter().position(|n| **n == c.file_name) {
+                if let Some(p) = names.iter().position(|n| *n == c.file_name) {
                     names.remove(p);
-                }
-            }
-            let mut confirmed: Vec<String> = Vec::new();
-            for n in &names {
-                for t in tag::tokenize(stem_of(n)) {
-                    if !confirmed.contains(&t) {
-                        confirmed.push(t);
+                    if p < kinds.len() {
+                        kinds.remove(p);
                     }
                 }
+            }
+            let mut kind_hist: HashMap<String, i64> = HashMap::new();
+            for k in &kinds {
+                *kind_hist.entry(k.clone()).or_insert(0) += 1;
             }
             rel_paths.insert(id, d.rel_path.clone());
             dirs.push((
                 id,
-                recommend::DirFeature {
-                    name_tokens: tag::tokenize(&d.name),
-                    dir_name: d.name.clone(),
-                    confirmed_tokens: confirmed,
-                    file_count: names.len(),
-                },
+                dir_feature_of(
+                    &d.rel_path,
+                    &d.name,
+                    &names,
+                    &kind_hist,
+                    &d.topic_tags,
+                ),
             ));
         }
 
-        let stem = stem_of(&c.file_name).to_string();
-        let feat = recommend::FileFeature {
-            tokens: tag::tokenize(&stem),
-            stem: stem.clone(),
-            kind: c.kind.clone(),
-            mtime: c.mtime,
-        };
+        let feat = file_feature_of(&c.file_name, &c.kind, c.mtime, Vec::new());
         let ranked = recommend::rank(&feat, &dirs);
         let rows: Vec<serde_json::Value> = ranked
             .iter()
@@ -1279,6 +1324,13 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
     let payload = serde_json::json!({
         "dirCount": set.dirs.len(),
         "caseCount": set.cases.len(),
+        // 阈值随产出一起写出来：Python 汇总不能拿自己的一套默认值，
+        // 否则「脚本说 7.9%、代码实际 2.6%」这种对不上会一直存在
+        "thresholds": {
+            "primary": recommend::PRIMARY,
+            "uncertainMin": recommend::UNCERTAIN_MIN,
+            "altMin": recommend::ALT_MIN,
+        },
         "cases": out_cases,
     });
     match std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()) {
