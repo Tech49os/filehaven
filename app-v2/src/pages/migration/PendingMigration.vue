@@ -49,6 +49,16 @@ onUnmounted(() => {
   unlisten.forEach((fn) => fn())
 })
 
+/** 归档时用的是目标名：列表必须显示它，否则「搬过去的名字」和这里看到的不是一个 */
+function showName(f: { name: string; targetName?: string | null }) {
+  return f.targetName || f.name
+}
+
+/** 悬停时把「原名 → 新名」一起说清 */
+function nameHint(f: { name: string; targetName?: string | null }) {
+  return f.targetName ? `${f.name} → ${f.targetName}` : f.name
+}
+
 async function onApply() {
   const r = await store.apply()
   if (r) void app.refreshBoot()
@@ -158,7 +168,8 @@ async function reload() {
               :aria-label="`选择 ${f.name}`"
               @change="store.toggle(f.id)"
             />
-            <span class="fname ellipsis" :title="f.name">{{ f.name }}</span>
+            <span class="fname ellipsis" :title="nameHint(f)">{{ showName(f) }}</span>
+            <span v-if="f.targetName" class="tag ren">改名</span>
             <span class="fsize">{{ formatSize(f.size) }}</span>
             <span class="fst">{{ statusLabel(f.status) }}</span>
             <span v-if="conflictOf(f.id)" class="conflict">
@@ -357,6 +368,9 @@ async function reload() {
   border-radius: 5px;
   background: var(--c-primary-bg);
   color: var(--c-primary);
+}
+.tag.ren {
+  flex: 0 0 auto;
 }
 .gmeta {
   margin-left: auto;

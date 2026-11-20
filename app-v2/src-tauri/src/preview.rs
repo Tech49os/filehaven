@@ -58,6 +58,13 @@ fn extract_kind(kind: &str) -> &'static str {
     }
 }
 
+/// 老版二进制 Office（97-2003）与 WPS 二进制格式的扩展名
+///
+/// 这些格式不是 zip 包，我们没有解析器。**必须单独说清楚**，
+/// 否则会掉进「读不出正文（可能是扫描件、空文档或加密文件）」那句里 ——
+/// 那是把「我们不会」说成「你的文件有问题」，用户会去翻文件、重装 Office。
+const LEGACY_EXT: &[&str] = &["doc", "ppt", "xls", "wps", "et", "dps"];
+
 /// 读一份文件的预览
 ///
 /// `kind` / `ext` / `size` 都来自索引库（`FileRow`），不现场再猜一遍：
@@ -77,6 +84,11 @@ pub fn make(path: &Path, kind: &str, ext: &str, size: u64) -> Preview {
     }
     if kind == "pdf" {
         return Preview::none("PDF 这一版不抽正文，直接打开看最快");
+    }
+    if LEGACY_EXT.contains(&ext.to_ascii_lowercase().as_str()) {
+        return Preview::none(format!(
+            "老版 .{ext} 是二进制格式，这版还解析不了，直接打开看"
+        ));
     }
 
     let (raw, _, _) = extract::extract(path, ext, extract_kind(kind), size);

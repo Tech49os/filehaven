@@ -129,7 +129,38 @@ pub fn open(path: &Path) -> Result<Connection, CmdError> {
          PRAGMA synchronous=NORMAL;",
     )?;
     conn.execute_batch(include_str!("schema.sql"))?;
+    // schema.sql 是 CREATE TABLE IF NOT EXISTS —— 老库不会因为改了建表语句就多出列，
+    // 后加的列必须在这里补一次（幂等）
+    ensure_column(&conn, "files", "target_name", "TEXT")?;
     Ok(conn)
+}
+
+/// 表里没有这列就加上；已经有就什么都不做。
+///
+/// 返回 true 表示这次真的执行了 ALTER，便于测试与诊断。
+pub fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<bool, CmdError> {
+    if has_column(conn, table, column)? {
+        return Ok(false);
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    Ok(true)
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, CmdError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let name: String = r.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// 仅供测试与诊断用
@@ -829,7 +860,7 @@ pub fn set_note(conn: &Connection, file_id: i64, note: &str) -> Result<(), CmdEr
 
 // ---------------------------------------------------------------- 批次
 
-const FILE_COLS: &str = "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note";
+const FILE_COLS: &str = "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name";
 
 fn row_to_file(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FileRow> {
     Ok(crate::model::FileRow {
@@ -845,7 +876,36 @@ fn row_to_file(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FileRow>
         source_root_id: r.get(9)?,
         defer_count: r.get(10)?,
         note: r.get(11)?,
+        target_name: r.get(12)?,
     })
+}
+
+/// 归档时用的名字：改过就用新名字，没改就是原名
+pub fn effective_name(f: &crate::model::FileRow) -> String {
+    f.target_name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| f.name.clone())
+}
+
+/// 写入/清除「归档时改成的名字」（空串 = 恢复原名）
+pub fn set_target_name(
+    conn: &Connection,
+    file_id: i64,
+    name: Option<&str>,
+) -> Result<(), CmdError> {
+    let v = name.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let n = conn.execute(
+        "UPDATE files SET target_name=?1 WHERE id=?2",
+        params![v, file_id],
+    )?;
+    if n == 0 {
+        return Err(CmdError::new(
+            "NOT_FOUND",
+            format!("文件不存在：{file_id}"),
+        ));
+    }
+    Ok(())
 }
 
 /// 当前未关闭的批次：(id, seq, size)
@@ -1094,11 +1154,14 @@ pub fn confirmed_for_migration(conn: &Connection) -> Result<Vec<ConfirmedRow>, C
          ORDER BY d.rel_path, f.name, f.id"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |r| {
+    // 目录两列紧跟在 FILE_COLS 后面：偏移量由列数算出来，别写死
+    // （写死过一次：加 target_name 之后 12/13 全错位，读成 Null 才炸出来）
+    let off = FILE_COLS.split(',').count();
+    let rows = stmt.query_map([], move |r| {
         Ok(ConfirmedRow {
             file: row_to_file(r)?,
-            dir_id: r.get(12)?,
-            dir_rel_path: r.get(13)?,
+            dir_id: r.get(off)?,
+            dir_rel_path: r.get(off + 1)?,
         })
     })?;
     let mut out = Vec::new();

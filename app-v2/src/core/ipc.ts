@@ -155,6 +155,25 @@ export function saveNote(fileId: number, note: string) {
   return invoke<void>('save_note', { fileId, note })
 }
 
+/**
+ * 归档前改名（只改库里的目标名，源文件不动）。
+ *
+ * 传空串 = 改回原名。返回后端清洗后的名字（扩展名会补回来）。
+ */
+export function renameFile(fileId: number, newName: string) {
+  return invoke<string>('rename_file', { fileId, newName })
+}
+
+/**
+ * 按**现在的**目录集合重算这几份文件的候选。
+ *
+ * 目录新增/用过之后，本来算好的候选就过期了 —— 不重开批次，只把候选换掉，
+ * 已确认的、焦点位置、撤销栈都不动。
+ */
+export function rescoreFiles(fileIds: number[]) {
+  return invoke<BatchItem[]>('rescore_files', { fileIds })
+}
+
 // ---------------------------------------------------------------- 迁移
 
 export function migrationPreview() {

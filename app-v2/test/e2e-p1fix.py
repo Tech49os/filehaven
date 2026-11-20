@@ -42,6 +42,16 @@ def make_xlsx(p: Path, rows: list[str]):
         z.writestr('xl/sharedStrings.xml', f'<sst>{body}</sst>')
 
 
+def make_pptx(p: Path, slides: list[str]):
+    """真 pptx：只要 ppt/slides/slideN.xml 里有 <a:t> 文字，抽取器就该读得出来"""
+    with zipfile.ZipFile(p, 'w', zipfile.ZIP_DEFLATED) as z:
+        for i, s in enumerate(slides, 1):
+            z.writestr(
+                f'ppt/slides/slide{i}.xml',
+                f'<p:sld><a:p><a:r><a:t>{s}</a:t></a:r></a:p></p:sld>',
+            )
+
+
 def make_drawio(p: Path, nodes: list[str]):
     cells = ''.join(
         f'<mxCell id="c{i}" value="{n}" vertex="1"><mxGeometry/></mxCell>'
@@ -89,6 +99,8 @@ REAL = [
         p, ['部门月度费用明细', '差旅费', '办公用品', '培训费', '合计 8,420.00'])),
     ('智能工厂平台架构图.drawio', lambda p: make_drawio(
         p, ['数据采集层', '边缘网关', 'MES 系统', '质量看板', '设备联网'])),
+    ('生产智能化项目组工作汇报.pptx', lambda p: make_pptx(
+        p, ['生产智能化项目组工作汇报', '一、项目范围与里程碑', '二、成本核算与投入产出'])),
     ('消防演练现场.png', make_png),
     ('整改报告-消防.pdf', None),
 ]
@@ -216,6 +228,9 @@ def verify():
     time.sleep(1.0)
     ok &= verify_workstead(p)
 
+    # ---- P1d：不刷批次 / 只报待确认 / 改名 / 目录联想（2026-11-20 第二轮反馈）
+    ok &= verify_p1d(p)
+
     # ---- P1c：目录建议能听人话
     ok &= verify_dirsuggest(p)
 
@@ -260,6 +275,7 @@ def verify_workstead(p) -> bool:
     # 逐份看过去：至少一份能读出正文，至少一张图片能显示缩略图
     rows = p.eval("document.querySelectorAll('.qrow').length") or 0
     text_hit = ''
+    all_text = ''
     img_hit = False
     for i in range(min(rows, 12)):
         pos = p.eval(
@@ -277,15 +293,91 @@ def verify_workstead(p) -> bool:
             " return { text: t ? t.textContent.trim().slice(0, 60) : '',"
             " img: im ? im.getAttribute('src') : '' }; })()"
         ) or {}
-        if body.get('text') and not text_hit:
-            text_hit = body['text']
+        if body.get('text'):
+            all_text += body['text']
+            if not text_hit:
+                text_hit = body['text']
         if body.get('img', '').startswith('http'):
             img_hit = True
 
     ok &= check('能读出正文摘要', bool(text_hit), text_hit)
     print(f'        正文样例：{text_hit[:40]}')
     ok &= check('图片能显示缩略图（asset 协议）', img_hit)
+    # 2026-11-20 反馈：42MB 的 pptx 显示「读不出正文」。抽取器不能按文件总大小放弃
+    ok &= check('pptx 也能读出正文', '生产智能化' in all_text, all_text[:120])
     p.screenshot('D:/filemanager/app-v2/test/shot-workstead.png')
+    return ok
+
+
+def verify_p1d(p) -> bool:
+    """第二轮反馈：进整理台不再刷批次、顶部只说待确认份数、能改名、N 里能联想"""
+    ok = True
+    p.click_text('整理台', 'button', exact=False)
+    time.sleep(1.0)
+
+    def pending() -> str:
+        return p.eval("document.querySelector('.ws .title')?.textContent?.trim() ?? ''")
+
+    title = pending()
+    ok &= check('顶部只报「待确认 N 份」', title.startswith('待确认') and title.endswith('份'), title)
+    ok &= check('顶部不再出现「第 N 批」', '批' not in title, title)
+
+    before = pending()
+    p.eval("document.querySelector('.mid .ft .btn.primary')?.click()")
+    time.sleep(0.9)
+    after = pending()
+    ok &= check('确认一份后待确认数跟着减', before != after, f'{before} → {after}')
+
+    # 切走再回来：批次不能重开（重开的话份数会回到 12 份）
+    p.click_text('待迁移', 'button', exact=False)
+    time.sleep(0.6)
+    p.click_text('整理台', 'button', exact=False)
+    time.sleep(1.0)
+    again = pending()
+    ok &= check('切走再回来不重开批次', again == after, f'{after} → {again}')
+
+    # 改名：点「改名」→ 写新名 → 回车
+    ok &= check('卡片上有「改名」入口', bool(p.eval("!!document.querySelector('.ren')")))
+    try:
+        p.eval("document.querySelector('.ren')?.click()")
+        time.sleep(0.35)
+        p.eval(
+            "(() => { const i = document.querySelector('.rename-input');"
+            " if (!i) return;"
+            " const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
+            " setter.call(i, '改名验证-年度汇报');"
+            " i.dispatchEvent(new Event('input', {bubbles:true}));"
+            " i.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); })()"
+        )
+        time.sleep(0.9)
+        t = p.text()
+        ok &= check('改名后卡片说清「归档时存为」', '归档时存为' in t and '改名验证' in t, t[:300])
+    except RuntimeError as e:
+        ok &= check('改名能落到卡片上', False, str(e))
+
+    # N 输入框：聚焦后列出已有目录，敲「安全」能索引到
+    try:
+        p.click_text('新建目录', 'button', exact=False)
+        time.sleep(0.6)
+        p.eval("document.querySelector('.newdir input')?.focus()")
+        time.sleep(0.4)
+        p.eval(
+            "(() => { const i = document.querySelector('.newdir input');"
+            " const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
+            " setter.call(i, '安全');"
+            " i.dispatchEvent(new Event('input', {bubbles:true})); })()"
+        )
+        time.sleep(0.9)
+        opts = p.eval(
+            "Array.from(document.querySelectorAll('.newdir .opt')).map(e => e.textContent.trim())"
+        ) or []
+        ok &= check('N 输入框能联想已有目录', any('安全' in o for o in opts), str(opts)[:200])
+        p.press('Escape')
+        time.sleep(0.3)
+    except RuntimeError as e:
+        ok &= check('N 输入框能联想已有目录', False, str(e))
+
+    p.screenshot('D:/filemanager/app-v2/test/shot-p1d.png')
     return ok
 
 

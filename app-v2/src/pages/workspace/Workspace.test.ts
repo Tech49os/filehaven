@@ -13,6 +13,8 @@ const saveNote = vi.fn()
 const previewFile = vi.fn()
 const openPath = vi.fn()
 const revealPath = vi.fn()
+const renameFile = vi.fn()
+const rescoreFiles = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   nextBatch,
@@ -25,6 +27,8 @@ vi.mock('../../core/ipc', () => ({
   previewFile,
   openPath,
   revealPath,
+  renameFile,
+  rescoreFiles,
   listDirs: vi.fn().mockResolvedValue([]),
   previewDirName: vi.fn(),
 }))
@@ -122,7 +126,9 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     })
   })
 
-  it('顶部显示「第 N 批 · 份数 · 已确认 n/N」与池内剩余', async () => {
+  // 2026-11-20 反馈：「第多少批哪些没必要，就待确认多少份即可」——
+  // 顶部只报「还要定几份」，不再提第几批
+  it('顶部只显示「待确认 N 份」与池内剩余，不谈批次', async () => {
     nextBatch.mockResolvedValue(
       view({
         items: [
@@ -135,9 +141,8 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     await flushPromises()
 
     const top = w.find('.title').text()
-    expect(top).toContain('第 3 批')
-    expect(top).toContain('2 份')
-    expect(top).toContain('已确认 0')
+    expect(top).toBe('待确认 2 份')
+    expect(top).not.toContain('第 3 批')
     expect(w.text()).toContain('池里还有 37 份')
     // 卡片上每份都要有理由，不许出现「无理由」的候选
     expect(w.text()).toContain('安全检查 的匹配理由')
@@ -166,7 +171,7 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     await flushPromises()
     expect(w.text()).toContain('还没有任何目录')
     expect(w.text()).toContain('让 AI 建议目录结构')
-    expect(w.text()).toContain('手动新建目录')
+    expect(w.text()).toContain('自己写一个')
     expect(w.text()).toContain('先按')
     expect(w.find('.mid .ft .btn.primary').text()).toContain('新建目录')
   })
@@ -193,7 +198,7 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
       dirId: 7,
       decision: 'accepted',
     })
-    expect(w.find('.title').text()).toContain('已确认 1/2')
+    expect(w.find('.title').text()).toBe('待确认 1 份')
     expect(w.find('aside.right').text()).toContain('安全检查通知.docx')
     // 焦点跳到第 2 份
     expect(w.find('.name').text()).toBe('采购合同.docx')
@@ -213,7 +218,7 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
 
     await w.find('.mid .ft .btn.primary').trigger('click')
     await flushPromises()
-    expect(w.find('.title').text()).toContain('已确认 1/2')
+    expect(w.find('.title').text()).toBe('待确认 1 份')
 
     const undoBtn = w.findAll('.top button').find((b) => b.text().includes('撤销'))
     expect(undoBtn).toBeTruthy()
@@ -224,7 +229,7 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     await flushPromises()
 
     expect(undoDecide).toHaveBeenCalledWith(42)
-    expect(w.find('.title').text()).toContain('已确认 0/2')
+    expect(w.find('.title').text()).toBe('待确认 2 份')
     expect(w.find('.name').text()).toBe('安全检查通知.docx')
   })
 
@@ -308,5 +313,100 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     expect(btn).toBeTruthy()
     await btn.trigger('click')
     expect(w.find('aside.right').exists()).toBe(true)
+  })
+
+  // ------------------------------------------------ 复用批次 / 重新推荐 / 改名（2026-11-20 反馈）
+
+  it('切走再回来接着用同一批，不重开批次', async () => {
+    nextBatch.mockResolvedValue(
+      view({ items: [item(1, 'a.docx', [cand(7, '安全检查')]), item(2, 'b.docx', [cand(8, '合同')])] }),
+    )
+    const first = mount(Workspace)
+    await flushPromises()
+    expect(nextBatch).toHaveBeenCalledTimes(1)
+    // 确认第一份，制造「用户已经干过活」的状态
+    await first.find('.mid .ft .btn.primary').trigger('click')
+    await flushPromises()
+    first.unmount()
+
+    const again = mount(Workspace)
+    await flushPromises()
+    expect(nextBatch).toHaveBeenCalledTimes(1) // 关键：没有再开一批
+    expect(again.find('.title').text()).toBe('待确认 1 份')
+    expect(again.find('aside.right').text()).toContain('a.docx')
+  })
+
+  it('点「重新推荐」只重算还没定的那几份', async () => {
+    rescoreFiles.mockResolvedValue([
+      { file: item(2, 'b.docx', []).file, candidates: [cand(9, '合同/2026年')], needsYou: false },
+    ])
+    nextBatch.mockResolvedValue(
+      view({
+        items: [item(1, 'a.docx', [cand(7, '安全检查')]), item(2, 'b.docx', [cand(8, '合同')])],
+      }),
+    )
+    const w = mount(Workspace)
+    await flushPromises()
+    await w.find('.mid .ft .btn.primary').trigger('click')
+    await flushPromises()
+
+    const btn = w.findAll('button').find((b) => b.text() === '重新推荐')!
+    await btn.trigger('click')
+    await flushPromises()
+
+    expect(rescoreFiles).toHaveBeenCalledWith([2])
+    expect(w.text()).toContain('1 份的首选换了')
+    expect(w.text()).toContain('合同/2026年')
+  })
+
+  it('确认前能给文件改名，源文件名不动、卡片上说清「归档时存为」', async () => {
+    renameFile.mockResolvedValue('生产智能化项目组工作汇报-终版.pptx')
+    nextBatch.mockResolvedValue(view({ items: [item(1, 'IMG_2043.docx', [cand(7, '安全检查')])] }))
+    const w = mount(Workspace)
+    await flushPromises()
+
+    await w.find('.ren').trigger('click')
+    const input = w.find('.rename-input')
+    expect(input.exists()).toBe(true)
+    // 输入框里只有主干，扩展名单独固定在右边
+    expect((input.element as HTMLInputElement).value).toBe('IMG_2043')
+    expect(w.find('.rename-ext').text()).toBe('.docx')
+
+    await input.setValue('生产智能化项目组工作汇报-终版')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(renameFile).toHaveBeenCalledWith(1, '生产智能化项目组工作汇报-终版')
+    expect(w.text()).toContain('归档时存为')
+    expect(w.text()).toContain('生产智能化项目组工作汇报-终版.pptx')
+    // 原名还在（磁盘上的名字没动）
+    expect(w.find('.name').text()).toBe('IMG_2043.docx')
+  })
+
+  it('0 目录提示是一行，不再占掉大半屏', async () => {
+    nextBatch.mockResolvedValue(view({ dirCount: 0, items: [item(1, 'a.docx', [], true)] }))
+    const w = mount(Workspace)
+    await flushPromises()
+    expect(w.find('.nodir').exists()).toBe(true)
+    expect(w.find('.nodir').text()).toContain('还没有任何目录')
+    // 大块 EmptyState 不该再出现
+    expect(w.find('.mid').text()).not.toContain('先有目录才能归档')
+  })
+
+  it('空批次不算有批次：扫到文件后再进来要重开', async () => {
+    nextBatch.mockResolvedValueOnce(view({ items: [] }))
+    const empty = mount(Workspace)
+    await flushPromises()
+    expect(empty.text()).toContain('池子里没有待整理的文件了')
+    empty.unmount()
+
+    // 扫描补进来两份
+    nextBatch.mockResolvedValue(
+      view({ items: [item(1, 'a.docx', [cand(7, '安全检查')])] }),
+    )
+    const again = mount(Workspace)
+    await flushPromises()
+    expect(nextBatch).toHaveBeenCalledTimes(2)
+    expect(again.find('.name').text()).toBe('a.docx')
   })
 })

@@ -9,7 +9,7 @@
  * 1. 完整绝对路径单独一行 —— 之前它挤在「大小·类型·时间·路径」那行末尾，被省略成只剩文件名；
  * 2. 正文摘要 / 图片缩略图 + 「打开」「定位」。判定一份 `扫描件001.pdf` 靠文件名是不行的。
  */
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
@@ -38,6 +38,8 @@ const emit = defineEmits<{
   (e: 'park'): void
   (e: 'open'): void
   (e: 'reveal'): void
+  /** 归档时改的名字；空串 = 恢复原名 */
+  (e: 'rename', name: string): void
 }>()
 
 const f = computed(() => props.item.file)
@@ -58,6 +60,44 @@ const expanded = ref(false)
 const thumb = computed(() =>
   props.preview?.kind === 'image' ? imageSrc(f.value.absPath) : '',
 )
+
+/* ---- 归档前改名（2026-11-20 反馈：想顺便把名字改得更明确） ---- */
+const renaming = ref(false)
+const nameDraft = ref('')
+const renameEl = ref<HTMLInputElement | null>(null)
+/** 库里记的目标名；没改过是 null */
+const targetName = computed(() => f.value.targetName || null)
+const canRename = computed(() => !confirmed.value && !handledElsewhere.value)
+
+/** 输入框里只放主干：扩展名由后端补回来，用户不用操心也不会被改坏 */
+function stemOf(name: string): string {
+  const ext = f.value.ext.toLowerCase()
+  if (!ext) return name
+  const suf = `.${ext}`
+  return name.toLowerCase().endsWith(suf) ? name.slice(0, name.length - suf.length) : name
+}
+
+function startRename() {
+  nameDraft.value = stemOf(targetName.value ?? f.value.name)
+  renaming.value = true
+  void nextTick(() => {
+    renameEl.value?.focus()
+    renameEl.value?.select()
+  })
+}
+
+function commitRename() {
+  if (!renaming.value) return
+  const v = nameDraft.value.trim()
+  renaming.value = false
+  // 没动过就不必落库（避免每次点开再点掉都发一次 IPC）
+  if (v === stemOf(targetName.value ?? f.value.name)) return
+  emit('rename', v)
+}
+
+function cancelRename() {
+  renaming.value = false
+}
 </script>
 
 <template>
@@ -65,7 +105,31 @@ const thumb = computed(() =>
     <header class="hd">
       <div class="ico"><AppIcon :name="iconOf(f.kind)" :size="18" /></div>
       <div class="nm">
-        <h2 class="name" :title="f.name">{{ f.name }}</h2>
+        <div class="nameline">
+          <h2 v-if="!renaming" class="name" :title="f.name">{{ f.name }}</h2>
+          <template v-else>
+            <input
+              ref="renameEl"
+              v-model="nameDraft"
+              class="rename-input"
+              type="text"
+              spellcheck="false"
+              title="改完回车保存，Esc 取消"
+              @keydown.enter.stop.prevent="commitRename"
+              @keydown.esc.stop.prevent="cancelRename"
+              @blur="commitRename"
+            />
+            <span v-if="f.ext" class="rename-ext">.{{ f.ext }}</span>
+          </template>
+          <button
+            v-if="!renaming && canRename"
+            class="ren"
+            title="归档时换个名字（源文件不动）"
+            @click="startRename"
+          >
+            <AppIcon name="edit" :size="11" />改名
+          </button>
+        </div>
         <p class="meta">
           <span>{{ formatSize(f.size) }}</span>
           <span class="dot">·</span>
@@ -78,7 +142,8 @@ const thumb = computed(() =>
       <div class="state">
         <span class="counter">{{ position.index + 1 }} / {{ position.total }}</span>
         <span v-if="deferredBadge" class="badge defer">已暂缓 {{ f.deferCount }} 次</span>
-        <span v-if="item.needsYou && !noDirs" class="badge you">待你指定</span>
+        <!-- 已经确认过就别再喊「待你指定」了，那是自相矛盾 -->
+        <span v-if="item.needsYou && !noDirs && !confirmed" class="badge you">待你指定</span>
         <span v-if="confirmed" class="badge ok"><AppIcon name="check" :size="11" /> 已确认</span>
       </div>
     </header>
@@ -94,6 +159,14 @@ const thumb = computed(() =>
         <span class="kbd">L</span>定位
       </button>
     </div>
+
+    <!-- 改过名就说清楚：落盘用的是这个名字，源文件不动 -->
+    <p v-if="targetName && !renaming" class="newname">
+      <AppIcon name="edit" :size="11" />
+      归档时存为 <b>{{ targetName }}</b>
+      <button v-if="canRename" class="link" @click="startRename">再改</button>
+      <button v-if="canRename" class="link" @click="emit('rename', '')">用原名</button>
+    </p>
 
     <!-- 正文摘要 / 图片缩略图 / 读不出的原因 -->
     <section v-if="preview" class="preview">
@@ -121,6 +194,7 @@ const thumb = computed(() =>
     <p v-if="confirmed" class="result">
       <AppIcon name="check" :size="13" />
       已归到 <b>{{ targetPath ?? '所选目录' }}</b>
+      <span v-if="f.targetName" class="as">存为 {{ f.targetName }}</span>
     </p>
     <p v-else-if="handledElsewhere" class="result dim">
       {{ f.status === 'parked' ? '已放进待定区，回头再定' : '已暂缓，回到池子里下批再说' }}
@@ -180,12 +254,14 @@ const thumb = computed(() =>
 .card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   background: var(--c-surface);
   border: 0.5px solid var(--c-border);
   border-radius: var(--r-card);
   box-shadow: var(--sh-card);
-  padding: 18px 20px;
+  /* 2026-11-20 反馈：「文字和边框间的距离有问题」—— 20/22 让内容离开边框，
+     同时卡片按内容高度收（不再拉满），下面那一大片空就没有了 */
+  padding: 20px 22px;
   min-height: 0;
   /* 换一份文件 = 组件重挂（key 变了），这一下淡入就是「换张卡」的反馈 */
   animation: card-in var(--dur) var(--ease-out) both;
@@ -239,6 +315,97 @@ const thumb = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- 改名 ---- */
+.nameline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.nameline .name {
+  min-width: 0;
+}
+.ren {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 2px 5px;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--c-text-3);
+  /* 常驻但压暗：只在 hover 才出现的话，没人知道这儿能改名 */
+  opacity: 0.6;
+  transition: opacity var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+/* 指到卡片上就提亮 */
+.card:hover .ren,
+.ren:focus-visible {
+  opacity: 1;
+}
+.ren:hover {
+  color: var(--c-primary);
+  background: var(--c-primary-bg);
+}
+.rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--c-primary);
+  background: var(--c-surface);
+  box-shadow: 0 0 0 3px var(--c-primary-glow);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font);
+  color: var(--c-text);
+  outline: none;
+}
+.rename-ext {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--c-text-2);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+
+.newname {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--r-item);
+  background: var(--c-primary-bg);
+  color: var(--c-primary);
+  font-size: 12px;
+  min-width: 0;
+}
+.newname b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.link {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--c-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link:first-of-type {
+  margin-left: auto;
 }
 
 .meta {
@@ -444,6 +611,15 @@ const thumb = computed(() =>
   background: var(--c-warning-bg);
   color: var(--c-warning-deep);
 }
+.result .as {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--c-text-2);
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .body {
   min-height: 0;
@@ -503,8 +679,8 @@ const thumb = computed(() =>
 /* 窗口不高时，卡片自己先松一档内边距，把空间让给内容 */
 @media (max-height: 800px) {
   .card {
-    padding: 14px 16px;
-    gap: 8px;
+    padding: 16px 18px;
+    gap: 10px;
   }
 }
 </style>

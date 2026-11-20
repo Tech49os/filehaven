@@ -130,6 +130,40 @@ pub fn clean_path(input: &str) -> DirNamePreview {
     }
 }
 
+/// 文件名清洗：归档前顺手改名用
+///
+/// 2026-11-20 实测反馈：「有些文件我想在确认迁移后顺便改个名字，让他更明确」。
+/// 规则在目录名那套之上多一件事 —— **扩展名不能丢也不能叠**：
+/// - 输入「周报」→ `周报.pptx`（补回原扩展名，否则落盘就变成没有类型的文件）
+/// - 输入「周报.pptx」→ `周报.pptx`（不叠成 `周报.pptx.pptx`）
+/// - 输入「周报.final.pptx」→ `周报.final.pptx`（中间的点是名字的一部分，保留）
+pub fn clean_file_name(input: &str, orig_ext: &str) -> DirNamePreview {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return DirNamePreview {
+            cleaned: String::new(),
+            valid: false,
+            reason: Some("文件名不能为空".into()),
+        };
+    }
+    let p = clean_dir_name(raw);
+    if !p.valid {
+        return p;
+    }
+    let ext = orig_ext.trim().trim_start_matches('.').to_lowercase();
+    if ext.is_empty() {
+        return p;
+    }
+    if p.cleaned.to_lowercase().ends_with(&format!(".{ext}")) {
+        return p;
+    }
+    DirNamePreview {
+        cleaned: format!("{}.{ext}", p.cleaned),
+        valid: true,
+        reason: None,
+    }
+}
+
 fn split_ext(name: &str) -> (&str, &str) {
     match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i..]),

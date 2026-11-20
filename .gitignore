@@ -14,8 +14,12 @@ app/test/_pdf_page.png
 app-v2/test/e2e/
 
 # P1 体验修复的端到端隔离库与语料（可用 test/e2e-p1fix.py seed 重建）
+# 带时间戳的是 test/run-e2e.py 每次跑出来的，跑完可以整目录删
 .e2e-data/
+.e2e-data-*/
 .e2e-src/
 .e2e-archive/
 .e2e-appdata/
 .e2e-webview2/
+.e2e-wv2/
+.e2e-wv2-*/

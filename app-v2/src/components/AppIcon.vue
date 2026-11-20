@@ -32,6 +32,7 @@ const PATHS: Record<string, string> = {
   image:
     '<rect x="3" y="4.5" width="18" height="15" rx="2.4"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 4.8-4.8 3.6 3.6 2.8-2.8L20 18"/>',
   undo: '<path d="M9 14 4.5 9.5 9 5"/><path d="M4.5 9.5h9.5a5.5 5.5 0 0 1 0 11h-3"/>',
+  edit: '<path d="M16.5 4.6a2.1 2.1 0 0 1 3 3L9.2 17.9l-3.9.9.9-3.9z"/><path d="M14.6 6.5l3 3"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.6"/>',
   spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/>',
   layers:

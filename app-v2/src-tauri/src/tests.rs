@@ -471,6 +471,42 @@ mod plan {
         assert!(!pl::clean_path(".../报告").valid);
     }
 
+    // 归档前改名：可以只写主干，扩展名不能丢也不能叠
+    #[test]
+    fn clean_file_name_keeps_exactly_one_ext() {
+        assert_eq!(
+            pl::clean_file_name("生产智能化项目组汇报", "pptx").cleaned,
+            "生产智能化项目组汇报.pptx"
+        );
+        assert_eq!(
+            pl::clean_file_name("生产智能化项目组汇报.pptx", "pptx").cleaned,
+            "生产智能化项目组汇报.pptx"
+        );
+        // 大小写不同也算同一个扩展名
+        assert_eq!(
+            pl::clean_file_name("汇报.PPTX", "pptx").cleaned,
+            "汇报.PPTX"
+        );
+        // 名字中间的点保留（最终版、v2 这类写法很常见）
+        assert_eq!(
+            pl::clean_file_name("汇报.final", "pptx").cleaned,
+            "汇报.final.pptx"
+        );
+        // 没扩展名的文件（比如 README）不硬加
+        assert_eq!(pl::clean_file_name("会议记录", "").cleaned, "会议记录");
+        // 空白 / 全是非法字符 → 明确报错，不写一个空名字进去
+        assert!(!pl::clean_file_name("   ", "pptx").valid);
+        assert_eq!(
+            pl::clean_file_name("   ", "pptx").reason.as_deref(),
+            Some("文件名不能为空")
+        );
+        // 非法字符照目录那套规则换下划线，绝不让它落盘
+        assert_eq!(
+            pl::clean_file_name("汇报/2026:终稿", "docx").cleaned,
+            "汇报_2026_终稿.docx"
+        );
+    }
+
     // T2.8 unique_name
     #[test]
     fn unique_name_starts_at_two_and_respects_ext() {
@@ -2221,6 +2257,19 @@ mod system {
         let ghost = nested.join("nope").join("deeper");
         assert!(crate::free_gb(&ghost.to_string_lossy()).is_some());
     }
+
+    // 回归：「定位」曾把 `/select,<路径>` 塞进 Command::arg，explorer 认不出这个写法，
+    // 不报错、直接回落到文档目录（用户看到「打开的是文档目录，不是文件所在文件夹」）。
+    // explorer 只认 `/select,"路径"`：路径必须自己带引号，所以要走 raw_arg。
+    #[test]
+    fn explorer_select_arg_quotes_the_path() {
+        let a = crate::explorer_select_arg(r"C:\Users\kingb\Downloads\汇报.pptx");
+        assert_eq!(a, "/select,\"C:\\Users\\kingb\\Downloads\\汇报.pptx\"");
+        // 带空格的路径同样只能是「一段引号」，不能被 std 再包一层
+        let b = crate::explorer_select_arg(r"D:\文档归档\信息 科\年度 汇报.docx");
+        assert_eq!(b, "/select,\"D:\\文档归档\\信息 科\\年度 汇报.docx\"");
+        assert!(!b.contains("\"\""), "出现双层引号 explorer 就解析失败了：{b}");
+    }
 }
 
 // ================================================================ 备注
@@ -2326,6 +2375,35 @@ mod preview {
         assert!(pv.truncated, "截断了就要说，不然用户以为文件就这么短");
     }
 
+    fn pptx(dir: &Path, slides: &[&str]) -> PathBuf {
+        let p = dir.join("deck.pptx");
+        let f = std::fs::File::create(&p).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        for (i, s) in slides.iter().enumerate() {
+            z.start_file(format!("ppt/slides/slide{}.xml", i + 1), opts)
+                .unwrap();
+            z.write_all(
+                format!("<p:sld><a:p><a:t>{s}</a:t></a:p></p:sld>").as_bytes(),
+            )
+            .unwrap();
+        }
+        z.finish().unwrap();
+        p
+    }
+
+    // 2026-11-20 实测反馈：42MB 的 pptx 显示「读不出正文（可能是扫描件、空文档或加密文件）」。
+    // 真因是抽取器按**文件总大小**（30MB）直接放弃，可 zip 里真正的 slide XML 只有几 KB ——
+    // 而 42MB 全是被图片/视频/嵌入对象占掉的。体积闸只管「整份读进内存」的路，不能一刀切。
+    #[test]
+    fn huge_pptx_is_still_readable() {
+        let d = tmp();
+        let p = pptx(d.path(), &["生产智能化项目组工作汇报", "成本核算"]);
+        let pv = preview::make(&p, "ppt", "pptx", 42 * 1024 * 1024);
+        assert_eq!(pv.kind, "text", "42MB 的 pptx 也得读，{pv:?}");
+        assert!(pv.text.contains("生产智能化"), "{:?}", pv.text);
+    }
+
     // docx 是这批文件里最多的，必须真能读出中文正文
     #[test]
     fn docx_body_is_extracted() {
@@ -2369,6 +2447,19 @@ mod preview {
         assert!(pv.reason.is_empty(), "图片有缩略图，不必再写一句废话");
     }
 
+    // 老版二进制 Office 不能掉进「可能是扫描件/空文档/加密文件」那句里 ——
+    // 那是把「我们不会解析」说成「你的文件有问题」，用户会白折腾半天
+    #[test]
+    fn legacy_office_says_it_is_our_limit_not_your_file() {
+        let d = tmp();
+        let p = d.path().join("旧格式汇报.ppt");
+        std::fs::write(&p, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1").unwrap();
+        let pv = preview::make(&p, "ppt", "ppt", 512);
+        assert_eq!(pv.kind, "none");
+        assert!(pv.reason.contains("老版"), "{:?}", pv.reason);
+        assert!(!pv.reason.contains("扫描件"), "别把锅甩给文件：{:?}", pv.reason);
+    }
+
     // PDF 这一版不解析：老实说，别装
     #[test]
     fn pdf_says_it_is_not_parsed() {
@@ -2378,5 +2469,62 @@ mod preview {
         let pv = preview::make(&p, "pdf", "pdf", 9);
         assert_eq!(pv.kind, "none");
         assert!(pv.reason.contains("PDF"), "{:?}", pv.reason);
+    }
+}
+
+// ================================================================ 归档前改名
+//
+// 2026-11-20 实测反馈：「有些文件我想在确认迁移后顺便改个名字，让他更明确」。
+// 名字只记在库里（`files.target_name`），磁盘上的源文件一动不动；
+// 迁移时用目标名落盘，原名留在隔离区的相对路径里，撤销照样还原。
+
+mod rename {
+    use super::index::fresh_db;
+    use crate::index as db;
+    use crate::plan as pl;
+
+    // 老库是 CREATE TABLE IF NOT EXISTS 建的，改建表语句不会自动多出新列 ——
+    // 打补丁的那一步必须幂等，且真的能让旧库可用
+    #[test]
+    fn old_db_gains_target_name_column() {
+        let (_d, conn) = fresh_db();
+        // 模拟改造前建的库
+        conn.execute_batch("ALTER TABLE files DROP COLUMN target_name")
+            .unwrap();
+        assert!(db::ensure_column(&conn, "files", "target_name", "TEXT").unwrap());
+        // 第二次什么都不做，也不能报错
+        assert!(!db::ensure_column(&conn, "files", "target_name", "TEXT").unwrap());
+
+        let root = db::add_source_root(&conn, "C:/scanroot").unwrap();
+        let f = db::insert_test_file(&conn, root.id, "旧库里的文件.docx", db::Status::PendingConfirm)
+            .unwrap();
+        db::set_target_name(&conn, f, Some("改过的名字.docx")).unwrap();
+        let row = db::file_row(&conn, f).unwrap().unwrap();
+        assert_eq!(row.target_name.as_deref(), Some("改过的名字.docx"));
+    }
+
+    #[test]
+    fn renamed_file_keeps_both_names() {
+        let (_d, conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/scanroot").unwrap();
+        let f = db::insert_test_file(&conn, root.id, "IMG_2043.docx", db::Status::PendingConfirm)
+            .unwrap();
+
+        let row = db::file_row(&conn, f).unwrap().unwrap();
+        assert_eq!(db::effective_name(&row), "IMG_2043.docx", "没改名就还是原名");
+
+        let cleaned = pl::clean_file_name("配电箱巡检记录", &row.ext).cleaned;
+        assert_eq!(cleaned, "配电箱巡检记录.docx");
+        db::set_target_name(&conn, f, Some(&cleaned)).unwrap();
+
+        let row = db::file_row(&conn, f).unwrap().unwrap();
+        assert_eq!(row.name, "IMG_2043.docx", "原名是磁盘事实，不能改");
+        assert_eq!(db::effective_name(&row), "配电箱巡检记录.docx");
+
+        // 空串 = 恢复原名（用户清空输入框就是这个意思）
+        db::set_target_name(&conn, f, Some("   ")).unwrap();
+        let row = db::file_row(&conn, f).unwrap().unwrap();
+        assert!(row.target_name.is_none());
+        assert_eq!(db::effective_name(&row), "IMG_2043.docx");
     }
 }

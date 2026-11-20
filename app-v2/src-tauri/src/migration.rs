@@ -65,7 +65,8 @@ fn snapshot(conn: &Connection) -> Result<Vec<(PlanInput, FileRow)>, CmdError> {
         };
         let input = PlanInput {
             file_id: r.file.id,
-            name: r.file.name.clone(),
+            // 归档用目标名：确认前顺手改过名的话，搬过去的就是新名字
+            name: index::effective_name(&r.file),
             src_path: r.file.abs_path.clone(),
             dir_id: r.dir_id,
             dir_rel_path: r.dir_rel_path.clone(),

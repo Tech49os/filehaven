@@ -92,6 +92,8 @@ export interface FileRow {
   sourceRootId: number | null
   deferCount: number
   note: string | null
+  /** 归档时改成的名字；null = 保持原名 */
+  targetName?: string | null
 }
 
 export interface ArchiveDir {

@@ -15,8 +15,19 @@ use zip::ZipArchive;
 const TEXT_CAP: usize = 6000;
 const PLAIN_CAP: u64 = 200_000;
 
-/// 需要读正文的最大文件体积，超过只按文件名判断（防内存爆掉）
+/// 需要**整份读进内存**的文件才能读正文的最大体积（目前只有 draw.io）
+///
+/// 注意：这个闸**不能**套在 Office 上。2026-11-20 实测反馈「42MB 的 pptx 读不出正文」，
+/// 真因就是这里按总大小一刀切放弃了 —— 而 42MB 几乎全是被图片/视频/嵌入对象占掉的，
+/// 真正有用的 slide XML 只有几 KB。Office 的读法是一个 entry 一个 entry 解压，
+/// 内存上限交给 `MAX_ENTRY_BYTES` 管就够。
 pub const MAX_PARSE_BYTES: u64 = 30 * 1024 * 1024;
+
+/// 单个 zip entry 解压后最多收多少字节
+///
+/// 上限防的是「一个 XML 解出 500MB」这种解压炸弹，不是防大文件本身：
+/// 正常的 document.xml / sheet1.xml 都在几百 KB 量级，8MB 已经很宽松。
+const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 
 fn re_tag() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -120,9 +131,10 @@ fn office_text(path: &Path, kind: &str) -> String {
     };
 
     let read_entry = |zip: &mut ZipArchive<BufReader<File>>, name: &str| -> Option<String> {
-        let mut e = zip.by_name(name).ok()?;
+        let e = zip.by_name(name).ok()?;
         let mut s = String::new();
-        e.read_to_string(&mut s).ok()?;
+        // 限量读：entry 声称解压后 500MB 也只收 8MB，剩下的留给 TEXT_CAP 去截
+        e.take(MAX_ENTRY_BYTES).read_to_string(&mut s).ok()?;
         Some(s)
     };
 
@@ -316,10 +328,6 @@ fn is_plain_text(ext: &str) -> bool {
 
 /// 抽取一份文件的正文特征
 pub fn extract(path: &Path, ext: &str, kind: &str, size: u64) -> (String, Vec<String>, bool) {
-    if size > MAX_PARSE_BYTES {
-        return (String::new(), Vec::new(), false);
-    }
-
     if is_plain_text(ext) {
         let f = match File::open(path) {
             Ok(f) => f,
@@ -335,6 +343,10 @@ pub fn extract(path: &Path, ext: &str, kind: &str, size: u64) -> (String, Vec<St
     }
 
     if kind == "drawio" {
+        // 这一路是把整个文件当字符串读，体积闸留在这里
+        if size > MAX_PARSE_BYTES {
+            return (String::new(), Vec::new(), false);
+        }
         let mut s = String::new();
         if let Ok(mut f) = File::open(path) {
             if f.read_to_string(&mut s).is_ok() {

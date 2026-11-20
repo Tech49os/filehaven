@@ -18,11 +18,14 @@ import { useNarrow } from '../../core/useNarrow'
 import * as ipc from '../../core/ipc'
 import { useAppStore } from '../../stores/app'
 import { useBatchStore } from '../../stores/batch'
+import { useDirsStore } from '../../stores/dirs'
 import type { FilePreview } from '../../core/types'
 
 const router = useRouter()
 const app = useAppStore()
 const store = useBatchStore()
+/** 目录清单：既是 N 输入框的联想源，也是「目录从 0 变成有」的判定依据 */
+const dirs = useDirsStore()
 
 const busy = ref(false)
 const editingNote = ref<number | null>(null)
@@ -50,15 +53,30 @@ const currentAck = computed(() =>
 
 const parkedInBatch = computed(() => store.items.filter((i) => i.file.status === 'parked'))
 
+/** 本批还剩几份没定 —— 头部只报这个数，不报「第几批」（那对用户没有任何意义） */
+const pendingCount = computed(
+  () => store.items.filter((i) => i.file.status !== 'confirmed').length,
+)
+
+/** 刚重算完的一句话反馈（别弹窗，就一行小字） */
+const rescoreNote = ref<string | null>(null)
+
 onMounted(async () => {
-  await store.load(12)
-  void app.refreshBoot()
+  // 有批次就接着用：切走再回来不该重来一遍（2026-11-20 反馈）
+  await store.ensureLoaded(12)
+  void syncDirs()
   window.addEventListener('keydown', onKey)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
 })
+
+/** 目录数跟库对齐：批次是复用的，dirCount 还是开批时那个数字 */
+async function syncDirs() {
+  await dirs.load()
+  store.syncDirCount(dirs.count)
+}
 
 /** 换卡就取一次预览；同一份文件命中缓存，不再读磁盘 */
 watch(
@@ -169,10 +187,33 @@ async function run(fn: () => Promise<unknown>) {
   busy.value = true
   try {
     await fn()
-    void app.refreshBoot()
+    await app.refreshBoot()
+    // 判定可能刚建过目录（N 那条路），目录数要跟上
+    await syncDirs()
   } finally {
     busy.value = false
   }
+}
+
+/** 手动按现在的目录集合重算候选 */
+async function rescore() {
+  busy.value = true
+  rescoreNote.value = null
+  try {
+    const changed = await store.refreshCandidates()
+    rescoreNote.value = changed
+      ? `已按现有目录重算，${changed} 份的首选换了`
+      : '已按现有目录重算，首选没变'
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 卡片上改归档名：只改目标名，源文件不动 */
+async function onRename(name: string) {
+  const it = store.current
+  if (!it) return
+  await store.renameTarget(it.file.id, name)
 }
 
 async function onNewDirConfirm(input: string) {
@@ -225,16 +266,12 @@ function goSuggest() {
     <header class="top">
       <div class="title">
         <template v-if="store.total > 0">
-          第 {{ store.seq }} 批
-          <span class="sep">·</span>
-          {{ store.total }} 份
-          <span class="sep">·</span>
-          已确认 <b>{{ store.confirmedCount }}</b
-          >/{{ store.total }}
+          待确认 <b>{{ pendingCount }}</b> 份
         </template>
         <template v-else>整理台</template>
       </div>
       <div class="acts">
+        <span v-if="rescoreNote" class="note">{{ rescoreNote }}</span>
         <span v-if="store.remaining > 0" class="rest">池里还有 {{ store.remaining }} 份</span>
         <!-- 窄窗时右栏收进抽屉，这里给一个入口（宽窗不需要，右栏一直在） -->
         <button
@@ -256,6 +293,14 @@ function goSuggest() {
         >
           <AppIcon name="undo" :size="12" /> 撤销{{ store.undoStack.length ? `(${store.undoStack.length})` : '' }}
         </button>
+        <button
+          class="btn"
+          :disabled="busy || store.total === 0"
+          title="按现在的目录重新算一遍候选（新建目录之后用这个）"
+          @click="rescore"
+        >
+          重新推荐
+        </button>
         <button class="btn" :disabled="busy" @click="reload">换一批</button>
         <button v-if="store.total > 0" class="btn" @click="finishBatch">结束本批</button>
       </div>
@@ -263,16 +308,15 @@ function goSuggest() {
 
     <p v-if="store.error || actionErr" class="err" role="alert">{{ store.error ?? actionErr }}</p>
 
-    <!-- 0 目录空态（验收 11）：不报错、不阻塞，只换一条路 -->
-    <EmptyState
-      v-if="store.dirCount === 0 && store.total > 0"
-      icon="sparkle"
-      title="还没有任何目录"
-      desc="先有目录才能归档。可以让 AI 给两套方案，也可以自己写一个。"
-    >
-      <button class="btn primary" @click="goSuggest">让 AI 建议目录结构</button>
-      <button class="btn" @click="store.openInput()">手动新建目录</button>
-    </EmptyState>
+    <!-- 0 目录：一行提示就够。之前这里是一整块 1009×241 的虚线空态，
+         直接压在已经完整可用的整理台上，除了占地方没有任何作用 -->
+    <div v-if="store.dirCount === 0 && store.total > 0" class="nodir">
+      <AppIcon name="sparkle" :size="14" />
+      <span class="nd-t">还没有任何目录</span>
+      <span class="nd-d">先建一个才能归档；也可以让 AI 按这批文件给两套方案</span>
+      <button class="btn primary small" @click="goSuggest">让 AI 建议目录结构</button>
+      <button class="btn small" @click="store.openInput()">自己写一个</button>
+    </div>
 
     <div v-if="store.total > 0" class="cols">
       <!-- 左：队列 -->
@@ -288,7 +332,11 @@ function goSuggest() {
           >
             <span class="no">{{ i + 1 }}</span>
             <span class="qname ellipsis" :title="it.file.name">{{ it.file.name }}</span>
-            <span class="qst">{{ statusLabel(it.file.status) }}</span>
+            <!-- 队列里的都是待确认的，这一列只给「已确认 / 暂缓」留位置，
+                 别每行重复写一遍「待确认」占掉文件名的地方 -->
+            <span v-if="it.file.status !== 'pending_confirm'" class="qst">
+              {{ statusLabel(it.file.status) }}
+            </span>
           </li>
         </ul>
       </aside>
@@ -314,6 +362,7 @@ function goSuggest() {
           @park="run(() => store.park())"
           @open="openCurrent"
           @reveal="revealCurrent"
+          @rename="onRename"
         />
 
         <div v-if="store.inputOpen" class="newdir">
@@ -437,6 +486,39 @@ function goSuggest() {
 .rest {
   font-size: 12px;
   color: var(--c-text-2);
+}
+
+.note {
+  font-size: 12px;
+  color: var(--c-success-deep);
+}
+
+/* 0 目录提示条：一行，不再占掉半屏 */
+.nodir {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 12px;
+  border-radius: var(--r-banner);
+  background: var(--c-primary-bg);
+  color: var(--c-primary);
+  font-size: 12px;
+}
+.nd-t {
+  font-weight: 500;
+  flex: 0 0 auto;
+}
+.nd-d {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--c-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nodir .btn {
+  flex: 0 0 auto;
 }
 
 .cols {
@@ -611,9 +693,10 @@ h3.mt {
   overflow: auto;
 }
 
-/* 卡片吃满剩余高度：按钮贴着卡片底部，比「一张小卡浮在一大片灰底上」稳当 */
+/* 卡片按内容高度，不再拉满：已确认状态内容很少，拉满会变成「上面挤一堆字、
+   下面一大片空」。快捷键行靠 margin-top:auto 自己贴底 */
 .mid :deep(.card) {
-  flex: 1 0 auto;
+  flex: 0 0 auto;
 }
 
 .newdir {

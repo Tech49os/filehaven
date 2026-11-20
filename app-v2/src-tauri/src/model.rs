@@ -172,6 +172,8 @@ pub struct FileRow {
     pub source_root_id: Option<i64>,
     pub defer_count: i32,
     pub note: Option<String>,
+    /// 归档时改成的名字（NULL = 保持原名）
+    pub target_name: Option<String>,
 }
 
 /// 一条候选目录（reason 非空，服务端保证）

@@ -29,6 +29,8 @@ export const useBatchStore = defineStore('batch', () => {
   const resolved = ref<Set<number>>(new Set())
   const undoStack = ref<number[]>([])
   const finished = ref<CloseAck | null>(null)
+  /** 已经「结束本批」：下次进整理台要开新批 */
+  const closed = ref(false)
   /** 新建目录输入框是否打开（决定键盘谁说话） */
   const inputOpen = ref(false)
   const lastAck = ref<DecideAck | null>(null)
@@ -74,6 +76,7 @@ export const useBatchStore = defineStore('batch', () => {
     loading.value = true
     error.value = null
     finished.value = null
+    closed.value = false
     resolved.value = new Set()
     undoStack.value = []
     try {
@@ -89,6 +92,21 @@ export const useBatchStore = defineStore('batch', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  /**
+   * 进整理台时用这个，别直接用 `load`。
+   *
+   * 2026-11-20 反馈：「每次进入整理台他都给我刷新一遍，没有必要」。
+   * 批次只该在三种情况下换：还没开过、用户点了「换一批」、上一批已经「结束本批」。
+   * 切页面来回走不该丢队列、丢已确认列表、丢撤销栈。
+   *
+   * 但**空批次不算有批次**：启动时池子里还没有文件，那次 `next_batch` 是一份都没有的，
+   * 之后扫完再进来必须重开 —— 否则界面永远停在「池子里没有待整理的文件」。
+   */
+  async function ensureLoaded(size = 12) {
+    if (view.value && !closed.value && view.value.items.length > 0) return view.value
+    return load(size)
   }
 
   /** 判定落库的统一入口：三个按钮、备选、新建目录都走这里 */
@@ -159,7 +177,10 @@ export const useBatchStore = defineStore('batch', () => {
     inputOpen.value = false
     try {
       const d = await ipc.createDir(input)
-      return await apply(d.id, 'changed', 'new_dir', null)
+      const ack = await apply(d.id, 'changed', 'new_dir', null)
+      // 目录集合变了：剩下那些文件的候选是按旧目录算的，立刻重算一遍
+      if (ack) await refreshCandidates()
+      return ack
     } catch (e) {
       error.value = toCmdError(e).message
       return null
@@ -219,11 +240,71 @@ export const useBatchStore = defineStore('batch', () => {
     try {
       const ack = await ipc.closeBatch(view.value.batchId)
       finished.value = ack
+      closed.value = true
       return ack
     } catch (e) {
       error.value = toCmdError(e).message
       return null
     }
+  }
+
+  /**
+   * 按现在的目录集合重算候选（新建目录后自动调，也可手动点「重新推荐」）。
+   *
+   * 只换 candidates / needsYou，**不动**顺序、状态、当前焦点 ——
+   * 换掉整批会让已经确认过的东西重新跳一遍，用户会以为点错了。
+   * 返回「首选目录变了」的份数，用来给一句反馈。
+   */
+  async function refreshCandidates() {
+    const ids = items.value.filter((i) => !isResolved(i)).map((i) => i.file.id)
+    if (ids.length === 0) return 0
+    try {
+      const fresh = await ipc.rescoreFiles(ids)
+      const byId = new Map(fresh.map((b) => [b.file.id, b]))
+      let changed = 0
+      for (const it of items.value) {
+        const f = byId.get(it.file.id)
+        if (!f) continue
+        if (f.candidates[0]?.dirId !== it.candidates[0]?.dirId) changed += 1
+        it.candidates = f.candidates
+        it.needsYou = f.needsYou
+      }
+      error.value = null
+      return changed
+    } catch (e) {
+      error.value = toCmdError(e).message
+      return 0
+    }
+  }
+
+  /** 归档前改名：改的是目标名，源文件不动 */
+  async function renameTarget(fileId: number, name: string) {
+    const it = items.value.find((x) => x.file.id === fileId)
+    if (!it) return null
+    try {
+      const cleaned = await ipc.renameFile(fileId, name)
+      it.file.targetName = cleaned || null
+      error.value = null
+      return cleaned
+    } catch (e) {
+      error.value = toCmdError(e).message
+      return null
+    }
+  }
+
+  /**
+   * 目录数从 0 变成有时修一下。
+   *
+   * 批次是复用的，`dirCount` 还停在开批那一刻；如果开批时一个目录都没有，
+   * 之后建了目录卡片还会一直卡在「还没有任何目录」。
+   * 只在「原来是 0」时改：非 0 的数字差一两个不影响任何界面判断，
+   * 而每次挂载都去覆盖它，反而会把好数据冲掉（测试里就是这么炸的）。
+   */
+  function syncDirCount(n: number) {
+    if (!view.value) return
+    if (view.value.dirCount > 0) return
+    if (n <= 0) return
+    view.value = { ...view.value, dirCount: n }
   }
 
   /** 给暂缓/先放着的文件补备注（双击行内编辑） */
@@ -255,10 +336,12 @@ export const useBatchStore = defineStore('batch', () => {
     loading,
     error,
     finished,
+    closed,
     inputOpen,
     lastAck,
     undoStack,
     load,
+    ensureLoaded,
     accept,
     pick,
     newDirConfirm,
@@ -271,5 +354,8 @@ export const useBatchStore = defineStore('batch', () => {
     closeInput,
     finish,
     saveNote,
+    refreshCandidates,
+    renameTarget,
+    syncDirCount,
   }
 })

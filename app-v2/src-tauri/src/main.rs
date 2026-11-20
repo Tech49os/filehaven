@@ -92,6 +92,19 @@ fn open_path(path: String) -> Result<(), CmdError> {
     }
 }
 
+/// explorer 的「定位并选中」参数
+///
+/// 2026-11-20 实测反馈：「定位会打开文档目录，不会打开文件所在的文件夹」。
+/// 真因是把它当成**一个普通参数**交给 `Command::arg`：std 只在参数含空格时才加引号，
+/// 于是 explorer 收到的是 `/select,C:\a b\x.docx` 或 `"/select,C:\a b\x.docx"` ——
+/// 两种都不是 explorer 认的写法（它要 `/select,"路径"`，路径单独成引号段），
+/// 解析失败后 explorer 不报错，只是回落到默认目录（文档）。
+///
+/// 所以这里返回**原始命令行片段**，配合 `raw_arg` 绕开 std 的引号规则。
+fn explorer_select_arg(path: &str) -> String {
+    format!("/select,\"{path}\"")
+}
+
 /// 在资源管理器中定位并选中该文件
 #[tauri::command]
 fn reveal_path(path: String) -> Result<(), CmdError> {
@@ -101,8 +114,9 @@ fn reveal_path(path: String) -> Result<(), CmdError> {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("explorer")
-            .arg(format!("/select,{}", p.to_string_lossy()))
+            .raw_arg(explorer_select_arg(&p.to_string_lossy()))
             .spawn()?;
         Ok(())
     }
@@ -501,6 +515,36 @@ async fn close_batch(app: AppHandle, batch_id: i64) -> Result<model::CloseAck, C
     index::close_batch_cmd(&mut conn, batch_id)
 }
 
+/// 按**现在的**目录集合重算指定文件的候选（不换批次、不动状态、不动焦点）
+///
+/// 起因（2026-11-20 反馈）：候选是开批时算一次的，之后新建/用过的目录不会回流，
+/// 「我新建了目录，后面那些文件该归哪」就没人管了。重算只依赖目录特征与文件名，
+/// 纯 CPU、毫秒级，所以每次新建目录后直接重跑一遍即可。
+#[tauri::command]
+async fn rescore_files(
+    app: AppHandle,
+    file_ids: Vec<i64>,
+) -> Result<Vec<model::BatchItem>, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        let scored = scored_pool(&conn)?;
+        let wanted: std::collections::HashSet<i64> = file_ids.into_iter().collect();
+        Ok(scored
+            .items
+            .into_iter()
+            .filter(|(r, _, _)| wanted.contains(&r.id))
+            .map(|(file, candidates, needs_you)| model::BatchItem {
+                file,
+                candidates,
+                needs_you,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("重算线程异常：{e}")))?
+}
+
 #[tauri::command]
 async fn accept_dirs(app: AppHandle, names: Vec<String>) -> Result<Vec<ArchiveDir>, CmdError> {
     let state = app.state::<AppState>();
@@ -658,6 +702,32 @@ async fn save_note(app: AppHandle, file_id: i64, note: String) -> Result<(), Cmd
     let state = app.state::<AppState>();
     let conn = lock_db(&state)?;
     index::set_note(&conn, file_id, &note)
+}
+
+/// 归档前顺手改名（只改库里记的目标名，磁盘上的源文件一动不动）
+///
+/// 返回清洗后的名字（已补回扩展名）；传空串表示改回原名。
+/// 迁移时 `migration::snapshot` 会把这个名字当成目标名，落盘就是新名字；
+/// 源文件原名留在隔离区的相对路径里，撤销照样能还原。
+#[tauri::command]
+async fn rename_file(app: AppHandle, file_id: i64, new_name: String) -> Result<String, CmdError> {
+    let state = app.state::<AppState>();
+    let conn = lock_db(&state)?;
+    if new_name.trim().is_empty() {
+        index::set_target_name(&conn, file_id, None)?;
+        return Ok(String::new());
+    }
+    let row = index::file_row(&conn, file_id)?
+        .ok_or_else(|| CmdError::new("NOT_FOUND", format!("文件不存在：{file_id}")))?;
+    let p = plan::clean_file_name(&new_name, &row.ext);
+    if !p.valid {
+        return Err(CmdError::new(
+            error::DIR_INVALID,
+            p.reason.unwrap_or_else(|| "文件名无效".into()),
+        ));
+    }
+    index::set_target_name(&conn, file_id, Some(&p.cleaned))?;
+    Ok(p.cleaned)
 }
 
 // ---------------------------------------------------------------- 目录建议
@@ -1155,7 +1225,9 @@ fn main() {
             latest_migration,
             requeue_confirmed,
             save_note,
-            preview_file
+            preview_file,
+            rename_file,
+            rescore_files
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
