@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 const bootState = vi.fn()
-vi.mock('../core/ipc', () => ({ bootState }))
+const setWatchEnabled = vi.fn()
+vi.mock('../core/ipc', () => ({ bootState, setWatchEnabled }))
 
 const { useAppStore } = await import('./app')
 
@@ -22,6 +23,7 @@ function state(confirmed: number, parked = 0, configured = true) {
       missing: 0,
     },
     model: { reachable: true, model: 'qwen2.5:7b' },
+    watchEnabled: true,
   }
 }
 
@@ -96,5 +98,65 @@ describe('app store', () => {
     await s.refreshBoot()
     expect(Number.isNaN(s.pendingTotal)).toBe(false)
     expect(s.pendingTotal).toBe(12)
+  })
+})
+
+// ------------------------------------------------ 新文件提示 + 监听开关（P2 T3.7）
+
+describe('app store · 新文件与监听', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset()
+    setWatchEnabled.mockReset()
+    vi.useRealTimers()
+  })
+
+  it('两批新文件累加（后一批不能把前一批盖掉）', () => {
+    const s = useAppStore()
+    s.noteNewFiles(3)
+    s.noteNewFiles(2)
+    expect(s.newFiles).toBe(5)
+  })
+
+  it('30 秒后自动清零 —— 陈旧数字挂在侧栏比不提示更烦', () => {
+    vi.useFakeTimers()
+    const s = useAppStore()
+    s.noteNewFiles(4)
+    expect(s.newFiles).toBe(4)
+    vi.advanceTimersByTime(29_000)
+    expect(s.newFiles).toBe(4)
+    vi.advanceTimersByTime(1_500)
+    expect(s.newFiles).toBe(0)
+  })
+
+  it('点掉提示立即清零，且不再被旧定时器改回去', () => {
+    vi.useFakeTimers()
+    const s = useAppStore()
+    s.noteNewFiles(4)
+    s.dismissNewFiles()
+    expect(s.newFiles).toBe(0)
+    vi.advanceTimersByTime(60_000)
+    expect(s.newFiles).toBe(0)
+  })
+
+  it('added=0 不产生提示（扫了一圈没新东西就别吱声）', () => {
+    const s = useAppStore()
+    s.noteNewFiles(0)
+    s.noteNewFiles(-2)
+    expect(s.newFiles).toBe(0)
+  })
+
+  it('开关监听会写后端并刷新启动态（界面要跟上真实状态）', async () => {
+    bootState.mockResolvedValue({ ...state(0), watchEnabled: false })
+    setWatchEnabled.mockResolvedValue(undefined)
+    const s = useAppStore()
+    await s.setWatchEnabled(false)
+    expect(setWatchEnabled).toHaveBeenCalledWith(false)
+    expect(s.watchEnabled).toBe(false)
+  })
+
+  it('没拿到 watchEnabled 时按「开着」算（默认行为，不能误报成关闭）', () => {
+    const s = useAppStore()
+    expect(s.watchEnabled).toBe(true)
   })
 })

@@ -58,6 +58,8 @@ pub struct UpsertStats {
     pub inserted: usize,
     pub updated: usize,
     pub missing: usize,
+    /// size/mtime 都没动：只刷了 last_seen_at，没有整行重写（T3.1）
+    pub unchanged: usize,
 }
 
 /// 一条人工判定（assignments 表）
@@ -153,6 +155,8 @@ pub struct BootState {
     pub source_roots: Vec<SourceRoot>,
     pub counts: Counts,
     pub model: ModelStatus,
+    /// 运行时监听是否开着（设置页那个开关，T3.7）
+    pub watch_enabled: bool,
 }
 
 /// 列表/卡片里的一份文件
@@ -174,6 +178,10 @@ pub struct FileRow {
     pub note: Option<String>,
     /// 归档时改成的名字（NULL = 保持原名）
     pub target_name: Option<String>,
+    /// 深度标签产出的一句话说明（NULL = 读过但没结论 / 还没读，用 `tag_level` 区分）
+    pub summary: Option<String>,
+    /// basic | deep
+    pub tag_level: String,
 }
 
 /// 一条候选目录（reason 非空，服务端保证）

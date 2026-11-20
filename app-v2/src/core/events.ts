@@ -6,7 +6,13 @@
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { MigrateProgress, ScanProgress, SuggestStage } from './types'
+import type {
+  DeepTagStats,
+  FilesFound,
+  MigrateProgress,
+  ScanProgress,
+  SuggestStage,
+} from './types'
 
 async function safeListen<T>(name: string, cb: (p: T) => void): Promise<UnlistenFn> {
   try {
@@ -22,6 +28,15 @@ export function onScanProgress(cb: (p: ScanProgress) => void) {
 
 export function onSuggestStage(cb: (p: SuggestStage) => void) {
   return safeListen<SuggestStage>('suggest-stage', cb)
+}
+
+export function onDeepTagProgress(cb: (p: DeepTagStats) => void) {
+  return safeListen<DeepTagStats>('deep-tag-progress', cb)
+}
+
+/** 增量扫描或运行时监听发现新文件（T3.7） */
+export function onFilesFound(cb: (p: FilesFound) => void) {
+  return safeListen<FilesFound>('files-found', cb)
 }
 
 export function onMigrateProgress(cb: (p: MigrateProgress) => void) {

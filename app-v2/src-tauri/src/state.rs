@@ -14,6 +14,8 @@ pub struct AppState {
     /// 上一次模型探活的结果。探活是同步 HTTP（最长 3s），不能挂在
     /// 「每次判定后刷新计数」这条高频路径上，所以只缓存、按需刷新。
     pub model_reachable: AtomicBool,
+    /// 监听开关：关掉时事件照样收，但一律丢弃（重起重落的复杂度不值得）
+    pub watch_enabled: AtomicBool,
 }
 
 impl AppState {
@@ -22,6 +24,7 @@ impl AppState {
             db: Mutex::new(db),
             app_dir,
             model_reachable: AtomicBool::new(false),
+            watch_enabled: AtomicBool::new(true),
         }
     }
 }

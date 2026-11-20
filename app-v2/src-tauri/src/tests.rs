@@ -2887,3 +2887,289 @@ mod dir_feature {
         assert!(hr.kind_hist.is_empty());
     }
 }
+
+// ================================================================ PDF 抽取（P2 T2.3）
+
+mod pdf {
+    use crate::extract;
+
+    fn fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../test/fixtures/sample-cn.pdf")
+    }
+
+    // 闸门实测：桌面 22 份 PDF 里 14 份有中文文字层（63.6% ≥ 60%），依赖保留
+    #[test]
+    fn chinese_pdf_yields_text() {
+        let p = fixture();
+        let size = std::fs::metadata(&p).unwrap().len();
+        let (text, _, err) = extract::extract(&p, "pdf", "pdf", size);
+        assert!(!err, "不该报解析错误");
+        assert!(
+            text.chars().count() >= 100,
+            "中文 PDF 只抽出 {} 字",
+            text.chars().count()
+        );
+    }
+
+    /// 造一份最小 docx（zip + word/document.xml），不引入任何人的真实文档
+    fn write_docx(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        let p = dir.join(name);
+        let f = std::fs::File::create(&p).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        z.start_file("[Content_Types].xml", opts).unwrap();
+        z.write_all(b"<?xml version=\"1.0\"?><Types/>").unwrap();
+        z.start_file("word/document.xml", opts).unwrap();
+        let xml = format!("<w:document><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>");
+        z.write_all(xml.as_bytes()).unwrap();
+        z.finish().unwrap();
+        p
+    }
+
+    // 回归（2026-11-20）：库里 kind 是 word/excel，解析器要的是 doc/xls ——
+    // 接深度标签时直接传 "word"，所有 docx 都返回空串且不报错。
+    #[test]
+    fn library_kind_word_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_docx(dir.path(), "细则.docx", "生产智能化项目组技术栈统一管理细则，明确组件选型与审批流程。");
+        let size = std::fs::metadata(&p).unwrap().len();
+        let (text, _, _) = extract::extract(&p, "docx", "word", size);
+        assert!(text.contains("技术栈统一管理细则"), "抽到的是空串：{text:?}");
+        // 旧的词汇表也必须继续好用
+        let (text2, _, _) = extract::extract(&p, "docx", "doc", size);
+        assert_eq!(text, text2);
+    }
+
+    // 扫描件 / 坏文件：返回空串、不 panic、不拖时间
+    #[test]
+    fn broken_pdf_is_empty_and_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("scan.pdf");
+        std::fs::write(&p, b"%PDF-1.4\nthis is not really a pdf\n%%EOF").unwrap();
+        let t0 = std::time::Instant::now();
+        let (text, _, _) = extract::extract(&p, "pdf", "pdf", 40);
+        let ms = t0.elapsed().as_millis();
+        assert!(text.is_empty(), "读不出来就该是空的，不许编");
+        assert!(ms < 2000, "坏文件不该拖住队列：{ms}ms");
+    }
+}
+
+// ================================================================ 深度标签落库（P2 T2.5 / T2.7）
+
+mod deep_tag_db {
+    use crate::index as db;
+
+    // T2.5：3 个标签 + 1 句 summary → deep，且 file_tags 3 行
+    #[test]
+    fn apply_deep_tag_writes_tags_summary_and_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "安全检查通知.docx", db::Status::Labeled)
+            .unwrap();
+        // 先挂一个旧 topic 标签，验证重跑会清掉
+        db::insert_test_topic_tag(&conn, fid, "旧标签").unwrap();
+
+        let tags = vec!["安全检查".to_string(), "消防验收".to_string(), "年度检查".to_string()];
+        db::apply_deep_tag(&mut conn, fid, &tags, Some("2026 年度安全检查通知，涉及生产部。"))
+            .unwrap();
+
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert_eq!(row.tag_level, "deep");
+        assert_eq!(
+            row.summary.as_deref(),
+            Some("2026 年度安全检查通知，涉及生产部。")
+        );
+        let topic = db::topic_tags_for(&conn, &[fid]).unwrap();
+        let got = topic.get(&fid).cloned().unwrap_or_default();
+        assert_eq!(got.len(), 3, "三个标签都要落库：{got:?}");
+        assert!(!got.contains(&"旧标签".to_string()), "重跑要清掉旧 topic");
+    }
+
+    // T2.5：空标签 + 空 summary → 仍标 deep，summary 是 NULL（「读过但没答案」）
+    #[test]
+    fn empty_result_marks_deep_but_keeps_summary_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "扫描件001.pdf", db::Status::Labeled)
+            .unwrap();
+        db::apply_deep_tag(&mut conn, fid, &[], None).unwrap();
+
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert_eq!(row.tag_level, "deep", "「读过但没答案」也是读过");
+        assert!(row.summary.is_none(), "空结论必须写 NULL，不能写空串");
+        assert!(db::topic_tags_for(&conn, &[fid]).unwrap().is_empty());
+    }
+
+    // T2.7：FileRow 的每一列都要读得回来（这条就是防列错位的红灯）
+    #[test]
+    fn file_row_roundtrips_every_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file_kind(
+            &conn,
+            root.id,
+            "配电箱巡检记录.docx",
+            "docx",
+            "word",
+            db::Status::PendingConfirm,
+        )
+        .unwrap();
+        db::set_note(&conn, fid, "配电房那边要的").unwrap();
+        db::set_target_name(&conn, fid, Some("配电箱巡检记录_2026Q4.docx")).unwrap();
+        db::apply_deep_tag(
+            &mut conn,
+            fid,
+            &["配电巡检".to_string()],
+            Some("2026 年四季度配电箱巡检记录，配电班组。"),
+        )
+        .unwrap();
+
+        // 直接从池里读一份，走的是 pool_rows → FILE_COLS → row_to_file 那条真路径
+        let pool = db::pool_rows(&conn).unwrap();
+        let row = pool.iter().find(|r| r.id == fid).unwrap();
+        assert_eq!(row.name, "配电箱巡检记录.docx");
+        assert_eq!(row.ext, "docx");
+        assert_eq!(row.kind, "word");
+        assert_eq!(row.status, "pending_confirm");
+        assert_eq!(row.rel_path, "C:/t/配电箱巡检记录.docx");
+        assert_eq!(row.source_root_id, Some(root.id));
+        assert_eq!(row.note.as_deref(), Some("配电房那边要的"));
+        assert_eq!(
+            row.target_name.as_deref(),
+            Some("配电箱巡检记录_2026Q4.docx"),
+            "target_name 与 note 挨着，最容易错位"
+        );
+        assert_eq!(row.summary.as_deref(), Some("2026 年四季度配电箱巡检记录，配电班组。"));
+        assert_eq!(row.tag_level, "deep");
+    }
+}
+
+// ================================================================ P2 M3 增量与监听
+
+mod p2_m3 {
+    use crate::index as db;
+    use crate::index::Status;
+    use crate::model::ScannedFile;
+    use std::time::Duration;
+
+    fn fresh() -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("t.db")).unwrap();
+        (dir, conn)
+    }
+
+    fn mk(i: usize) -> ScannedFile {
+        ScannedFile {
+            name: format!("f{i}.docx"),
+            path: format!("C:/scanroot/f{i}.docx"),
+            ext: "docx".into(),
+            kind: "word".into(),
+            size: 100,
+            mtime: 1_700_000_000_000 + i as i64,
+        }
+    }
+
+    // T3.1：第二次扫同样的文件，一份都不许算 updated（否则每次启动都全量重算标签）
+    #[test]
+    fn second_scan_reports_unchanged_not_updated() {
+        let (_d, mut conn) = fresh();
+        let root = db::add_source_root(&conn, "C:/scanroot").unwrap();
+        let all: Vec<_> = (0..10).map(mk).collect();
+
+        let s1 = db::upsert_files(&mut conn, root.id, &all).unwrap();
+        assert_eq!(
+            (s1.inserted, s1.updated, s1.unchanged, s1.missing),
+            (10, 0, 0, 0)
+        );
+
+        let s2 = db::upsert_files(&mut conn, root.id, &all).unwrap();
+        assert_eq!(
+            (s2.inserted, s2.updated, s2.unchanged, s2.missing),
+            (0, 0, 10, 0),
+            "未变的文件必须走 unchanged 快路径"
+        );
+
+        // 未变 = 连 deep 标签都不许被抹回 basic
+        conn.execute("UPDATE files SET tag_level='deep'", []).unwrap();
+        let s3 = db::upsert_files(&mut conn, root.id, &all).unwrap();
+        assert_eq!(s3.updated, 0);
+        let lvl: String = conn
+            .query_row("SELECT tag_level FROM files LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(lvl, "deep", "重扫不能把深度标签打回 basic");
+
+        // 改一份 mtime → 只有它算 updated
+        let mut one = all.clone();
+        one[3].mtime += 1;
+        let s4 = db::upsert_files(&mut conn, root.id, &one).unwrap();
+        assert_eq!((s4.updated, s4.unchanged), (1, 9));
+    }
+
+    // T3.5：8 种状态 × 删除事件，只有 3 种允许被打成 missing
+    //
+    // 这一条扛的是「迁移把源文件搬走后，监听不能把刚迁移的整批判成丢失」。
+    #[test]
+    fn delete_event_only_touches_three_states() {
+        let (_d, conn) = fresh();
+        let root = db::add_source_root(&conn, "C:/t").unwrap();
+        for st in Status::ALL {
+            db::insert_test_file_kind(&conn, root.id, &format!("{}.docx", st.as_str()), "docx", "word", st)
+                .unwrap();
+        }
+
+        for st in Status::ALL {
+            let path = format!("C:/t/{}.docx", st.as_str());
+            let marked = db::mark_missing_if_pending(&conn, &path).unwrap();
+            let want = matches!(
+                st,
+                Status::Queued | Status::Labeled | Status::PendingConfirm
+            );
+            assert_eq!(
+                marked,
+                want,
+                "{} 的删除事件处理错了：{}",
+                st.as_str(),
+                if want { "应该标 missing" } else { "不该动它" }
+            );
+        }
+
+        // 已经 missing 的再收到一次删除事件 → 不重复计数
+        let again = db::mark_missing_if_pending(&conn, "C:/t/queued.docx").unwrap();
+        assert!(!again, "重复的删除事件不该返回 true");
+    }
+
+    // T3.6：主线程持锁时，监听侧退避一次就放弃（不 panic、不死等）
+    #[test]
+    fn watch_gives_up_when_db_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = std::sync::Mutex::new(db::open(&dir.path().join("t.db")).unwrap());
+        let held = m.lock().unwrap();
+
+        let (got, waited) = std::thread::scope(|s| {
+            let h = s.spawn(|| {
+                let t = std::time::Instant::now();
+                let g = crate::lock_db_retry(&m, Duration::from_millis(200));
+                (g.is_some(), t.elapsed())
+            });
+            // 主线程继续持锁，模拟「界面正在渲染」
+            std::thread::sleep(Duration::from_millis(300));
+            h.join().unwrap()
+        });
+        drop(held);
+
+        assert!(!got, "抢不到锁时必须放弃这一批，不许死等界面");
+        assert!(
+            waited <= Duration::from_millis(1200),
+            "退避要短：实际等了 {waited:?}"
+        );
+
+        // 锁放掉以后能正常拿到（丢的只是时机，不是数据）
+        assert!(crate::lock_db_retry(&m, Duration::from_millis(200)).is_some());
+    }
+}

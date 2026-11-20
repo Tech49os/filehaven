@@ -506,11 +506,30 @@ pub fn upsert_files(
             // 出生状态就分两种：非资料型（压缩包/程序/空文件）直接 skipped，不进池
             let pool = crate::tag::should_pool(&f.name, &f.kind, f.size);
             let born = if pool { "queued" } else { "skipped" };
-            let existed: Option<i64> = tx
-                .query_row("SELECT id FROM files WHERE abs_path=?1", [&f.path], |r| {
-                    r.get(0)
-                })
+            // 先看「是不是真的变了」：size 与 mtime 都没动就是没变。
+            // 只刷 last_seen_at（单列 UPDATE），不走整行 upsert ——
+            // P1 每份都算一次 update，455 份从 0.3s 涨到 2s 以上，而且统计里
+            // 「更新 N」永远等于「扫描 N」，用户根本看不出哪里变了。
+            let existed: Option<(i64, i64, i64, String)> = tx
+                .query_row(
+                    "SELECT id, size, mtime, status FROM files WHERE abs_path=?1",
+                    [&f.path],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
                 .optional()?;
+            if let Some((id, size, mtime, status)) = existed.clone() {
+                // 注意 `status != 'missing'`：文件删了又原样放回来时，
+                // size/mtime 一模一样，但状态必须从 missing 恢复成 queued，
+                // 走这条捷径就会永远留在 missing（实测过）
+                if status != "missing" && size == f.size as i64 && mtime == f.mtime {
+                    tx.execute(
+                        "UPDATE files SET last_seen_at=?1 WHERE id=?2",
+                        params![now, id],
+                    )?;
+                    stats.unchanged += 1;
+                    continue;
+                }
+            }
             tx.execute(
                 "INSERT INTO files
                    (source_root_id, abs_path, rel_path, name, ext, kind, size, mtime,
@@ -860,23 +879,31 @@ pub fn set_note(conn: &Connection, file_id: i64, note: &str) -> Result<(), CmdEr
 
 // ---------------------------------------------------------------- 批次
 
-const FILE_COLS: &str = "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name";
+const FILE_COLS: &str =
+    "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name, summary, tag_level";
 
+/// **按列名取值**，不用下标。
+///
+/// P1 栽过：`SELECT {FILE_COLS}, d.id` 这类拼接语句里，加一列就让后面所有
+/// `r.get(13)` 全部错位，而且编译器一声不吭。按名取值后，「加列」这件事
+/// 顶多多读一个字段，不会再静默地把 note 读成 rel_path。
 fn row_to_file(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FileRow> {
     Ok(crate::model::FileRow {
-        id: r.get(0)?,
-        name: r.get(1)?,
-        ext: r.get(2)?,
-        kind: r.get(3)?,
-        size: r.get(4)?,
-        mtime: r.get(5)?,
-        status: r.get(6)?,
-        rel_path: r.get(7)?,
-        abs_path: r.get(8)?,
-        source_root_id: r.get(9)?,
-        defer_count: r.get(10)?,
-        note: r.get(11)?,
-        target_name: r.get(12)?,
+        id: r.get("id")?,
+        name: r.get("name")?,
+        ext: r.get("ext")?,
+        kind: r.get("kind")?,
+        size: r.get("size")?,
+        mtime: r.get("mtime")?,
+        status: r.get("status")?,
+        rel_path: r.get("rel_path")?,
+        abs_path: r.get("abs_path")?,
+        source_root_id: r.get("source_root_id")?,
+        defer_count: r.get("defer_count")?,
+        note: r.get("note")?,
+        target_name: r.get("target_name")?,
+        summary: r.get("summary")?,
+        tag_level: r.get("tag_level")?,
     })
 }
 
@@ -960,7 +987,7 @@ pub fn pool_rows(conn: &Connection) -> Result<Vec<crate::model::FileRow>, CmdErr
     let mut stmt = conn.prepare(&format!(
         "SELECT {FILE_COLS} FROM files
          WHERE status IN ('labeled','pending_confirm')
-            OR (status='queued' AND tag_level='basic')
+            OR (status='queued' AND tag_level IN ('basic','deep'))
          ORDER BY mtime DESC, id"
     ))?;
     let rows = stmt.query_map([], row_to_file)?;
@@ -1029,7 +1056,7 @@ pub fn pool_count(conn: &Connection) -> Result<i64, CmdError> {
     let n = conn.query_row(
         "SELECT COUNT(*) FROM files
          WHERE status IN ('labeled','pending_confirm')
-            OR (status='queued' AND tag_level='basic')",
+            OR (status='queued' AND tag_level IN ('basic','deep'))",
         [],
         |r| r.get(0),
     )?;
@@ -1158,8 +1185,157 @@ pub fn topic_tags_for(
 }
 
 
-pub fn count_status(conn: &Connection, status: Status) -> Result<i64, CmdError> {
+/// 深度标签落库（T2.5）：单事务写 tags + file_tags + summary + tag_level
+///
+/// **失败不动 `tag_level`** —— 写不进去就是没读过，下一轮队列会再试。
+/// `summary` 为空写 NULL 而不是空串：NULL 表示「读过但没有可说的」，
+/// 与「没读过」（`tag_level='basic'`）是两件事，界面文案也不同。
+pub fn apply_deep_tag(
+    conn: &mut Connection,
+    file_id: i64,
+    tags: &[String],
+    summary: Option<&str>,
+) -> Result<(), CmdError> {
+    let tx = conn.transaction()?;
+    // 重跑时不留脏数据：只清 topic 类，基础标签（type/time/keyword）不能动
+    tx.execute(
+        "DELETE FROM file_tags WHERE file_id=?1
+           AND tag_id IN (SELECT id FROM tags WHERE kind='topic')",
+        params![file_id],
+    )?;
+    for name in tags {
+        tx.execute(
+            "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'topic')",
+            params![name],
+        )?;
+        let tid: i64 = tx.query_row(
+            "SELECT id FROM tags WHERE name=?1 AND kind='topic'",
+            params![name],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1,?2,0.8)",
+            params![file_id, tid],
+        )?;
+    }
+    let sum = summary.map(|s| s.trim()).filter(|s| !s.is_empty());
+    tx.execute(
+        "UPDATE files SET summary=?1, tag_level='deep' WHERE id=?2",
+        params![sum, file_id],
+    )?;
+    // 刚扫描进来、还没来得及打基础标签的文件：标成 labeled 才留得住池内资格
+    // （`pool_rows` 的 queued 那一支只在有标签时才算池内）
+    tx.execute(
+        "UPDATE files SET status='labeled' WHERE id=?1 AND status='queued'",
+        params![file_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 下一条待深读的文件（T2.6 取件顺序）
+///
+/// 顺序与 `deep_tag::priority` 逐条对应：当前批 → 待定区 → 池内 → 已迁移。
+/// `batch_ids` 由调用方从 AppState 的当前批快照里取，用 i64 拼进 SQL（不经过用户输入）。
+pub fn next_deep_job(
+    conn: &Connection,
+    batch_ids: &[i64],
+) -> Result<Option<crate::deep_tag::Job>, CmdError> {
+    let in_batch = if batch_ids.is_empty() {
+        "-1".to_string()
+    } else {
+        batch_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let sql = format!(
+        "SELECT id, name, abs_path, ext, kind, size FROM files
+         WHERE tag_level='basic' AND status NOT IN ('missing','skipped')
+         ORDER BY
+           CASE
+             WHEN id IN ({in_batch}) THEN 0
+             WHEN status='parked' THEN 1
+             WHEN status IN ('queued','labeled','pending_confirm') THEN 2
+             WHEN status IN ('migrated','confirmed') THEN 3
+             ELSE 9
+           END,
+           mtime DESC, id
+         LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let job = stmt
+        .query_row([], |r| {
+            Ok(crate::deep_tag::Job {
+                file_id: r.get(0)?,
+                name: r.get(1)?,
+                abs_path: r.get(2)?,
+                ext: r.get(3)?,
+                kind: r.get(4)?,
+                size: r.get::<_, i64>(5)? as u64,
+            })
+        })
+        .optional()?;
+    Ok(job)
+}
+
+/// 某个绝对路径属于哪个源区（取最长前缀，多个源区嵌套时不会挑错）
+pub fn root_for_path(conn: &Connection, path: &str) -> Result<Option<i64>, CmdError> {
+    let low = path.replace('\\', "/").to_lowercase();
+    let mut best: Option<(usize, i64)> = None;
+    for root in list_source_roots(conn)? {
+        if !root.enabled {
+            continue;
+        }
+        let r = root.path.replace('\\', "/").to_lowercase();
+        if low.starts_with(&r) && best.map(|(n, _)| r.len() > n).unwrap_or(true) {
+            best = Some((r.len(), root.id));
+        }
+    }
+    Ok(best.map(|(_, id)| id))
+}
+
+/// 监听看到「文件不见了」时调用（T3.5 守卫）
+///
+/// **只对 3 个状态生效**：`queued` / `labeled` / `pending_confirm`。
+/// `confirmed` / `migrated` / `parked` / `skipped` 一律不动 ——
+/// 迁移就是把源文件搬进隔离区，监听必然会看到删除；
+/// 按「未见即 missing」处理会把刚迁移的整批文件打成丢失（计划 T3.5）。
+/// 返回 true 表示这次真的标了。
+pub fn mark_missing_if_pending(conn: &Connection, abs_path: &str) -> Result<bool, CmdError> {
+    let n = conn.execute(
+        "UPDATE files SET status='missing'
+         WHERE abs_path=?1 AND status IN ('queued','labeled','pending_confirm')",
+        [abs_path],
+    )?;
+    Ok(n > 0)
+}
+
+/// 队列进度：还剩多少份没深读
+pub fn deep_remaining(conn: &Connection) -> Result<i64, CmdError> {
     let n = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE tag_level='basic' AND status NOT IN ('missing','skipped')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// 当前批快照（给队列排优先级用）
+pub fn batch_file_ids(conn: &Connection, batch_id: i64) -> Result<Vec<i64>, CmdError> {
+    let mut stmt = conn.prepare(
+        "SELECT file_id FROM assignments WHERE batch_id=?1 ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([batch_id], |r| r.get::<_, i64>(0))?;
+    let mut out: Vec<i64> = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub fn count_status(conn: &Connection, status: Status) -> Result<i64, CmdError> {    let n = conn.query_row(
         "SELECT COUNT(*) FROM files WHERE status=?1",
         [status.as_str()],
         |r| r.get(0),

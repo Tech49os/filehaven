@@ -34,6 +34,39 @@ export const useAppStore = defineStore('app', () => {
   const modelStatus = computed<ModelStatus>(
     () => boot.value?.model ?? { reachable: false, model: null },
   )
+  /** 运行时监听是否开着。库里的值由后端在启动时读一次带过来 */
+  const watchEnabled = computed(() => boot.value?.watchEnabled ?? true)
+
+  /**
+   * 增量扫描/监听发现的新文件数（T3.7）。
+   *
+   * 累加而不是覆盖：一批还没看完又来一批，覆盖就会少报。
+   * 30 秒后自动清 —— 陈旧数字挂在那儿比不提示更烦人。
+   */
+  const newFiles = ref(0)
+  let newFilesTimer: ReturnType<typeof setTimeout> | null = null
+
+  function noteNewFiles(n: number) {
+    if (n <= 0) return
+    newFiles.value += n
+    if (newFilesTimer) clearTimeout(newFilesTimer)
+    newFilesTimer = setTimeout(() => {
+      newFiles.value = 0
+      newFilesTimer = null
+    }, 30_000)
+  }
+
+  function dismissNewFiles() {
+    if (newFilesTimer) clearTimeout(newFilesTimer)
+    newFilesTimer = null
+    newFiles.value = 0
+  }
+
+  /** 开关监听：后端当场起停，然后刷新一次启动态让界面跟上 */
+  async function setWatchEnabled(on: boolean): Promise<void> {
+    await ipc.setWatchEnabled(on)
+    await refreshBoot()
+  }
 
   /** 侧边栏「待迁移 N」：已确认但还没搬走的份数 */
   const pendingMigration = computed(() => counts.value.confirmed)
@@ -79,6 +112,11 @@ export const useAppStore = defineStore('app', () => {
     archiveRoot,
     sourceRoots,
     modelStatus,
+    watchEnabled,
+    newFiles,
+    noteNewFiles,
+    dismissNewFiles,
+    setWatchEnabled,
     pendingMigration,
     parkedCount,
     pendingTotal,

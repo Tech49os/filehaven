@@ -183,6 +183,28 @@ fn office_text(path: &Path, kind: &str) -> String {
     }
 }
 
+/// PDF 文字层抽取（T2.3）
+///
+/// 为什么放在独立线程里：`pdf-extract` 是纯 Rust（底层 lopdf），没有取消语义，
+/// 碰上畸形 xref 表会卡很久。队列是串行的，一份卡住整条队列就停了 ——
+/// 所以给它一个硬超时，超时就当「没有文字层」返回空串，文件标「未解读」。
+/// （线程本身会自己跑完退出，不 join，泄漏一个短命线程比卡住队列便宜得多。）
+pub fn pdf_text(path: &Path) -> String {
+    let p = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let t = pdf_extract::extract_text(&p).unwrap_or_default();
+        let _ = tx.send(t);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(PDF_TIMEOUT_SECS)) {
+        Ok(t) => t.chars().take(TEXT_CAP).collect(),
+        Err(_) => String::new(),
+    }
+}
+
+/// PDF 抽取硬超时（秒）
+pub const PDF_TIMEOUT_SECS: u64 = 8;
+
 fn dedupe_keys(raw: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -326,8 +348,28 @@ fn is_plain_text(ext: &str) -> bool {
     )
 }
 
+/// 把「两种 kind 词汇表」统一到 extract 内部这一套（doc/xls/ppt/pdf/…）
+///
+/// 全仓有两套 kind：`tag::kind_of_ext` 给库和界面用（word/excel/ppt），
+/// `extract::kind_of` 给解析器用（doc/xls/ppt）。2026-11-20 接深度标签时踩到：
+/// 直接把库里的 `word` 传给 `extract()`，Office 分支一个都不匹配，
+/// **所有 docx/xlsx 都返回空串**，而且不报错 —— 表现为「这些文件读了但没结论」。
+/// 所以映射放在 extract 入口，谁来调都不会静默失效。
+fn norm_kind(kind: &str, ext: &str) -> &'static str {
+    match kind {
+        "word" | "text" => "doc",
+        "excel" => "xls",
+        "ppt" => "ppt",
+        "pdf" => "pdf",
+        "image" => "image",
+        "diagram" | "drawio" => "drawio",
+        _ => kind_of(ext),
+    }
+}
+
 /// 抽取一份文件的正文特征
 pub fn extract(path: &Path, ext: &str, kind: &str, size: u64) -> (String, Vec<String>, bool) {
+    let kind = norm_kind(kind, ext);
     if is_plain_text(ext) {
         let f = match File::open(path) {
             Ok(f) => f,
@@ -359,6 +401,11 @@ pub fn extract(path: &Path, ext: &str, kind: &str, size: u64) -> (String, Vec<St
 
     if kind == "doc" || kind == "xls" || kind == "ppt" {
         return (office_text(path, kind), Vec::new(), false);
+    }
+
+    if kind == "pdf" {
+        // 扫描件没有文字层：返回空串，交给「未解读」，绝不硬猜
+        return (pdf_text(path), Vec::new(), false);
     }
 
     (String::new(), Vec::new(), false)

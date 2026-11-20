@@ -50,6 +50,14 @@ const handledElsewhere = computed(
 const noDirs = computed(() => props.dirCount === 0)
 const primaryIsNewDir = computed(() => noDirs.value || props.item.candidates.length === 0)
 
+/** 深度解读的一句话说明：有就显示，没有就不占位（「未解读」不写假占位） */
+const summary = computed(() => {
+  const v = (f.value.summary ?? '').trim()
+  return v.length > 0 ? v : null
+})
+/** 标签层级：读过正文（deep）实心，只打过基础标签空心 */
+const tagLevel = computed(() => (f.value.tagLevel === 'deep' ? 'deep' : 'basic'))
+
 const targetPath = computed(() => {
   if (!confirmed.value) return null
   return props.ack?.targetRelPath ?? null
@@ -137,6 +145,14 @@ function cancelRename() {
           <span class="dot">·</span>
           <span>{{ relativeTime(f.mtime) }}</span>
           <span v-if="f.note" class="tag note">备注：{{ f.note }}</span>
+          <!-- 空心 = 只按类型/时间打了基础标签；实心 = 读过正文。两者别混成一样 -->
+          <span
+            class="taglvl"
+            :class="tagLevel"
+            :title="tagLevel === 'deep' ? '已读过正文并给出结论' : '还没读过正文'"
+          >
+            {{ tagLevel === 'deep' ? '已解读' : '初步' }}
+          </span>
         </p>
       </div>
       <div class="state">
@@ -166,6 +182,12 @@ function cancelRename() {
       归档时存为 <b>{{ targetName }}</b>
       <button v-if="canRename" class="link" @click="startRename">再改</button>
       <button v-if="canRename" class="link" @click="emit('rename', '')">用原名</button>
+    </p>
+
+    <!-- 深度解读的一句话结论：没有就不占位 -->
+    <p v-if="summary" class="summary" :title="summary">
+      <AppIcon name="sparkle" :size="12" />
+      {{ summary }}
     </p>
 
     <!-- 正文摘要 / 图片缩略图 / 读不出的原因 -->
@@ -520,6 +542,35 @@ function cancelRename() {
 }
 .act:disabled {
   opacity: 0.5;
+}
+
+.taglvl {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1.6;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--c-border-strong);
+  color: var(--c-text-2);
+  background: transparent;
+}
+/* 实心：读过正文，结论可信 */
+.taglvl.deep {
+  border-color: transparent;
+  background: var(--c-indigo-bg);
+  color: var(--c-indigo);
+  font-weight: 600;
+}
+
+.summary {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--c-text-2);
+  min-width: 0;
 }
 
 /* ---- 预览 ---- */

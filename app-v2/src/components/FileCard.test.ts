@@ -175,3 +175,58 @@ describe('整理台卡片：路径 / 内容 / 打开（2026-11-20 反馈）', ()
     expect(w.find('.ren').exists()).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------- 深度解读（P2 T2.7）
+
+describe('整理台卡片：summary 与标签层级', () => {
+  it('有 summary 就显示，一行读完知道「这是什么」', () => {
+    const w = mount(FileCard, {
+      props: {
+        item: item({ summary: '2026 年度配电箱巡检记录，配电班组。', tagLevel: 'deep' }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+      },
+    })
+    expect(w.find('.summary').exists()).toBe(true)
+    expect(w.find('.summary').text()).toContain('配电箱巡检记录')
+  })
+
+  it('没有 summary 就不占位（不留空行、不写「未解读」假占位）', () => {
+    const w = mount(FileCard, {
+      props: {
+        item: item({ summary: null, tagLevel: 'basic' }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+      },
+    })
+    expect(w.find('.summary').exists()).toBe(false)
+  })
+
+  it('tagLevel=deep 的层级标签是实心，basic 是空心', () => {
+    const deep = mount(FileCard, {
+      props: {
+        item: item({ tagLevel: 'deep' }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+      },
+    })
+    const lvl = deep.find('.taglvl')
+    expect(lvl.exists()).toBe(true)
+    expect(lvl.classes()).toContain('deep')
+    expect(lvl.text()).toBe('已解读')
+
+    const basic = mount(FileCard, {
+      props: {
+        item: item({ tagLevel: 'basic' }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+      },
+    })
+    expect(basic.find('.taglvl').classes()).not.toContain('deep')
+    expect(basic.find('.taglvl').text()).toBe('初步')
+  })
+})

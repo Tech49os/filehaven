@@ -49,6 +49,7 @@ function setBoot(sources: { id: number; path: string; enabled: boolean }[], conf
     sourceRoots: sources,
     counts: EMPTY,
     model: { reachable: false, model: null },
+    watchEnabled: true,
   }
 }
 

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 mod batch;
+mod deep_tag;
 mod error;
 // 正文抽取：P0 写好后一直没接线，整理台的「看内容」才真正用上它
 #[allow(dead_code)]
@@ -27,6 +28,7 @@ mod scan;
 mod state;
 mod suggest_dirs;
 mod tag;
+mod watch;
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +45,22 @@ fn lock_db(state: &AppState) -> Result<std::sync::MutexGuard<'_, rusqlite::Conne
         .db
         .lock()
         .map_err(|_| CmdError::new(error::DB, "数据库锁已损坏，请重启应用"))
+}
+
+/// 监听线程专用的取锁：抢不到就退避 200ms 再试一次（T3.6）。
+///
+/// 界面线程随时可能拿着锁在渲染，监听不能因此丢事件；但也不能死等 ——
+/// 等不到就丢这一批，下一轮启动扫描会补上（**不丢数据，只丢时机**）。
+/// 单独抽出来是为了能单测「主线程持锁时监听侧 ≤1.2s 就放弃且不 panic」。
+fn lock_db_retry(
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    backoff: Duration,
+) -> Option<std::sync::MutexGuard<'_, rusqlite::Connection>> {
+    if let Ok(g) = db.try_lock() {
+        return Some(g);
+    }
+    std::thread::sleep(backoff);
+    db.try_lock().ok()
 }
 
 fn setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
@@ -214,6 +232,9 @@ fn boot_state_inner(app: &AppHandle, probe_model: bool) -> Result<BootState, Cmd
 
     let base = setting(&conn, "ollama_base").unwrap_or_else(|| llm::DEFAULT_BASE.to_string());
     let model = setting(&conn, "ollama_model").unwrap_or_else(|| llm::DEFAULT_MODEL.to_string());
+    let watch_enabled = setting(&conn, "watch_enabled")
+        .map(|v| v != "0")
+        .unwrap_or(true);
     drop(conn);
 
     // 模型没起不能挡住任何别的功能（验收 14）：探活失败只是标记不可达
@@ -234,6 +255,7 @@ fn boot_state_inner(app: &AppHandle, probe_model: bool) -> Result<BootState, Cmd
             reachable,
             model: Some(model),
         },
+        watch_enabled,
     })
 }
 
@@ -382,6 +404,16 @@ fn scan_all_inner(app: &AppHandle) -> Result<ScanReport, CmdError> {
                 report.skipped_by_rule = n as usize;
             }
         }
+    }
+
+    {
+        // 记下「上次扫描是什么时候」，启动增量扫描靠它做 10 分钟节流（T3.2）
+        let state = app.state::<AppState>();
+        let wrote = match lock_db(&state) {
+            Ok(conn) => index::set_setting(&conn, "last_scan_at", &index::now_ms().to_string()),
+            Err(e) => Err(e),
+        };
+        let _ = wrote;
     }
 
     let _ = app.emit(
@@ -763,8 +795,7 @@ async fn suggest_dirs(
     let state = app.state::<AppState>();
     let (base, model, files, existing) = {
         let conn = lock_db(&state)?;
-        let base = setting(&conn, "ollama_base").unwrap_or_else(|| llm::DEFAULT_BASE.to_string());
-        let model = setting(&conn, "ollama_model").unwrap_or_else(|| llm::DEFAULT_MODEL.to_string());
+        let (base, model) = llm_cfg(&conn);
         let files = index::suggest_input_rows(&conn)?;
         let existing: Vec<String> = index::list_dirs(&conn)?
             .into_iter()
@@ -820,6 +851,26 @@ async fn suggest_dirs(
     };
 
     let force = force.unwrap_or(false);
+
+    // 显存仲裁（T2.6）：目录建议与深度标签共用一张卡。
+    // 先让队列把当前这一份跑完（最多等 70s —— 单份超时 60s + 余量），
+    // 然后全程把队列按停，否则两个模型请求同时压 8GB 显存会把 llama-server 打崩。
+    let ok = {
+        let q = app.state::<Arc<deep_tag::Queue>>().inner().clone();
+        q.paused_for_suggest.store(true, Ordering::Relaxed);
+        q.wait_idle(70_000)
+    };
+    if !ok {
+        let _ = app.emit(
+            "suggest-stage",
+            model::SuggestStage {
+                stage: "waiting".into(),
+                elapsed_ms: 70_000,
+                note: "深度标签这一份还没跑完，仍按你的要求继续".into(),
+            },
+        );
+    }
+
     let stage_app = app.clone();
     let req = tauri::async_runtime::spawn_blocking(move || {
         let mut on_stage = |stage: &str, ms: u64| {
@@ -853,6 +904,10 @@ async fn suggest_dirs(
 
     stop.store(true, Ordering::Relaxed);
     let _ = hb.join();
+    // 无论成功失败都要放开队列，否则一次超时就把深度标签永久按停
+    app.state::<Arc<deep_tag::Queue>>()
+        .paused_for_suggest
+        .store(false, Ordering::Relaxed);
 
     req.map_err(|e| CmdError::new(error::DB, format!("目录建议线程异常：{e}")))?
 }
@@ -1047,6 +1102,11 @@ fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
     }
 
     let remaining = pool_count - (picked.len() as i64);
+
+    // 告诉深度标签队列「用户正在看的就是这几份」（T2.6 优先级第一档）。
+    // 没有这一步，tagMatch 在整批上都是 0，等于 M1 白做。
+    let batch_ids: Vec<i64> = items.iter().map(|i| i.file.id).collect();
+    app.state::<Arc<deep_tag::Queue>>().set_batch(batch_ids);
 
     Ok(model::BatchView {
         batch_id,
@@ -1342,8 +1402,544 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------- 深度标签队列（M2）
+
+/// 模型与地址（都从 settings 读，缺省用 llm 的默认值）
+///
+/// 键名是 `ollama_base` / `ollama_model` —— 设置页写的就是这两个。
+/// 曾经有一版写成 `base` / `model`，结果设置页改了模型、队列还在用默认值，
+/// 而且不报错（读不到就走缺省），只表现为「怎么变慢了」。别改这里的键名。
+fn llm_cfg(conn: &rusqlite::Connection) -> (String, String) {
+    let base = setting(conn, "ollama_base").unwrap_or_else(|| llm::DEFAULT_BASE.to_string());
+    let model = setting(conn, "ollama_model").unwrap_or_else(|| llm::DEFAULT_MODEL.to_string());
+    (base, model)
+}
+
+fn emit_deep(app: &AppHandle, q: &deep_tag::Queue) {
+    let _ = app.emit("deep-tag-progress", q.snapshot());
+}
+
+/// 队列线程：串行取件 → 抽正文 → 问模型 → 落库
+///
+/// 三条硬约束（违反任何一条都会让 P1 的能力被拖坏）：
+/// 1. **持锁期间绝不发 HTTP** —— 模型单份可能 60s，锁住就是整个界面卡死；
+/// 2. **失败不冒泡** —— 只记 `failed` 与日志，UI 照常用；
+/// 3. **模型没起就停着**，每 20s 探一次，不把 400 份文件挨个试一遍。
+fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let mut note: Option<String> = None;
+        loop {
+            if queue.snapshot_stopped() {
+                break;
+            }
+            if !queue.enabled() || queue.paused() || queue.paused_for_suggest.load(Ordering::Relaxed)
+            {
+                std::thread::sleep(Duration::from_millis(400));
+                continue;
+            }
+
+            // 1) 取下一份（短锁）
+            let picked = {
+                let conn = match lock_db(&state) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(800));
+                        continue;
+                    }
+                };
+                let batch = queue.batch.lock().map(|b| b.clone()).unwrap_or_default();
+                let job = index::next_deep_job(&conn, &batch).ok().flatten();
+                let remaining = index::deep_remaining(&conn).unwrap_or(0);
+                let (base, model) = llm_cfg(&conn);
+                (job, remaining, base, model)
+            };
+
+            let (job, remaining, base, model) = picked;
+            {
+                if let Ok(mut st) = queue.stats_lock() {
+                    st.remaining = remaining;
+                }
+            }
+
+            let Some(job) = job else {
+                // 队列空：慢轮询，别空转烧 CPU
+                if let Ok(mut st) = queue.stats_lock() {
+                    st.running = false;
+                    st.current.clear();
+                }
+                emit_deep(&app, &queue);
+                std::thread::sleep(Duration::from_millis(1500));
+                continue;
+            };
+
+            if queue.already_failed(job.file_id) {
+                // 本轮已经失败过：跳过它，别在原地打转（重启后会再给一次机会）
+                std::thread::sleep(Duration::from_millis(GAP_MS));
+                continue;
+            }
+
+            if let Ok(mut st) = queue.stats_lock() {
+                st.running = true;
+                st.current = job.name.clone();
+                st.note = note.clone();
+            }
+            emit_deep(&app, &queue);
+
+            queue.busy.store(true, Ordering::Relaxed);
+            let mut result = deep_tag::process_one(
+                &job,
+                &base,
+                &model,
+                Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
+            );
+            // 失败重试 1 次（Ollama 偶发 500 / 半截 JSON）
+            if result.is_err() {
+                std::thread::sleep(Duration::from_millis(500));
+                result = deep_tag::process_one(
+                    &job,
+                    &base,
+                    &model,
+                    Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
+                );
+            }
+            queue.busy.store(false, Ordering::Relaxed);
+
+            match result {
+                Ok(d) => {
+                    note = None;
+                    let wrote = {
+                        let mut conn = match lock_db(&state) {
+                            Ok(c) => c,
+                            Err(_) => {
+                                std::thread::sleep(Duration::from_millis(800));
+                                continue;
+                            }
+                        };
+                        index::apply_deep_tag(&mut conn, job.file_id, &d.tags, d.summary.as_deref())
+                    };
+                    match wrote {
+                        Ok(_) => {
+                            if let Ok(mut st) = queue.stats_lock() {
+                                st.done += 1;
+                                st.note = None;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("deep-tag: 落库失败 {}：{}", job.name, e.message);
+                            queue.mark_failed(job.file_id);
+                            if let Ok(mut st) = queue.stats_lock() {
+                                st.failed += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let down = e.code == error::MODEL_DOWN || e.code == error::MODEL_TIMEOUT;
+                    queue.mark_failed(job.file_id);
+                    if let Ok(mut st) = queue.stats_lock() {
+                        // 模型没起不算「这份文件失败」——换台机器起来还能读，别污染统计
+                        if !down {
+                            st.failed += 1;
+                        }
+                        st.note = Some(if down {
+                            "队列已停：模型未响应".to_string()
+                        } else {
+                            format!("上一份没读出来：{}", e.message)
+                        });
+                    }
+                    eprintln!("deep-tag: {} 失败 [{}] {}", job.name, e.code, e.message);
+                    if down {
+                        note = Some("队列已停：模型未响应".to_string());
+                        emit_deep(&app, &queue);
+                        // 20s 后再探一次（分片睡，保证能响应暂停/退出）
+                        for _ in 0..10 {
+                            if queue.snapshot_stopped() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(2000));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            emit_deep(&app, &queue);
+            std::thread::sleep(Duration::from_millis(deep_tag::GAP_MS));
+        }
+    });
+}
+
+const GAP_MS: u64 = deep_tag::GAP_MS;
+
+#[tauri::command]
+async fn deep_tag_status(
+    app: AppHandle,
+    queue: tauri::State<'_, Arc<deep_tag::Queue>>,
+) -> Result<deep_tag::Stats, CmdError> {
+    let q = queue.inner().clone();
+    let state = app.state::<AppState>();
+    if let Ok(conn) = lock_db(&state) {
+        if let Ok(n) = index::deep_remaining(&conn) {
+            if let Ok(mut st) = q.stats_lock() {
+                st.remaining = n;
+            }
+        }
+    }
+    Ok(q.snapshot())
+}
+
+/// 开关与暂停。`enabled` 写库，重启后还是用户的意愿
+#[tauri::command]
+async fn set_deep_tag(
+    app: AppHandle,
+    queue: tauri::State<'_, Arc<deep_tag::Queue>>,
+    enabled: Option<bool>,
+    paused: Option<bool>,
+) -> Result<deep_tag::Stats, CmdError> {
+    let q = queue.inner().clone();
+    if let Some(e) = enabled {
+        q.set_enabled(e);
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::set_setting(&conn, "deep_tag_enabled", if e { "1" } else { "0" })?;
+    }
+    if let Some(p) = paused {
+        q.set_paused(p);
+    }
+    Ok(q.snapshot())
+}
+
+/// `--extract <目录> <out.json>`：逐份跑正文抽取并报字数/耗时
+///
+/// 存在的理由只有一个：**PDF 抽取的闸门要靠实测**（计划 T2.3 —— 中文正文成功率 <60%
+/// 就回滚依赖，PDF 一律「未解读」）。不能用「我觉得 pdf-extract 挺行」来替代测量。
+fn run_extract_cli(dir: &str, out: &str) -> i32 {
+    let t_start = Instant::now();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let walker = walkdir::WalkDir::new(dir).max_depth(3).into_iter();
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let ext = scan::ext_of(&name);
+        let kind = tag::kind_of_ext(&ext);
+        if !matches!(kind, "pdf" | "word" | "excel" | "ppt" | "diagram") {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let t0 = Instant::now();
+        let (text, _, err) = extract::extract(entry.path(), &ext, kind, size);
+        rows.push(serde_json::json!({
+            "name": name,
+            "kind": kind,
+            "size": size,
+            "chars": text.chars().count(),
+            "ms": t0.elapsed().as_millis() as u64,
+            "parseError": err,
+        }));
+    }
+    let pdf = rows.iter().filter(|r| r["kind"] == "pdf").count();
+    let ok = rows
+        .iter()
+        .filter(|r| r["kind"] == "pdf" && r["chars"].as_u64().unwrap_or(0) >= 100)
+        .count();
+    let payload = serde_json::json!({
+        "dir": dir,
+        "total": rows.len(),
+        "pdf": pdf,
+        "pdfWithText": ok,
+        "elapsedMs": t_start.elapsed().as_millis() as u64,
+        "files": rows,
+    });
+    eprintln!("抽取 {} 份，其中 PDF {pdf} 份、有文字层 {ok} 份", payload["total"]);
+    match std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("写出失败：{e}");
+            1
+        }
+    }
+}
+
+/// `--deeptag <目录> <out.json> [份数]`：不开 GUI 跑一遍深度标签
+///
+/// 与界面里队列走的是**同一套** `deep_tag::process_one` + `llm::generate`。
+/// 存在的理由：验收 3 要求「12 份文本文件 3 分钟内完成、中位单份 ≤8s」，
+/// 这个数只能真跑出来，不能靠估。
+fn run_deeptag_cli(dir: &str, out: &str, limit: usize) -> i32 {
+    let base = std::env::var("FILEBUTLER_BASE").unwrap_or_else(|_| llm::DEFAULT_BASE.to_string());
+    let model = std::env::var("FILEBUTLER_MODEL").unwrap_or_else(|_| llm::DEFAULT_MODEL.to_string());
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut picked: Vec<deep_tag::Job> = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() || picked.len() >= limit {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let ext = scan::ext_of(&name);
+        let kind = tag::kind_of_ext(&ext);
+        if !matches!(kind, "word" | "excel" | "ppt" | "pdf" | "diagram") {
+            continue;
+        }
+        picked.push(deep_tag::Job {
+            file_id: picked.len() as i64 + 1,
+            name,
+            abs_path: entry.path().to_string_lossy().to_string(),
+            ext,
+            kind: kind.to_string(),
+            size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+        });
+    }
+    eprintln!("挑中 {} 份，模型 {model}", picked.len());
+
+    let t_all = Instant::now();
+    let mut times: Vec<u128> = Vec::new();
+    for job in &picked {
+        let t0 = Instant::now();
+        let r = deep_tag::process_one(
+            job,
+            &base,
+            &model,
+            Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
+        );
+        let ms = t0.elapsed().as_millis();
+        times.push(ms);
+        match r {
+            Ok(d) => {
+                eprintln!(
+                    "  {}ms  {}  →  {:?}  {}",
+                    ms,
+                    job.name.chars().take(28).collect::<String>(),
+                    d.tags,
+                    d.summary.unwrap_or_else(|| "（无）".into())
+                );
+                rows.push(serde_json::json!({
+                    "name": job.name, "kind": job.kind, "ms": ms,
+                    "tags": d.tags, "summary": d.tags.len(),
+                }));
+            }
+            Err(e) => {
+                eprintln!("  {}ms  {}  →  [{}] {}", ms, job.name, e.code, e.message);
+                rows.push(serde_json::json!({
+                    "name": job.name, "kind": job.kind, "ms": ms, "error": e.code,
+                }));
+            }
+        }
+    }
+    times.sort_unstable();
+    let median = times.get(times.len() / 2).copied().unwrap_or(0);
+    let payload = serde_json::json!({
+        "dir": dir,
+        "model": model,
+        "count": picked.len(),
+        "wallMs": t_all.elapsed().as_millis() as u64,
+        "medianMs": median,
+        "files": rows,
+    });
+    eprintln!(
+        "共 {} 份 / 总耗 {}ms / 中位 {}ms",
+        picked.len(),
+        t_all.elapsed().as_millis(),
+        median
+    );
+    match std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("写出失败：{e}");
+            1
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 增量与监听（M3）
+
+/// 启动后自动补一轮扫描（T3.2）
+///
+/// 两条硬规矩：
+/// * **距离上次扫描 < 10 分钟就跳过** —— 用户点着玩重启几次，不该每次都全盘走一遍；
+/// * **后台跑、不挡首屏** —— 首屏要的是计数和批次，不是「扫描完成」。
+fn spawn_auto_scan(app: AppHandle) {
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let due = {
+            let Ok(conn) = lock_db(&state) else { return };
+            let last = setting(&conn, "last_scan_at")
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
+            let configured = !index::list_source_roots(&conn).unwrap_or_default().is_empty();
+            let has_archive = setting(&conn, "archive_root").is_some();
+            (configured && has_archive, index::now_ms() - last)
+        };
+        let (ok, since) = due;
+        if !ok {
+            return;
+        }
+        if since < 10 * 60 * 1000 {
+            eprintln!("auto-scan: skip（{}s 前刚扫过）", since / 1000);
+            return;
+        }
+        // 给首屏一点时间：窗口先出来、计数先渲染，再开始走盘
+        std::thread::sleep(Duration::from_millis(1200));
+        match scan_all_inner(&app) {
+            Ok(r) => {
+                eprintln!(
+                    "auto-scan: 扫了 {} 份，新增 {}，更新 {}，丢失 {}",
+                    r.scanned, r.inserted, r.updated, r.missing
+                );
+                // 前端据此出「发现 N 份新文件」（T3.7），中性提示，不闪不红
+                let _ = app.emit("files-found", serde_json::json!({ "added": r.inserted }));
+            }
+            Err(e) => eprintln!("auto-scan: 失败 [{}] {}", e.code, e.message),
+        }
+    });
+}
+
+/// 监听批次落库（T3.4/T3.5/T3.6）
+///
+/// 返回真正新增的份数。**写库失败只记日志、丢这一批** ——
+/// 下一轮启动扫描会补上，绝不为了写一行数据去等 UI，也绝不 panic。
+fn apply_watch_batch(app: &AppHandle, paths: Vec<std::path::PathBuf>) -> usize {
+    if paths.is_empty() {
+        return 0;
+    }
+    let state = app.state::<AppState>();
+    if !state.watch_enabled.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let mut guard = match lock_db_retry(&state.db, Duration::from_millis(200)) {
+        Some(g) => g,
+        None => {
+            eprintln!("watch: db busy, drop batch（{} 条）", paths.len());
+            return 0;
+        }
+    };
+
+    let mut added = 0usize;
+    for p in paths.iter().take(500) {
+        let abs = p.to_string_lossy().to_string();
+        if p.exists() {
+            let Some(meta) = scan::meta_of(p) else { continue };
+            let Ok(Some(root_id)) = index::root_for_path(&guard, &abs) else {
+                continue;
+            };
+            let one = [meta];
+            match index::upsert_files(&mut guard, root_id, &one) {
+                Ok(st) => {
+                    if st.inserted > 0 {
+                        // 新文件要立刻有基础标签，否则进不了池
+                        if let Ok(queued) = index::list_queued(&guard, Some(root_id)) {
+                            let items: Vec<(i64, Vec<(String, String, f64)>)> = queued
+                                .iter()
+                                .filter(|(_, name, _, _)| name == &one[0].name)
+                                .map(|(id, name, kind, mtime)| {
+                                    (*id, tag::basic_tags(name, kind, *mtime))
+                                })
+                                .collect();
+                            let _ = index::apply_basic_labels(&mut guard, &items);
+                        }
+                        added += 1;
+                    }
+                }
+                Err(e) => eprintln!("watch: 入库失败 {abs}：{}", e.message),
+            }
+        } else {
+            // 删除/改名：只对 3 个状态生效（T3.5 守卫）
+            match index::mark_missing_if_pending(&guard, &abs) {
+                Ok(true) => eprintln!("watch: {abs} 不见了 → missing"),
+                Ok(false) => {}
+                Err(e) => eprintln!("watch: 标丢失失败 {abs}：{}", e.message),
+            }
+        }
+    }
+    added
+}
+
+/// 监听 guard 的插槽。设置页关掉监听时把它置空（drop 即停线程），
+/// 重新打开时再 start 一个 —— 否则开关只能写数据库，得重启才生效。
+type WatchSlot = std::sync::Mutex<Option<watch::WatchGuard>>;
+
+/// 从库里读出「该听哪些目录、归档区在哪」
+fn watch_config_from_db(app: &AppHandle) -> watch::WatchConfig {
+    let state = app.state::<AppState>();
+    let Ok(conn) = lock_db(&state) else {
+        return watch::WatchConfig::default();
+    };
+    let roots: Vec<std::path::PathBuf> = index::list_source_roots(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.enabled)
+        .map(|r| std::path::PathBuf::from(r.path))
+        .collect();
+    let archive_root = setting(&conn, "archive_root").map(std::path::PathBuf::from);
+    watch::WatchConfig {
+        roots,
+        archive_root,
+    }
+}
+
+/// 起监听（已在跑就先停掉旧的，避免同一目录挂两个 watcher）
+fn start_watch(app: &AppHandle) -> Result<(), CmdError> {
+    let cfg = watch_config_from_db(app);
+    if cfg.roots.is_empty() {
+        return Ok(());
+    }
+    let handle = app.clone();
+    let g = watch::start(
+        cfg,
+        Duration::from_millis(watch::DEBOUNCE_MS),
+        move |paths| {
+            let n = apply_watch_batch(&handle, paths);
+            if n > 0 {
+                // 前端据此出「+N 新文件」（T3.7）
+                let _ = handle.emit("files-found", serde_json::json!({ "added": n }));
+            }
+        },
+    )?;
+    let slot = app.state::<WatchSlot>();
+    // 先换出旧的再赋值：旧 guard 在这里 drop，线程退出
+    *slot.lock().map_err(|_| CmdError::new(error::DB, "监听插槽锁已损坏"))? = Some(g);
+    Ok(())
+}
+
+/// 停监听：置空插槽即可（guard 的 Drop 会 join 线程）
+fn stop_watch(app: &AppHandle) {
+    let slot = app.state::<WatchSlot>();
+    let taken = slot.lock().map(|mut s| s.take());
+    // 显式落到语句里：让 MutexGuard 在 slot 之前析构
+    drop(taken);
+}
+
+#[tauri::command]
+async fn set_watch_enabled(app: AppHandle, enabled: bool) -> Result<(), CmdError> {
+    {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::set_setting(&conn, "watch_enabled", if enabled { "1" } else { "0" })?;
+        state.watch_enabled.store(enabled, Ordering::Relaxed);
+    }
+    // 开关要当场生效，不能等下次启动
+    if enabled {
+        start_watch(&app)?;
+    } else {
+        stop_watch(&app);
+    }
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "--deeptag" {
+        let limit = args
+            .get(4)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(12);
+        std::process::exit(run_deeptag_cli(&args[2], &args[3], limit));
+    }
+    if args.len() >= 4 && args[1] == "--extract" {
+        std::process::exit(run_extract_cli(&args[2], &args[3]));
+    }
     if args.len() >= 4 && args[1] == "--eval" {
         std::process::exit(run_eval_cli(&args[2], &args[3]));
     }
@@ -1386,6 +1982,37 @@ fn main() {
             }
 
             app.manage(AppState::new(conn, dir));
+
+            // 深度标签队列：默认开（用户可在设置页关掉）
+            let enabled = index::get_setting(&app.state::<AppState>().db.lock().unwrap(), "deep_tag_enabled")
+                .ok()
+                .flatten()
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            let queue = Arc::new(deep_tag::Queue::new(enabled));
+            app.manage(queue.clone());
+            spawn_deep_tag(app.handle().clone(), queue);
+
+            // 启动增量 + 运行时监听（M3）。两者都不挡首屏：各自一个后台线程。
+            spawn_auto_scan(app.handle().clone());
+
+            // 监听的 guard 得能被设置页的开关摘下来，所以用 Option 装在插槽里
+            app.manage(std::sync::Mutex::new(None::<watch::WatchGuard>));
+            let watch_on = {
+                let state = app.state::<AppState>();
+                let on = lock_db(&state)
+                    .ok()
+                    .and_then(|conn| setting(&conn, "watch_enabled"))
+                    .map(|v| v != "0")
+                    .unwrap_or(true);
+                state.watch_enabled.store(on, Ordering::Relaxed);
+                on
+            };
+            if watch_on {
+                if let Err(e) = start_watch(app.handle()) {
+                    eprintln!("watch: 启动失败 [{}] {}", e.code, e.message);
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1416,7 +2043,10 @@ fn main() {
             save_note,
             preview_file,
             rename_file,
-            rescore_files
+            rescore_files,
+            deep_tag_status,
+            set_deep_tag,
+            set_watch_enabled
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

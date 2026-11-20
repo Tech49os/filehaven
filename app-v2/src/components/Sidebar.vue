@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from './AppIcon.vue'
 import { useAppStore } from '../stores/app'
+import { onFilesFound } from '../core/events'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const route = useRoute()
 const router = useRouter()
@@ -59,6 +61,20 @@ const modelTip = computed(() => {
   if (model.value.reachable) return `模型已就绪：${model.value.model ?? '未知'}`
   return '模型未连接，目录建议会降级为手动'
 })
+
+/** 侧栏常驻，事件订阅挂这儿最稳：切页面不会漏掉「又来了 N 份」 */
+let unlisten: UnlistenFn | null = null
+onMounted(async () => {
+  unlisten = await onFilesFound((p) => app.noteNewFiles(p.added))
+})
+onUnmounted(() => unlisten?.())
+
+/** 点一下：刷新计数（新文件得进池才看得见）+ 收掉提示 + 去整理台 */
+function goNewFiles() {
+  app.dismissNewFiles()
+  void app.refreshBoot()
+  go('/workspace')
+}
 </script>
 
 <template>
@@ -84,6 +100,13 @@ const modelTip = computed(() => {
         >
       </button>
     </nav>
+
+    <!-- 监听/增量扫描发现了新文件（T3.7）。灰色中性条，不闪不红：
+         这不是错误，是「又来了活儿」，点一下去处理 -->
+    <button v-if="app.newFiles > 0" class="newfiles" :title="'点一下去整理台'" @click="goNewFiles">
+      <AppIcon name="sparkle" :size="12" />
+      <span class="ellipsis">+{{ app.newFiles }} 份新文件</span>
+    </button>
 
     <div class="foot">
       <div class="root">
@@ -191,6 +214,30 @@ nav {
   background: rgba(0, 0, 0, 0.06);
   color: var(--c-text-2);
   font-weight: 400;
+}
+
+/* 新文件提示：一格灰色小条，带一点点强调色图标，读完就知道有活儿 */
+.newfiles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: var(--r-item);
+  background: var(--c-primary-bg);
+  color: var(--c-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  min-width: 0;
+}
+.newfiles:hover {
+  filter: brightness(0.97);
+}
+.newfiles:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 1px;
 }
 
 .foot {

@@ -171,6 +171,24 @@ pub fn scan_roots(
     out
 }
 
+/// 单个路径 → 文件元数据（监听用它把「刚落的文件」变成一条可入库的记录）
+pub fn meta_of(path: &Path) -> Option<ScannedFile> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let ext = ext_of(&name);
+    Some(ScannedFile {
+        name: name.clone(),
+        path: path.to_string_lossy().to_string(),
+        ext: ext.clone(),
+        kind: tag::kind_of_ext(&ext).to_string(),
+        size: meta.len(),
+        mtime: mtime_ms(&meta),
+    })
+}
+
 /// 扫一个具体目录（`--selftest` 与单测用），不查库
 pub fn scan_dir(dir: &str) -> Result<Vec<ScannedFile>, CmdError> {
     if !Path::new(dir).is_dir() {

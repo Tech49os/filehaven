@@ -17,6 +17,7 @@ import type {
   DecideReq,
   DirNamePreview,
   DirNode,
+  DeepTagStats,
   DirSuggestion,
   FilePreview,
   FileRow,
@@ -172,6 +173,31 @@ export function renameFile(fileId: number, newName: string) {
  */
 export function rescoreFiles(fileIds: number[]) {
   return invoke<BatchItem[]>('rescore_files', { fileIds })
+}
+
+// ---------------------------------------------------------------- 深度解读
+
+/** 队列现在的进度（失败数、还剩多少、停下来的原因） */
+export function deepTagStatus() {
+  return invoke<DeepTagStats>('deep_tag_status')
+}
+
+/** 开关 / 暂停（`enabled` 会写库，重启后还是用户的意愿） */
+export function setDeepTag(opts: { enabled?: boolean; paused?: boolean }) {
+  return invoke<DeepTagStats>('set_deep_tag', {
+    enabled: opts.enabled ?? null,
+    paused: opts.paused ?? null,
+  })
+}
+
+// ---------------------------------------------------------------- 监听
+
+/**
+ * 开关运行时监听。会写库（重启后仍按用户的意愿），并**当场**起/停监听线程 ——
+ * 不是「下次启动才生效」。
+ */
+export function setWatchEnabled(enabled: boolean) {
+  return invoke<void>('set_watch_enabled', { enabled })
 }
 
 // ---------------------------------------------------------------- 迁移

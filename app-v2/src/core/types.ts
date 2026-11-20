@@ -53,6 +53,8 @@ export interface BootState {
   sourceRoots: SourceRoot[]
   counts: Counts
   model: ModelStatus
+  /** 运行时监听是否开着（设置页可关） */
+  watchEnabled: boolean
 }
 
 export interface ArchiveInfo {
@@ -94,6 +96,10 @@ export interface FileRow {
   note: string | null
   /** 归档时改成的名字；null = 保持原名 */
   targetName?: string | null
+  /** 深度解读的一句话说明；null = 没读过，或读过但没有可说的（看 tagLevel） */
+  summary?: string | null
+  /** basic（只打了类型/时间标签）| deep（读过正文） */
+  tagLevel?: string
 }
 
 export interface ArchiveDir {
@@ -258,6 +264,20 @@ export interface UndoReport {
   failed: { fileId: number; name: string; reason: string }[]
 }
 
+/** 深度标签队列的实时状态（`deep-tag-progress` 事件与 `deep_tag_status` 命令同一个形状） */
+export interface DeepTagStats {
+  done: number
+  failed: number
+  /** 还剩多少份没深读 */
+  remaining: number
+  current: string
+  running: boolean
+  paused: boolean
+  enabled: boolean
+  /** 停下来的原因（如「队列已停：模型未响应」） */
+  note: string | null
+}
+
 // ---------------------------------------------------------------- 事件
 
 export interface ScanProgress {
@@ -266,6 +286,11 @@ export interface ScanProgress {
   total: number
   currentPath: string
   skipped: number
+}
+
+/** 增量扫描/监听发现了新文件（`files-found`）—— 中性提示，不是错误 */
+export interface FilesFound {
+  added: number
 }
 
 export interface SuggestStage {

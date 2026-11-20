@@ -8,9 +8,9 @@ import NewDirInput from '../../components/NewDirInput.vue'
 import { useAppStore } from '../../stores/app'
 import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
-import { onScanProgress } from '../../core/events'
+import { onDeepTagProgress, onScanProgress } from '../../core/events'
 import { humanize, toCmdError } from '../../core/cmdError'
-import type { ScanProgress, ScanReport } from '../../core/types'
+import type { DeepTagStats, ScanProgress, ScanReport } from '../../core/types'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const app = useAppStore()
@@ -56,6 +56,64 @@ async function probeModel() {
   }
 }
 
+// ---------------------------------------------------------------- 深度解读（P2 T2.8）
+
+const deep = ref<DeepTagStats | null>(null)
+/** 模型未响应时后端会在 note 里写清原因，这里原样显示，不静默 */
+const deepNote = computed(() => {
+  const st = deep.value
+  if (!st) return null
+  if (st.note) return st.note
+  if (!st.enabled) return '已关闭：不再读新文件'
+  if (st.paused) return '已暂停'
+  return null
+})
+const deepTotal = computed(() => {
+  const st = deep.value
+  return st ? st.done + st.remaining : 0
+})
+
+async function refreshDeep() {
+  try {
+    deep.value = await ipc.deepTagStatus()
+  } catch {
+    // 队列状态读不到不该打断设置页，保持上一次的数字
+  }
+}
+
+async function toggleDeep() {
+  const on = !(deep.value?.enabled ?? true)
+  try {
+    deep.value = await ipc.setDeepTag({ enabled: on })
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  }
+}
+
+async function togglePauseDeep() {
+  const paused = !(deep.value?.paused ?? false)
+  try {
+    deep.value = await ipc.setDeepTag({ paused })
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  }
+}
+
+// ---------------------------------------------------------------- 新文件监听（P2 T3.7）
+
+const watchBusy = ref(false)
+
+async function toggleWatch() {
+  watchBusy.value = true
+  try {
+    await app.setWatchEnabled(!app.watchEnabled)
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  } finally {
+    watchBusy.value = false
+  }
+}
+
 let unlisten: UnlistenFn | null = null
 
 onMounted(async () => {
@@ -67,6 +125,16 @@ onMounted(async () => {
   unlisten = await onScanProgress((p) => {
     progress.value = p
   })
+  await refreshDeep()
+  const off = await onDeepTagProgress((p) => {
+    deep.value = p
+  })
+  // 两个事件订阅一起回收（onScanProgress 的返回值才是 unlisten）
+  const scanOff = unlisten
+  unlisten = () => {
+    scanOff?.()
+    off()
+  }
 })
 
 onUnmounted(() => unlisten?.())
@@ -191,6 +259,58 @@ async function removeRoot(id: number) {
       <div v-if="adding" class="newdir">
         <NewDirInput @confirm="onCreateDir" @cancel="adding = false" />
       </div>
+    </Card>
+
+    <Card title="深度解读">
+      <template #action>
+        <div class="acts">
+          <button class="btn ghost" @click="togglePauseDeep" :disabled="!deep?.enabled">
+            {{ deep?.paused ? '继续' : '暂停' }}
+          </button>
+          <button class="btn" :class="{ ghost: !deep?.enabled }" @click="toggleDeep">
+            {{ deep?.enabled ? '关闭' : '开启' }}
+          </button>
+        </div>
+      </template>
+      <div class="row">
+        <i class="dot" :class="{ on: deep?.enabled && !deep?.paused && !deep?.note }" />
+        <span>{{ deep?.enabled ? (deep?.paused ? '已暂停' : '运行中') : '已关闭' }}</span>
+        <span v-if="deep?.current" class="dim mono ellipsis">{{ deep.current }}</span>
+      </div>
+      <p class="hint mono">
+        完成 {{ deep?.done ?? 0 }} / {{ deepTotal }} · 失败 {{ deep?.failed ?? 0 }} ·
+        还剩 {{ deep?.remaining ?? 0 }} 份
+      </p>
+      <p v-if="deepNote" class="hint" :class="deep?.note ? 'bad' : ''">{{ deepNote }}</p>
+      <p v-if="(deep?.failed ?? 0) > 0" class="hint bad">
+        有 {{ deep?.failed }} 份没读出来。已经在队列里跳过，重启应用会再试一次；
+        连续失败多半是模型输出不成形，换个模型或调小份数再看看。
+      </p>
+      <p class="hint">
+        读正文、给文件起 3~5 个主题标签，并用一句话说明它是什么 ——
+        推荐靠标签判断「同类」，待定区靠它让你第二次看得懂。
+        扫描件（没有文字层）会标「未解读」，不硬猜。
+      </p>
+    </Card>
+
+    <Card title="新文件监听">
+      <template #action>
+        <button class="btn" :class="{ ghost: app.watchEnabled }" :disabled="watchBusy" @click="toggleWatch">
+          {{ app.watchEnabled ? '暂停监听' : '开启监听' }}
+        </button>
+      </template>
+      <div class="row">
+        <i class="dot" :class="{ on: app.watchEnabled }" />
+        <span>{{ app.watchEnabled ? '正在盯着源区' : '已关闭，只在启动时扫一次' }}</span>
+      </div>
+      <p class="hint">
+        开着时，往源区丢文件、解压、另存为，几秒后就会自动进池，不用再手点扫描；
+        新增的数量会在侧边栏显示「+N 份新文件」。归档区与系统目录不听，迁移时自己搬走的文件也不算丢失。
+      </p>
+      <p class="hint">
+        关掉不影响启动扫描：每次启动仍会增量扫一遍（10 分钟内扫过就跳过）。
+        大批量复制时建议先关，免得整理过程中池子一直在变。
+      </p>
     </Card>
 
     <Card title="本地模型">

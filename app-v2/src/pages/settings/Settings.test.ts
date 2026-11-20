@@ -10,6 +10,9 @@ const addSourceRoot = vi.fn()
 const removeSourceRoot = vi.fn()
 const scanAll = vi.fn()
 const push = vi.fn()
+const deepTagStatus = vi.fn()
+const setDeepTag = vi.fn()
+const setWatchEnabled = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   bootState,
@@ -19,10 +22,17 @@ vi.mock('../../core/ipc', () => ({
   addSourceRoot,
   removeSourceRoot,
   scanAll,
+  deepTagStatus,
+  setDeepTag,
+  setWatchEnabled,
   createDir: vi.fn(),
   previewDirName: vi.fn(),
 }))
-vi.mock('../../core/events', () => ({ onScanProgress: vi.fn().mockResolvedValue(() => {}) }))
+vi.mock('../../core/events', () => ({
+  onScanProgress: vi.fn().mockResolvedValue(() => {}),
+  onDeepTagProgress: vi.fn().mockResolvedValue(() => {}),
+  onFilesFound: vi.fn().mockResolvedValue(() => {}),
+}))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push, replace: push }) }))
 
 const Settings = (await import('./Settings.vue')).default
@@ -136,5 +146,111 @@ describe('设置页 · 目录结构', () => {
     expect(entry).toBeTruthy()
     await entry!.trigger('click')
     expect(push).toHaveBeenCalledWith('/onboarding/dirs')
+  })
+})
+
+// ---------------------------------------------------------------- 深度解读队列（P2 T2.8）
+
+describe('设置页 · 深度解读队列', () => {
+  const stats = (over: Record<string, unknown> = {}) => ({
+    done: 12,
+    failed: 0,
+    remaining: 30,
+    current: '',
+    running: false,
+    paused: false,
+    enabled: true,
+    note: null,
+    ...over,
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset().mockResolvedValue(boot([{ id: 1, path: 'C:/桌面', enabled: true }]))
+    listDirs.mockReset().mockResolvedValue([])
+    diskFreeGb.mockReset().mockResolvedValue(120.5)
+    deepTagStatus.mockReset().mockResolvedValue(stats())
+    setDeepTag.mockReset()
+  })
+
+  it('关掉开关会把 enabled=false 写回去（重启后仍然是用户的意愿）', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+
+    setDeepTag.mockResolvedValueOnce(stats({ enabled: false }))
+    await btn(w, '关闭')!.trigger('click')
+    await flushPromises()
+    expect(setDeepTag).toHaveBeenCalledWith({ enabled: false })
+    expect(w.text()).toContain('已关闭')
+  })
+
+  it('失败数 >0 时明确说出来，不静默', async () => {
+    deepTagStatus.mockResolvedValueOnce(stats({ failed: 3 }))
+    const w = mount(Settings)
+    await flushPromises()
+    expect(w.text()).toContain('失败 3')
+    expect(w.text()).toContain('没读出来')
+  })
+
+  it('暂停后按钮文案变「继续」', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const pause = btn(w, '暂停')!
+    expect(pause.text()).toBe('暂停')
+
+    setDeepTag.mockResolvedValueOnce(stats({ paused: true }))
+    await pause.trigger('click')
+    await flushPromises()
+    expect(setDeepTag).toHaveBeenCalledWith({ paused: true })
+    expect(btn(w, '继续')).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------- 新文件监听（P2 T3.7）
+
+describe('设置页 · 新文件监听开关', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    listDirs.mockReset().mockResolvedValue([])
+    diskFreeGb.mockReset().mockResolvedValue(120.5)
+    deepTagStatus.mockReset().mockResolvedValue({
+      done: 0,
+      failed: 0,
+      remaining: 0,
+      current: '',
+      running: false,
+      paused: false,
+      enabled: true,
+      note: null,
+    })
+    setWatchEnabled.mockReset()
+  })
+
+  it('开着的源区显示「正在盯着源区」，可以关掉', async () => {
+    bootState.mockReset().mockResolvedValue({
+      ...boot([{ id: 1, path: 'C:/桌面', enabled: true }]),
+      watchEnabled: true,
+    })
+    setWatchEnabled.mockResolvedValue(undefined)
+    const w = mount(Settings)
+    await flushPromises()
+
+    expect(w.text()).toContain('正在盯着源区')
+    await btn(w, '暂停监听')!.trigger('click')
+    await flushPromises()
+    expect(setWatchEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it('关着的时候说明「还在启动时扫一次」，别让人以为完全不扫了', async () => {
+    bootState.mockReset().mockResolvedValue({
+      ...boot([{ id: 1, path: 'C:/桌面', enabled: true }]),
+      watchEnabled: false,
+    })
+    const w = mount(Settings)
+    await flushPromises()
+
+    expect(w.text()).toContain('已关闭，只在启动时扫一次')
+    expect(w.text()).toContain('启动扫描')
+    expect(btn(w, '开启监听')).toBeTruthy()
   })
 })
