@@ -3,6 +3,7 @@
 //! P1 阶段：只做元数据扫描 + 人工确认整理，不抽正文；只有「目录建议」用本地模型。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1156,8 +1157,144 @@ fn run_suggest_cli(samples: &str, out: &str, force: bool) -> i32 {
     }
 }
 
+/// `--eval <cases.json> <out.json>`：不开 GUI、不碰库、不联网，只算推荐排名
+///
+/// 输入来自 `test/export-eval.py` 导出的留一集；输出每条 case 的**完整排名**，
+/// 阈值网格搜索放在 `test/eval_recommend.py` 里做 —— 改阈值不需要重编译。
+///
+/// 留一法在这里落地：算某一条 case 的分数前，把它自己的文件名从
+/// `expectDir` 那个目录的已确认列表里摘掉，否则等于把答案喂给 familyMatch。
+fn run_eval_cli(cases: &str, out: &str) -> i32 {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RawDir {
+        rel_path: String,
+        name: String,
+        file_names: Vec<String>,
+        #[serde(default)]
+        kinds: Vec<String>,
+        #[serde(default)]
+        topic_tags: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RawCase {
+        file_name: String,
+        kind: String,
+        mtime: i64,
+        expect_dir: String,
+        #[serde(default)]
+        has_deep_tags: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawSet {
+        dirs: Vec<RawDir>,
+        cases: Vec<RawCase>,
+    }
+
+    let text = match std::fs::read_to_string(cases) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("读评测集失败：{e}");
+            return 1;
+        }
+    };
+    let set: RawSet = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("评测集不是预期 JSON：{e}");
+            return 1;
+        }
+    };
+
+    let mut out_cases: Vec<serde_json::Value> = Vec::with_capacity(set.cases.len());
+    for c in &set.cases {
+        // 每个 case 重建一次目录特征：留一法要摘掉自己，不能共用一份
+        let mut dirs: Vec<(i64, recommend::DirFeature)> = Vec::new();
+        let mut rel_paths: HashMap<i64, String> = HashMap::new();
+        for (i, d) in set.dirs.iter().enumerate() {
+            let id = i as i64 + 1;
+            let mut names: Vec<&String> = d.file_names.iter().collect();
+            if d.rel_path == c.expect_dir {
+                if let Some(p) = names.iter().position(|n| **n == c.file_name) {
+                    names.remove(p);
+                }
+            }
+            let mut confirmed: Vec<String> = Vec::new();
+            for n in &names {
+                for t in tag::tokenize(stem_of(n)) {
+                    if !confirmed.contains(&t) {
+                        confirmed.push(t);
+                    }
+                }
+            }
+            rel_paths.insert(id, d.rel_path.clone());
+            dirs.push((
+                id,
+                recommend::DirFeature {
+                    name_tokens: tag::tokenize(&d.name),
+                    dir_name: d.name.clone(),
+                    confirmed_tokens: confirmed,
+                    file_count: names.len(),
+                },
+            ));
+        }
+
+        let stem = stem_of(&c.file_name).to_string();
+        let feat = recommend::FileFeature {
+            tokens: tag::tokenize(&stem),
+            stem: stem.clone(),
+            kind: c.kind.clone(),
+            mtime: c.mtime,
+        };
+        let ranked = recommend::rank(&feat, &dirs);
+        let rows: Vec<serde_json::Value> = ranked
+            .iter()
+            .take(10)
+            .map(|(id, s, r)| {
+                serde_json::json!({
+                    "relPath": rel_paths.get(id).cloned().unwrap_or_default(),
+                    "score": s,
+                    "reason": r,
+                })
+            })
+            .collect();
+        let pos = ranked
+            .iter()
+            .position(|(id, _, _)| rel_paths.get(id).map(|p| p == &c.expect_dir).unwrap_or(false));
+        let (cands, needs) = recommend::candidates(&feat, &dirs, &rel_paths);
+        out_cases.push(serde_json::json!({
+            "fileName": c.file_name,
+            "kind": c.kind,
+            "expectDir": c.expect_dir,
+            "hasDeepTags": c.has_deep_tags,
+            // 1 起；null = 没进有理由的排名
+            "rank": pos.map(|p| p + 1),
+            "ranked": rows,
+            "needsYou": needs,
+            "primaryHits": cands.first().map(|x| x.rel_path == c.expect_dir).unwrap_or(false),
+        }));
+    }
+
+    let payload = serde_json::json!({
+        "dirCount": set.dirs.len(),
+        "caseCount": set.cases.len(),
+        "cases": out_cases,
+    });
+    match std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("写出失败：{e}");
+            1
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "--eval" {
+        std::process::exit(run_eval_cli(&args[2], &args[3]));
+    }
     if args.len() >= 4 && args[1] == "--scan" {
         std::process::exit(run_scan_cli(&args[2], &args[3]));
     }

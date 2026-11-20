@@ -1,0 +1,767 @@
+{
+ "source": "C:\\Users\\kingb\\AppData\\Roaming\\com.filebutler.app\\index.db",
+ "dirs": [
+  {
+   "id": 1,
+   "name": "信科",
+   "relPath": "信科",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 2,
+   "name": "生产智能化项目组",
+   "relPath": "信科/生产智能化项目组",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 34,
+   "name": "个人差旅",
+   "relPath": "信科/个人差旅",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 3,
+   "name": "汇报",
+   "relPath": "信科/生产智能化项目组/汇报",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 6,
+   "name": "项目管理流程",
+   "relPath": "信科/生产智能化项目组/项目管理流程",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 9,
+   "name": "智能工厂项目",
+   "relPath": "信科/生产智能化项目组/智能工厂项目",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 24,
+   "name": "工业互联网项目",
+   "relPath": "信科/生产智能化项目组/工业互联网项目",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 35,
+   "name": "2026年",
+   "relPath": "信科/个人差旅/2026年",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 38,
+   "name": "部门管理",
+   "relPath": "信科/生产智能化项目组/部门管理",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 4,
+   "name": "年度汇报",
+   "relPath": "信科/生产智能化项目组/汇报/年度汇报",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 7,
+   "name": "预提",
+   "relPath": "信科/生产智能化项目组/项目管理流程/预提",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 10,
+   "name": "统建",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/统建",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 12,
+   "name": "汇报",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/汇报",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 17,
+   "name": "油田化学项目",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/油田化学项目",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 20,
+   "name": "工技采油树项目",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/工技采油树项目",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 25,
+   "name": "历史材料",
+   "relPath": "信科/生产智能化项目组/工业互联网项目/历史材料",
+   "fileNames": [
+    "03 2026-2027年度生产智能化平台（海能智擎）运维项目-第一阶段验收汇报.pdf",
+    "202403-中国海油工业互联网深化设计项目-验收汇报完整版.pptx",
+    "验收汇报-生产智能化技术平台（最终）0921.pptx"
+   ],
+   "kinds": [
+    "pdf",
+    "ppt",
+    "ppt"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 26,
+   "name": "加工制造项目",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/加工制造项目",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 28,
+   "name": "上线安全检查",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/上线安全检查",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 30,
+   "name": "应急预案",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/应急预案",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 32,
+   "name": "井下项目",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/井下项目",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 36,
+   "name": "9月",
+   "relPath": "信科/个人差旅/2026年/9月",
+   "fileNames": [
+    "【9月南油】信科生产智能化项目组9月差旅对账单.xlsx",
+    "附件4：南油服员工差旅报销汇总表-智能工厂技术室 -10月.xlsx"
+   ],
+   "kinds": [
+    "excel",
+    "excel"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 39,
+   "name": "成本反馈",
+   "relPath": "信科/生产智能化项目组/部门管理/成本反馈",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 43,
+   "name": "月度汇报",
+   "relPath": "信科/生产智能化项目组/汇报/月度汇报",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 45,
+   "name": "设备管理",
+   "relPath": "信科/生产智能化项目组/部门管理/设备管理",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 5,
+   "name": "2026年",
+   "relPath": "信科/生产智能化项目组/汇报/年度汇报/2026年",
+   "fileNames": [
+    "生产智能化项目组工作汇报.pptx"
+   ],
+   "kinds": [
+    "ppt"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 8,
+   "name": "材料模板",
+   "relPath": "信科/生产智能化项目组/项目管理流程/预提/材料模板",
+   "fileNames": [
+    "预提单.pdf"
+   ],
+   "kinds": [
+    "pdf"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 11,
+   "name": "智擎融合",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/统建/智擎融合",
+   "fileNames": [
+    "智能工厂用户中心初步迁移方案(1).docx",
+    "智能工厂用户中心初步迁移方案.docx",
+    "用户中心API202611051543.docx",
+    "用户中心API_by20261105.docx"
+   ],
+   "kinds": [
+    "word",
+    "word",
+    "word",
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 13,
+   "name": "2026年",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/汇报/2026年",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 18,
+   "name": "验收",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收",
+   "fileNames": [
+    "油化厂智能工厂深化建设项目蓝图设计汇报20250730V10.0(科创部汇报).pptx",
+    "油化厂智能工厂进展及问题汇总-合稿V1.2.pptx",
+    "油田化工智能工厂二期建设对比说明.pptx",
+    "油田化工智能工厂相关建设工作进展情况汇报-2026.11.5.pptx",
+    "油田化工智能工厂项目进展情况汇报-2026.11.5.pptx"
+   ],
+   "kinds": [
+    "ppt",
+    "ppt",
+    "ppt",
+    "ppt",
+    "ppt"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 21,
+   "name": "采办",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/工技采油树项目/采办",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 23,
+   "name": "蓝图设计",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/油田化学项目/蓝图设计",
+   "fileNames": [
+    "油田化工智能工厂数字化系统深化建设项目实施蓝图-V10.0（科创部汇报）.docx"
+   ],
+   "kinds": [
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 27,
+   "name": "合同",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/加工制造项目/合同",
+   "fileNames": [
+    "2-JGF2024068-装备加工制造智能工厂数采服务.pdf"
+   ],
+   "kinds": [
+    "pdf"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 29,
+   "name": "2026年度",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/上线安全检查/2026年度",
+   "fileNames": [
+    "海油发展智能工厂系统上线安全检查(初测)报告.docx"
+   ],
+   "kinds": [
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 31,
+   "name": "2026年度",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/应急预案/2026年度",
+   "fileNames": [
+    "海油发展智能工厂系统应急预案(1).docx"
+   ],
+   "kinds": [
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 33,
+   "name": "实施方案",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/井下项目/实施方案",
+   "fileNames": [
+    "海发智能工厂项目-井下公司能碳模块实施方案.pptx"
+   ],
+   "kinds": [
+    "ppt"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 37,
+   "name": "合同",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/油田化学项目/合同",
+   "fileNames": [
+    "XK2022SR003YF-MES和WMS模块建设服务合同.pdf"
+   ],
+   "kinds": [
+    "pdf"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 40,
+   "name": "2026年",
+   "relPath": "信科/生产智能化项目组/部门管理/成本反馈/2026年",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 42,
+   "name": "2025年",
+   "relPath": "信科/生产智能化项目组/汇报/年度汇报/2025年",
+   "fileNames": [
+    "信科天津分公司2025年工作总结-V3.0.pdf"
+   ],
+   "kinds": [
+    "pdf"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 44,
+   "name": "2026年9月",
+   "relPath": "信科/生产智能化项目组/汇报/月度汇报/2026年9月",
+   "fileNames": [
+    "0.智能工厂开展汇报-信科公司-生产智能化项目组-2026.9.14-34页补充.pptx",
+    "智能工厂开展汇报-信科公司-生产智能化项目组-2026.9.14-王一名.pptx"
+   ],
+   "kinds": [
+    "ppt",
+    "ppt"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 46,
+   "name": "集团借用",
+   "relPath": "信科/生产智能化项目组/部门管理/设备管理/集团借用",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 14,
+   "name": "阅读汇报",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/汇报/2026年/阅读汇报",
+   "fileNames": [],
+   "kinds": [],
+   "topicTags": []
+  },
+  {
+   "id": 15,
+   "name": "月度汇报",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/汇报/2026年/月度汇报",
+   "fileNames": [
+    "附件2：月度工作报告（智能工厂技术室） v2.docx",
+    "附件2：月度工作报告（智能工厂技术室） v3.docx",
+    "附件2：月度工作报告（智能工厂技术室）.docx"
+   ],
+   "kinds": [
+    "word",
+    "word",
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 16,
+   "name": "过程素材",
+   "relPath": "信科/生产智能化项目组/汇报/年度汇报/2026年/过程素材",
+   "fileNames": [
+    "工技实验室汇报.docx",
+    "工技实验室项情况说明.docx",
+    "采油树项目.docx",
+    "项目小作文.docx"
+   ],
+   "kinds": [
+    "word",
+    "word",
+    "word",
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 19,
+   "name": "会议纪要",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收/会议纪要",
+   "fileNames": [
+    "油田化工智能工厂相关建设工作进展会议纪要-V1.0.doc",
+    "油田化工智能工厂相关建设工作进展会议纪要.doc"
+   ],
+   "kinds": [
+    "word",
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 22,
+   "name": "江苏中数创和",
+   "relPath": "信科/生产智能化项目组/智能工厂项目/工技采油树项目/采办/江苏中数创和",
+   "fileNames": [
+    "服务委托书-智能工厂系统产品模块辅助开发服务.docx"
+   ],
+   "kinds": [
+    "word"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 41,
+   "name": "11月",
+   "relPath": "信科/生产智能化项目组/部门管理/成本反馈/2026年/11月",
+   "fileNames": [
+    "各部门成本反馈20261102.xls"
+   ],
+   "kinds": [
+    "excel"
+   ],
+   "topicTags": []
+  },
+  {
+   "id": 47,
+   "name": "服务器借用",
+   "relPath": "信科/生产智能化项目组/部门管理/设备管理/集团借用/服务器借用",
+   "fileNames": [
+    "2026年9月17日集团天津数据中心移交给信科7台服务器交接单(1).pdf",
+    "2026年9月17日集团天津数据中心移交给信科7台服务器交接单.pdf"
+   ],
+   "kinds": [
+    "pdf",
+    "pdf"
+   ],
+   "topicTags": []
+  }
+ ],
+ "cases": [
+  {
+   "fileName": "生产智能化项目组工作汇报.pptx",
+   "kind": "ppt",
+   "mtime": 1795139505249,
+   "expectDir": "信科/生产智能化项目组/汇报/年度汇报/2026年",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "预提单.pdf",
+   "kind": "pdf",
+   "mtime": 1795138897802,
+   "expectDir": "信科/生产智能化项目组/项目管理流程/预提/材料模板",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "智能工厂用户中心初步迁移方案(1).docx",
+   "kind": "word",
+   "mtime": 1795002104687,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/统建/智擎融合",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "附件2：月度工作报告（智能工厂技术室） v3.docx",
+   "kind": "word",
+   "mtime": 1794826966828,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/汇报/2026年/月度汇报",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "附件2：月度工作报告（智能工厂技术室） v2.docx",
+   "kind": "word",
+   "mtime": 1794796237296,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/汇报/2026年/月度汇报",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "附件2：月度工作报告（智能工厂技术室）.docx",
+   "kind": "word",
+   "mtime": 1794794407211,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/汇报/2026年/月度汇报",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "项目小作文.docx",
+   "kind": "word",
+   "mtime": 1794556687081,
+   "expectDir": "信科/生产智能化项目组/汇报/年度汇报/2026年/过程素材",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "工技实验室汇报.docx",
+   "kind": "word",
+   "mtime": 1794553579283,
+   "expectDir": "信科/生产智能化项目组/汇报/年度汇报/2026年/过程素材",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "采油树项目.docx",
+   "kind": "word",
+   "mtime": 1794551501424,
+   "expectDir": "信科/生产智能化项目组/汇报/年度汇报/2026年/过程素材",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "工技实验室项情况说明.docx",
+   "kind": "word",
+   "mtime": 1794551092568,
+   "expectDir": "信科/生产智能化项目组/汇报/年度汇报/2026年/过程素材",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "信科天津分公司2025年工作总结-V3.0.pdf",
+   "kind": "pdf",
+   "mtime": 1794450029805,
+   "expectDir": "信科/生产智能化项目组/汇报/年度汇报/2025年",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油田化工智能工厂相关建设工作进展会议纪要-V1.0.doc",
+   "kind": "word",
+   "mtime": 1794376386546,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收/会议纪要",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油田化工智能工厂相关建设工作进展会议纪要.doc",
+   "kind": "word",
+   "mtime": 1794376378721,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收/会议纪要",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "智能工厂用户中心初步迁移方案.docx",
+   "kind": "word",
+   "mtime": 1794367706564,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/统建/智擎融合",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "服务委托书-智能工厂系统产品模块辅助开发服务.docx",
+   "kind": "word",
+   "mtime": 1794271688313,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/工技采油树项目/采办/江苏中数创和",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "2-JGF2024068-装备加工制造智能工厂数采服务.pdf",
+   "kind": "pdf",
+   "mtime": 1793973109592,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/加工制造项目/合同",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油田化工智能工厂相关建设工作进展情况汇报-2026.11.5.pptx",
+   "kind": "ppt",
+   "mtime": 1793885473093,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油田化工智能工厂二期建设对比说明.pptx",
+   "kind": "ppt",
+   "mtime": 1793878474512,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "XK2022SR003YF-MES和WMS模块建设服务合同.pdf",
+   "kind": "pdf",
+   "mtime": 1793875885792,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/合同",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油田化工智能工厂项目进展情况汇报-2026.11.5.pptx",
+   "kind": "ppt",
+   "mtime": 1793871624720,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油化厂智能工厂深化建设项目蓝图设计汇报20250730V10.0(科创部汇报).pptx",
+   "kind": "ppt",
+   "mtime": 1793869730477,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油田化工智能工厂数字化系统深化建设项目实施蓝图-V10.0（科创部汇报）.docx",
+   "kind": "word",
+   "mtime": 1793869728747,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/蓝图设计",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "用户中心API202611051543.docx",
+   "kind": "word",
+   "mtime": 1793864741902,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/统建/智擎融合",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "用户中心API_by20261105.docx",
+   "kind": "word",
+   "mtime": 1793864590418,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/统建/智擎融合",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "油化厂智能工厂进展及问题汇总-合稿V1.2.pptx",
+   "kind": "ppt",
+   "mtime": 1793847642204,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/油田化学项目/验收",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "各部门成本反馈20261102.xls",
+   "kind": "excel",
+   "mtime": 1793771355464,
+   "expectDir": "信科/生产智能化项目组/部门管理/成本反馈/2026年/11月",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "海油发展智能工厂系统上线安全检查(初测)报告.docx",
+   "kind": "word",
+   "mtime": 1793682250264,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/上线安全检查/2026年度",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "海油发展智能工厂系统应急预案(1).docx",
+   "kind": "word",
+   "mtime": 1792999383362,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/应急预案/2026年度",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "海发智能工厂项目-井下公司能碳模块实施方案.pptx",
+   "kind": "ppt",
+   "mtime": 1792567741926,
+   "expectDir": "信科/生产智能化项目组/智能工厂项目/井下项目/实施方案",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "附件4：南油服员工差旅报销汇总表-智能工厂技术室 -10月.xlsx",
+   "kind": "excel",
+   "mtime": 1791941785530,
+   "expectDir": "信科/个人差旅/2026年/9月",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "202403-中国海油工业互联网深化设计项目-验收汇报完整版.pptx",
+   "kind": "ppt",
+   "mtime": 1791886245642,
+   "expectDir": "信科/生产智能化项目组/工业互联网项目/历史材料",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "验收汇报-生产智能化技术平台（最终）0921.pptx",
+   "kind": "ppt",
+   "mtime": 1791784522480,
+   "expectDir": "信科/生产智能化项目组/工业互联网项目/历史材料",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "03 2026-2027年度生产智能化平台（海能智擎）运维项目-第一阶段验收汇报.pdf",
+   "kind": "pdf",
+   "mtime": 1791784507557,
+   "expectDir": "信科/生产智能化项目组/工业互联网项目/历史材料",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "【9月南油】信科生产智能化项目组9月差旅对账单.xlsx",
+   "kind": "excel",
+   "mtime": 1791602134839,
+   "expectDir": "信科/个人差旅/2026年/9月",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "0.智能工厂开展汇报-信科公司-生产智能化项目组-2026.9.14-34页补充.pptx",
+   "kind": "ppt",
+   "mtime": 1791600097172,
+   "expectDir": "信科/生产智能化项目组/汇报/月度汇报/2026年9月",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "2026年9月17日集团天津数据中心移交给信科7台服务器交接单(1).pdf",
+   "kind": "pdf",
+   "mtime": 1789636772857,
+   "expectDir": "信科/生产智能化项目组/部门管理/设备管理/集团借用/服务器借用",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "2026年9月17日集团天津数据中心移交给信科7台服务器交接单.pdf",
+   "kind": "pdf",
+   "mtime": 1789636690006,
+   "expectDir": "信科/生产智能化项目组/部门管理/设备管理/集团借用/服务器借用",
+   "hasDeepTags": false
+  },
+  {
+   "fileName": "智能工厂开展汇报-信科公司-生产智能化项目组-2026.9.14-王一名.pptx",
+   "kind": "ppt",
+   "mtime": 1789553155784,
+   "expectDir": "信科/生产智能化项目组/汇报/月度汇报/2026年9月",
+   "hasDeepTags": false
+  }
+ ],
+ "insufficient": true,
+ "note": "留一集：38 份 / 47 个目录。门槛 40 份 / 5 目录，不足，结论仅供参考。"
+}
