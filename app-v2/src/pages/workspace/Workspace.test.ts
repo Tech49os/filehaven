@@ -164,6 +164,41 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     expect(w.find('.mid .ft .btn.primary').text()).toContain('新建目录')
   })
 
+  it('本批完成后浮条里带「去待定区看看（N）」（T4.4：不许只说「去看看」）', async () => {
+    bootState.mockResolvedValue({
+      configured: true,
+      archiveRoot: 'D:/文档归档',
+      sourceRoots: [{ id: 1, path: 'C:/桌面', enabled: true }],
+      counts: {
+        queued: 0,
+        labeled: 0,
+        pendingConfirm: 0,
+        confirmed: 0,
+        migrated: 0,
+        parked: 5,
+        skipped: 0,
+        missing: 0,
+      },
+      model: { reachable: true, model: 'qwen2.5:7b' },
+      watchEnabled: true,
+    })
+    nextBatch.mockResolvedValue(
+      view({
+        items: [
+          {
+            ...item(1, '安全检查通知.docx', [cand(7, '安全检查')], false),
+            file: { ...item(1, 'x.docx', []).file, status: 'confirmed' as const },
+          },
+        ],
+      }),
+    )
+    const w = mount(Workspace)
+    await flushPromises()
+    const bar = w.find('.donebar')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('去待定区看看（5）')
+  })
+
   it('0 目录空态：给出两条出路，且主按钮改成新建目录（验收 11）', async () => {
     nextBatch.mockResolvedValue(
       view({ dirCount: 0, items: [item(1, 'a.docx', [], true)] }),

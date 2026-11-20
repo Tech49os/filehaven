@@ -219,6 +219,8 @@ export interface CloseAck {
 export interface ParkedItem {
   file: FileRow
   candidates: Candidate[]
+  /** 没有足够像的目录：得人自己建一个 */
+  needsYou: boolean
 }
 
 export interface MigrationPreview {

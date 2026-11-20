@@ -549,7 +549,6 @@ async fn close_batch(app: AppHandle, batch_id: i64) -> Result<model::CloseAck, C
 }
 
 /// 按**现在的**目录集合重算指定文件的候选（不换批次、不动状态、不动焦点）
-///
 /// 起因（2026-11-20 反馈）：候选是开批时算一次的，之后新建/用过的目录不会回流，
 /// 「我新建了目录，后面那些文件该归哪」就没人管了。重算只依赖目录特征与文件名，
 /// 纯 CPU、毫秒级，所以每次新建目录后直接重跑一遍即可。
@@ -583,6 +582,70 @@ async fn accept_dirs(app: AppHandle, names: Vec<String>) -> Result<Vec<ArchiveDi
     let state = app.state::<AppState>();
     let conn = lock_db(&state)?;
     index::accept_dirs(&conn, &names)
+}
+
+// ---------------------------------------------------------------- 待定区（P2 M4）
+
+/// 待定区列表：每份带**现算**的候选（T4.1）
+///
+/// 空列表也要能正常返回 —— 「待定区是空的」是好消息，不是错误。
+#[tauri::command]
+async fn list_parked(app: AppHandle) -> Result<Vec<model::ParkedItem>, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        let rows = index::rows_by_status(&conn, "parked")?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (scored, _) = score_rows(&conn, &rows)?;
+        Ok(scored
+            .into_iter()
+            .map(|(file, candidates, needs_you)| model::ParkedItem {
+                file,
+                candidates,
+                needs_you,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("待定区线程异常：{e}")))?
+}
+
+/// 捞回：`parked → pending_confirm`，下批就会出现（T4.2）
+#[tauri::command]
+async fn unpark(app: AppHandle, file_id: i64) -> Result<(), CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::unpark_file(&mut conn, file_id)
+}
+
+/// 直接指定：`parked → confirmed` + `user_picked` 的 assignment（T4.2）
+///
+/// `origin` 默认 `user_picked`：待定区里点主推 = 人自己挑的，不是系统推的。
+#[tauri::command]
+async fn assign_parked(
+    app: AppHandle,
+    file_id: i64,
+    dir_id: i64,
+    origin: Option<String>,
+) -> Result<(), CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::assign_parked_file(
+        &mut conn,
+        file_id,
+        dir_id,
+        origin.as_deref().unwrap_or("user_picked"),
+    )
+}
+
+/// 移出：`parked → skipped`（不当成丢失，也不再出现）
+#[tauri::command]
+async fn drop_file(app: AppHandle, file_id: i64) -> Result<(), CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::drop_file(&mut conn, file_id)
 }
 
 // ---------------------------------------------------------------- 迁移
@@ -1003,6 +1066,24 @@ fn file_feature_of(name: &str, kind: &str, mtime: i64, topic_tags: Vec<String>) 
 }
 
 fn scored_pool(conn: &rusqlite::Connection) -> Result<ScoredPool, CmdError> {
+    let (items, dir_count) = score_rows(conn, &index::pool_rows(conn)?)?;
+    Ok(ScoredPool { items, dir_count })
+}
+
+/// 给**指定的一批文件**算候选（挑批 / 重算 / 待定区共用这一条路径）
+///
+/// 待定区必须走这里而不是缓存：躺在待定区的文件可能压了几周，
+/// 这期间目录长了、别的文件归档过了，几周前的候选早就不作数（T4.1）。
+fn score_rows(
+    conn: &rusqlite::Connection,
+    rows: &[model::FileRow],
+) -> Result<
+    (
+        Vec<(model::FileRow, Vec<model::Candidate>, bool)>,
+        usize,
+    ),
+    CmdError,
+> {
     let dir_rows = index::dir_feature_rows(conn)?;
     let mut rel_paths: HashMap<i64, String> = HashMap::new();
     let mut dirs: Vec<(i64, recommend::DirFeature)> = Vec::new();
@@ -1020,11 +1101,10 @@ fn scored_pool(conn: &rusqlite::Connection) -> Result<ScoredPool, CmdError> {
         ));
     }
 
-    let pool = index::pool_rows(conn)?;
-    let ids: Vec<i64> = pool.iter().map(|r| r.id).collect();
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     let tags = index::topic_tags_for(conn, &ids)?;
-    let mut items = Vec::with_capacity(pool.len());
-    for row in &pool {
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
         let feat = file_feature_of(
             &row.name,
             &row.kind,
@@ -1034,10 +1114,7 @@ fn scored_pool(conn: &rusqlite::Connection) -> Result<ScoredPool, CmdError> {
         let (cands, needs) = recommend::candidates(&feat, &dirs, &rel_paths);
         items.push((row.clone(), cands, needs));
     }
-    Ok(ScoredPool {
-        items,
-        dir_count: dirs.len(),
-    })
+    Ok((items, dirs.len()))
 }
 
 fn next_batch_inner(app: &AppHandle, size: i64) -> Result<BatchView, CmdError> {
@@ -2033,6 +2110,10 @@ fn main() {
             suggest_dirs,
             next_batch,
             decide,
+            list_parked,
+            unpark,
+            assign_parked,
+            drop_file,
             undo_decide,
             close_batch,
             migration_preview,

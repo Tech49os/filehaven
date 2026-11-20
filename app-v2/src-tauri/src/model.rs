@@ -205,6 +205,18 @@ pub struct BatchItem {
     pub needs_you: bool,
 }
 
+/// 待定区的一行（T4.1）
+///
+/// 候选是**每次打开现算的**：待定区里的文件可能躺了几周，
+/// 这期间目录长了、别的文件归档过了，几周前算的候选早就不作数。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParkedItem {
+    pub file: FileRow,
+    pub candidates: Vec<Candidate>,
+    pub needs_you: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchView {

@@ -459,7 +459,10 @@ function goSuggest() {
       <span class="dim">池里还有 {{ store.finished?.remainingInPool ?? store.remaining }} 份</span>
       <button class="btn small" @click="reload">再来一批</button>
       <button class="btn small" @click="router.push('/migration')">去待迁移清单</button>
-      <button class="btn small" @click="router.push('/parked')">去待定区看看</button>
+      <!-- 有 parked 才显示，且带数字：光写「去待定区看看」等于没说有多少活儿（T4.4） -->
+      <button v-if="app.parkedCount > 0" class="btn small" @click="router.push('/parked')">
+        去待定区看看（{{ app.parkedCount }}）
+      </button>
     </div>
   </div>
 </template>

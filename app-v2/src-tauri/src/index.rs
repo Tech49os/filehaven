@@ -1620,3 +1620,70 @@ pub fn get_source_root_of_file(conn: &Connection, file_id: i64) -> Result<Option
         .optional()?;
     Ok(p.flatten())
 }
+
+// ---------------------------------------------------------------- 待定区（P2 M4）
+
+/// 某一状态的全部文件（T4.1：待定区每次打开都要重算候选 —— 目录会长，候选会变）
+pub fn rows_by_status(
+    conn: &Connection,
+    status: &str,
+) -> Result<Vec<crate::model::FileRow>, CmdError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FILE_COLS} FROM files WHERE status=?1 ORDER BY mtime DESC, id"
+    ))?;
+    let rows = stmt.query_map([status], row_to_file)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 待定区「捞回」：`parked → pending_confirm`，下批就会出现（T4.2）
+pub fn unpark_file(conn: &mut Connection, file_id: i64) -> Result<(), CmdError> {
+    set_status(conn, file_id, Status::PendingConfirm)
+}
+
+/// 待定区「移出」：`parked → skipped`（不计入丢失，也不再出现）
+pub fn drop_file(conn: &mut Connection, file_id: i64) -> Result<(), CmdError> {
+    set_status(conn, file_id, Status::Skipped)
+}
+
+/// 待定区「直接指定」：`parked → confirmed` + 一条 `user_picked` 的 assignment（T4.2）
+///
+/// 三个动作全部走 `set_status`，**不许绕过状态机** —— 非法转移（如 `parked → migrated`）
+/// 必须报 `BAD_TRANSITION`，而不是悄悄写进库。
+pub fn assign_parked_file(
+    conn: &mut Connection,
+    file_id: i64,
+    dir_id: i64,
+    origin: &str,
+) -> Result<(), CmdError> {
+    if get_dir(conn, dir_id)?.is_none() {
+        return Err(CmdError::new(
+            DIR_INVALID,
+            format!("目录不存在：{dir_id}"),
+        ));
+    }
+    let tx = conn.transaction()?;
+    set_status(&tx, file_id, Status::Confirmed)?;
+    insert_assignment(
+        &tx,
+        &crate::model::NewAssignment {
+            file_id,
+            batch_id: None,
+            target_dir_id: Some(dir_id),
+            origin: origin.to_string(),
+            confidence: None,
+            reason: None,
+            decision: "accepted".to_string(),
+            decided_at: now_ms(),
+        },
+    )?;
+    tx.execute(
+        "UPDATE archive_dirs SET last_used_at=?1 WHERE id=?2",
+        params![now_ms(), dir_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}

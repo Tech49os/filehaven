@@ -3173,3 +3173,109 @@ mod p2_m3 {
         assert!(crate::lock_db_retry(&m, Duration::from_millis(200)).is_some());
     }
 }
+
+// ================================================================ P2 M4 待定区闭环
+
+mod p2_m4 {
+    use crate::error::BAD_TRANSITION;
+    use crate::index as db;
+    use crate::index::Status;
+
+    fn fresh() -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("t.db")).unwrap();
+        (dir, conn)
+    }
+
+    fn one(conn: &rusqlite::Connection, name: &str, st: Status) -> i64 {
+        let root = db::add_source_root(conn, "C:/t").unwrap();
+        db::insert_test_file_kind(conn, root.id, name, "docx", "word", st).unwrap()
+    }
+
+    fn status_of(conn: &rusqlite::Connection, id: i64) -> Status {
+        db::get_file_status(conn, id).unwrap().unwrap()
+    }
+
+    // T4.2：三条合法转移
+    #[test]
+    fn parked_three_legal_moves() {
+        // 捞回 → 回池
+        let (_d, mut conn) = fresh();
+        let id = one(&conn, "安检通知.docx", Status::Parked);
+        db::unpark_file(&mut conn, id).unwrap();
+        assert_eq!(status_of(&conn, id), Status::PendingConfirm);
+
+        // 移出 → skipped（不是 missing：文件还在，只是不看它了）
+        let (_d2, mut c2) = fresh();
+        let id2 = one(&c2, "b.docx", Status::Parked);
+        db::drop_file(&mut c2, id2).unwrap();
+        assert_eq!(status_of(&c2, id2), Status::Skipped);
+
+        // 直接指定 → confirmed + 一条 user_picked 的 assignment
+        let (_d3, mut c3) = fresh();
+        let id3 = one(&c3, "c.docx", Status::Parked);
+        let dir = db::insert_dir(&c3, None, "安全环保", "user").unwrap();
+        db::assign_parked_file(&mut c3, id3, dir.id, "user_picked").unwrap();
+        assert_eq!(status_of(&c3, id3), Status::Confirmed);
+        let n: i64 = c3
+            .query_row("SELECT COUNT(*) FROM files WHERE status='confirmed'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "确认后待迁移要能看见它");
+        let (target, origin, decision): (i64, String, String) = c3
+            .query_row(
+                "SELECT target_dir_id, origin, decision FROM assignments ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((target, origin.as_str(), decision.as_str()), (dir.id, "user_picked", "accepted"));
+    }
+
+    // T4.2：三条非法转移必须报 BAD_TRANSITION，不许悄悄写库
+    #[test]
+    fn parked_illegal_moves_are_rejected() {
+        let (_d, mut conn) = fresh();
+        let id = one(&conn, "安检通知.docx", Status::Parked);
+
+        // parked → migrated：只有 confirmed 才能迁移
+        let e = db::set_status(&conn, id, Status::Migrated).unwrap_err();
+        assert_eq!(e.code, BAD_TRANSITION);
+
+        // parked → queued：跳过 pending_confirm 回池会把「为什么没定」抹掉
+        let e = db::set_status(&conn, id, Status::Queued).unwrap_err();
+        assert_eq!(e.code, BAD_TRANSITION);
+
+        // 对一份 queued 的文件调「捞回」也不行（queued → pending_confirm 非法）
+        let id2 = one(&conn, "另一份.docx", Status::Queued);
+        let e = db::unpark_file(&mut conn, id2).unwrap_err();
+        assert_eq!(e.code, BAD_TRANSITION);
+    }
+
+    // T4.1：待定区列出的必须只有 parked，且候选是现算的
+    #[test]
+    fn list_only_parked_rows() {
+        let (_d, conn) = fresh();
+        let root = db::add_source_root(&conn, "C:/t").unwrap();
+        for (name, st) in [
+            ("a.docx", Status::Parked),
+            ("b.docx", Status::Parked),
+            ("c.docx", Status::Labeled),
+            ("d.docx", Status::Confirmed),
+        ] {
+            db::insert_test_file_kind(&conn, root.id, name, "docx", "word", st).unwrap();
+        }
+        let rows = db::rows_by_status(&conn, "parked").unwrap();
+        assert_eq!(rows.len(), 2, "只该列出 parked 的 2 份");
+        assert!(rows.iter().all(|r| r.status == "parked"));
+    }
+
+    // T4.2：指定一个不存在的目录要报 DIR_INVALID，而不是写出一条指向空气的 assignment
+    #[test]
+    fn assign_to_missing_dir_is_rejected() {
+        let (_d, mut conn) = fresh();
+        let id = one(&conn, "安检通知.docx", Status::Parked);
+        let e = db::assign_parked_file(&mut conn, id, 999, "user_picked").unwrap_err();
+        assert_eq!(e.code, crate::error::DIR_INVALID);
+        assert_eq!(status_of(&conn, id), Status::Parked, "失败不能改动状态");
+    }
+}
