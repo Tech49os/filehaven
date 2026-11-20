@@ -10,6 +10,9 @@ const closeBatch = vi.fn()
 const createDir = vi.fn()
 const undoDecide = vi.fn()
 const saveNote = vi.fn()
+const previewFile = vi.fn()
+const openPath = vi.fn()
+const revealPath = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   nextBatch,
@@ -19,6 +22,9 @@ vi.mock('../../core/ipc', () => ({
   createDir,
   undoDecide,
   saveNote,
+  previewFile,
+  openPath,
+  revealPath,
   listDirs: vi.fn().mockResolvedValue([]),
   previewDirName: vi.fn(),
 }))
@@ -67,9 +73,30 @@ function item(id: number, name: string, candidates: Candidate[], needsYou = fals
 }
 
 describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
+  /**
+   * jsdom 的视口是 1024 宽，`(max-width: 1240px)` 天然为真 ——
+   * 不显式指定的话每条用例都跑在「窄窗抽屉」模式下，就测不到右栏并排的样子了。
+   */
+  function matchMediaAs(matches: boolean) {
+    return vi.fn().mockImplementation(() => ({
+      matches,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+  }
+
   beforeEach(() => {
     setActivePinia(createPinia())
+    vi.stubGlobal('matchMedia', matchMediaAs(false))
     nextBatch.mockReset()
+    previewFile.mockReset().mockResolvedValue({
+      text: '',
+      truncated: false,
+      reason: '',
+      kind: 'text',
+    })
+    openPath.mockReset().mockResolvedValue(undefined)
+    revealPath.mockReset().mockResolvedValue(undefined)
     bootState.mockReset().mockResolvedValue({
       configured: true,
       archiveRoot: 'D:/文档归档',
@@ -206,5 +233,80 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     const w = mount(Workspace)
     await flushPromises()
     expect(w.text()).toContain('池子里没有待整理的文件了')
+  })
+
+  // ------------------------------------------------ 看内容 / 打开（2026-11-20 反馈）
+
+  it('当前这份会自动取一次正文预览，同一份不重复取', async () => {
+    previewFile.mockResolvedValue({
+      text: '甲方：某某公司，合同金额十二万元',
+      truncated: false,
+      reason: '',
+      kind: 'text',
+    })
+    nextBatch.mockResolvedValue(
+      view({
+        items: [
+          item(1, '安全检查通知.docx', [cand(7, '安全检查')]),
+          item(2, '采购合同.docx', [cand(8, '合同')]),
+        ],
+      }),
+    )
+    const w = mount(Workspace)
+    await flushPromises()
+
+    expect(previewFile).toHaveBeenCalledTimes(1)
+    expect(previewFile).toHaveBeenCalledWith(1)
+    expect(w.text()).toContain('合同金额十二万元')
+
+    // 回车确认后焦点跳到第 2 份 → 再取第 2 份的
+    previewFile.mockResolvedValue({
+      text: '',
+      truncated: false,
+      reason: 'PDF 这一版不抽正文，直接打开看最快',
+      kind: 'none',
+    })
+    await w.find('.mid .ft .btn.primary').trigger('click')
+    await flushPromises()
+    expect(previewFile).toHaveBeenCalledWith(2)
+
+    // 回到第 1 份时用缓存，不再打后端
+    await w.findAll('.qrow')[0].trigger('click')
+    await flushPromises()
+    expect(previewFile).toHaveBeenCalledTimes(2)
+  })
+
+  it('点「打开」调系统默认程序，点「定位」调资源管理器', async () => {
+    previewFile.mockResolvedValue({
+      text: '',
+      truncated: false,
+      reason: '这类文件读不出正文',
+      kind: 'none',
+    })
+    nextBatch.mockResolvedValue(view({ items: [item(1, '采购合同.docx', [cand(8, '合同')])] }))
+    const w = mount(Workspace)
+    await flushPromises()
+
+    await w.findAll('button').find((b) => b.text().includes('打开'))!.trigger('click')
+    expect(openPath).toHaveBeenCalledWith('C:/桌面/采购合同.docx')
+
+    await w.findAll('button').find((b) => b.text().includes('定位'))!.trigger('click')
+    expect(revealPath).toHaveBeenCalledWith('C:/桌面/采购合同.docx')
+  })
+
+  it('窗口窄时右栏收进抽屉，按钮能开合', async () => {
+    // 1160 的默认窗口减去侧栏只剩 ~900，三栏并排会把中间卡片挤成一条
+    vi.stubGlobal('matchMedia', matchMediaAs(true))
+    nextBatch.mockResolvedValue(view({ items: [item(1, 'a.docx', [cand(7, '安全检查')])] }))
+    const w = mount(Workspace)
+    await flushPromises()
+
+    expect(w.find('.ws').classes()).toContain('narrow')
+    expect(w.find('aside.right').exists()).toBe(false)
+
+    const btn = w.findAll('button').find((b) => b.text().includes('已确认'))!
+    expect(btn).toBeTruthy()
+    await btn.trigger('click')
+    expect(w.find('aside.right').exists()).toBe(true)
   })
 })

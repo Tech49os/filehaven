@@ -4,12 +4,17 @@
  *
  * 一份文件一屏一个，所有可点的东西都带键盘提示 ——
  * 用户全程不碰鼠标也能走完一批（验收 3）。
+ *
+ * 2026-11-20 加了两件事（实测反馈「只能看到文件名，路径和内容看不到，也无法快速打开」）：
+ * 1. 完整绝对路径单独一行 —— 之前它挤在「大小·类型·时间·路径」那行末尾，被省略成只剩文件名；
+ * 2. 正文摘要 / 图片缩略图 + 「打开」「定位」。判定一份 `扫描件001.pdf` 靠文件名是不行的。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
-import type { BatchItem, DecideAck } from '../core/types'
+import { imageSrc } from '../core/preview'
+import type { BatchItem, DecideAck, FilePreview } from '../core/types'
 
 const props = withDefaults(
   defineProps<{
@@ -19,8 +24,10 @@ const props = withDefaults(
     deferredBadge?: boolean
     ack?: DecideAck | null
     busy?: boolean
+    /** 正文/图片预览；null = 还没取回来（此时不占位，避免闪一个空框） */
+    preview?: FilePreview | null
   }>(),
-  { deferredBadge: false, ack: null, busy: false },
+  { deferredBadge: false, ack: null, busy: false, preview: null },
 )
 
 const emit = defineEmits<{
@@ -29,6 +36,8 @@ const emit = defineEmits<{
   (e: 'newDir'): void
   (e: 'defer'): void
   (e: 'park'): void
+  (e: 'open'): void
+  (e: 'reveal'): void
 }>()
 
 const f = computed(() => props.item.file)
@@ -43,6 +52,12 @@ const targetPath = computed(() => {
   if (!confirmed.value) return null
   return props.ack?.targetRelPath ?? null
 })
+
+/** 摘要默认只显示 4 行，够判断「这是哪一单」，又不会把候选和按钮顶出屏幕 */
+const expanded = ref(false)
+const thumb = computed(() =>
+  props.preview?.kind === 'image' ? imageSrc(f.value.absPath) : '',
+)
 </script>
 
 <template>
@@ -57,8 +72,7 @@ const targetPath = computed(() => {
           <span>{{ kindLabel(f.kind) }}</span>
           <span class="dot">·</span>
           <span>{{ relativeTime(f.mtime) }}</span>
-          <span class="dot">·</span>
-          <span class="from" :title="f.relPath">{{ f.relPath }}</span>
+          <span v-if="f.note" class="tag note">备注：{{ f.note }}</span>
         </p>
       </div>
       <div class="state">
@@ -69,13 +83,40 @@ const targetPath = computed(() => {
       </div>
     </header>
 
-    <!-- 标签行：P1 只有基础标签（类型/时间），不装样子 -->
-    <div class="tags">
-      <span class="tag">{{ kindLabel(f.kind) }}</span>
-      <span class="tag">{{ relativeTime(f.mtime) }}</span>
-      <span v-if="f.deferCount > 0" class="tag warn">暂缓过 {{ f.deferCount }} 次</span>
-      <span v-if="f.note" class="tag note">备注：{{ f.note }}</span>
+    <!-- 路径与打开动作单独一行：这是「这份文件到底在哪」的答案 -->
+    <div class="pathrow">
+      <span class="plabel">位置</span>
+      <span class="mono pval" :title="f.absPath">{{ f.absPath }}</span>
+      <button class="act" :disabled="busy" title="用系统默认程序打开（O）" @click="emit('open')">
+        <span class="kbd">O</span>打开
+      </button>
+      <button class="act" :disabled="busy" title="在资源管理器中显示（L）" @click="emit('reveal')">
+        <span class="kbd">L</span>定位
+      </button>
     </div>
+
+    <!-- 正文摘要 / 图片缩略图 / 读不出的原因 -->
+    <section v-if="preview" class="preview">
+      <template v-if="preview.kind === 'image'">
+        <button v-if="thumb" class="pv-thumb" title="点击用默认程序打开" @click="emit('open')">
+          <img :src="thumb" :alt="f.name" loading="lazy" />
+        </button>
+        <p v-else class="pv-none">图片预览只在应用内可用，直接打开看</p>
+      </template>
+      <p v-else-if="preview.kind === 'text'" class="pv-text" :class="{ full: expanded }">
+        {{ preview.text }}
+      </p>
+      <p v-else class="pv-none">{{ preview.reason }}</p>
+
+      <button
+        v-if="preview.kind === 'text' && preview.truncated"
+        class="pv-toggle"
+        @click="expanded = !expanded"
+      >
+        {{ expanded ? '收起' : '展开全文' }}
+        <AppIcon :name="expanded ? 'chevron-down' : 'chevron-right'" :size="11" />
+      </button>
+    </section>
 
     <p v-if="confirmed" class="result">
       <AppIcon name="check" :size="13" />
@@ -103,7 +144,7 @@ const targetPath = computed(() => {
         :disabled="busy"
         @click="primaryIsNewDir ? emit('newDir') : emit('accept')"
       >
-        <span class="kbd">{{ primaryIsNewDir ? '回车' : '回车' }}</span>
+        <span class="kbd">回车</span>
         {{ primaryIsNewDir ? '新建目录' : `归到 ${item.candidates[0]?.relPath ?? ''}` }}
       </button>
       <button
@@ -139,7 +180,7 @@ const targetPath = computed(() => {
 .card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   background: var(--c-surface);
   border: 0.5px solid var(--c-border);
   border-radius: var(--r-card);
@@ -217,12 +258,18 @@ const targetPath = computed(() => {
 .meta .dot {
   color: var(--c-text-3);
 }
-.meta .from {
-  flex: 1 1 auto;
+
+.tag {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.tag.note {
+  background: var(--c-indigo-bg);
+  color: var(--c-indigo);
 }
 
 .state {
@@ -231,6 +278,7 @@ const targetPath = computed(() => {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  flex: 0 0 auto;
 }
 
 .counter {
@@ -261,25 +309,113 @@ const targetPath = computed(() => {
   color: var(--c-success-deep);
 }
 
-.tags {
+/* ---- 路径行 ---- */
+.pathrow {
   display: flex;
+  align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
-}
-.tag {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: var(--r-pill);
+  padding: 5px 8px;
+  border-radius: var(--r-item);
   background: var(--c-field);
+  min-width: 0;
+}
+.plabel {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--c-text-3);
+}
+.pval {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
   color: var(--c-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.tag.warn {
-  background: var(--c-warning-bg);
-  color: var(--c-warning-deep);
+.act {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  border-radius: 7px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  box-shadow: var(--sh-control);
 }
-.tag.note {
-  background: var(--c-indigo-bg);
-  color: var(--c-indigo);
+.act:hover {
+  color: var(--c-primary);
+}
+.act:disabled {
+  opacity: 0.5;
+}
+
+/* ---- 预览 ---- */
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+/* 摘要/说明带一层底色：跟上面的路径行区分开，一眼看得出「这是文件里的字」 */
+.pv-text,
+.pv-none {
+  margin: 0;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--r-item);
+  background: var(--c-field);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--c-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pv-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+.pv-text.full {
+  -webkit-line-clamp: unset;
+  overflow: auto;
+  max-height: 220px;
+}
+.pv-none {
+  color: var(--c-text-3);
+}
+.pv-thumb {
+  align-self: flex-start;
+  border: 0;
+  padding: 0;
+  background: var(--c-field);
+  border-radius: var(--r-item);
+  overflow: hidden;
+  max-width: 100%;
+  line-height: 0;
+}
+.pv-thumb img {
+  display: block;
+  max-width: 100%;
+  max-height: 190px;
+  object-fit: contain;
+}
+.pv-toggle {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--c-primary);
+  font-size: 11px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .result {
@@ -351,15 +487,24 @@ const targetPath = computed(() => {
   background: rgba(255, 255, 255, 0.22);
   border: 0.5px solid rgba(255, 255, 255, 0.3);
 }
-.btn:not(.primary) .kbd {
+.btn:not(.primary) .kbd,
+.act .kbd {
   background: var(--c-surface);
   border-color: var(--c-border-strong);
-  color: var(--c-text-2);
+  color: var(--c-text-3);
 }
 
 .hint {
   margin-left: auto;
   font-size: 11px;
   color: var(--c-text-3);
+}
+
+/* 窗口不高时，卡片自己先松一档内边距，把空间让给内容 */
+@media (max-height: 800px) {
+  .card {
+    padding: 14px 16px;
+    gap: 8px;
+  }
 }
 </style>

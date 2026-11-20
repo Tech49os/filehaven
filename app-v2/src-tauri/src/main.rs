@@ -11,12 +11,16 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod batch;
 mod error;
+// 正文抽取：P0 写好后一直没接线，整理台的「看内容」才真正用上它
+#[allow(dead_code)]
+mod extract;
 mod index;
 mod llm;
 mod migrate;
 mod migration;
 mod model;
 mod plan;
+mod preview;
 mod recommend;
 mod scan;
 mod state;
@@ -231,7 +235,11 @@ async fn add_source_root(app: AppHandle, path: String) -> Result<SourceRoot, Cmd
     }
     let state = app.state::<AppState>();
     let conn = lock_db(&state)?;
-    index::add_source_root(&conn, &path)
+    let root = index::add_source_root(&conn, &path)?;
+    drop(conn);
+    // 新源区也要能显示图片缩略图（asset 协议白名单见 setup）
+    let _ = app.asset_protocol_scope().allow_directory(&path, true);
+    Ok(root)
 }
 
 #[tauri::command]
@@ -666,13 +674,21 @@ const SUGGEST_HEARTBEAT_MS: u64 = 5_000;
 
 /// 目录建议：抽样 → 本地模型 → 五条门槛
 ///
+/// `hint` 是用户写的补充要求（「按客户分」「主要做招投标」这类）——
+/// 有了它，「再来一版」才不是同一套逻辑空转。空白/缺省一律当没提。
+///
 /// 失败一律返回 `CmdError`（详设 §6.3 第 12 条），前端按 `code` 降级到手写。
 /// 整个流程（含最长 240s 等待）都**不持数据库锁**（铁律见 `state.rs`）。
 #[tauri::command]
 async fn suggest_dirs(
     app: AppHandle,
     force: Option<bool>,
+    hint: Option<String>,
 ) -> Result<suggest_dirs::DirSuggestion, CmdError> {
+    let hint = hint
+        .as_deref()
+        .and_then(suggest_dirs::normalize_hint)
+        .unwrap_or_default();
     let state = app.state::<AppState>();
     let (base, model, files, existing) = {
         let conn = lock_db(&state)?;
@@ -752,6 +768,11 @@ async fn suggest_dirs(
                 files: &files,
                 existing_dirs: &existing,
                 oldest_first: force,
+                hint: if hint.trim().is_empty() {
+                    None
+                } else {
+                    Some(hint.trim())
+                },
                 timeout: Duration::from_secs(SUGGEST_TIMEOUT_SECS),
             },
             &mut on_stage,
@@ -763,6 +784,34 @@ async fn suggest_dirs(
     let _ = hb.join();
 
     req.map_err(|e| CmdError::new(error::DB, format!("目录建议线程异常：{e}")))?
+}
+
+// ---------------------------------------------------------------- 正文预览
+
+/// 整理台「看一眼内容」：返回正文摘要（长文截断）/ 图片标记 / 读不出的原因
+///
+/// 抽正文要解 zip，属于阻塞 IO，必须扔给 blocking 线程池 —— 否则一张 20MB 的 pptx
+/// 卡住的是整个界面。前端按 fileId 缓存结果，同一份文件只读一次。
+#[tauri::command]
+async fn preview_file(app: AppHandle, file_id: i64) -> Result<preview::Preview, CmdError> {
+    let state = app.state::<AppState>();
+    let row = {
+        let conn = lock_db(&state)?;
+        index::file_row(&conn, file_id)?.ok_or_else(|| {
+            CmdError::new(error::DB, format!("找不到这份文件的记录（id={file_id}）"))
+        })?
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        preview::make(
+            Path::new(&row.abs_path),
+            &row.kind,
+            &row.ext,
+            row.size.max(0) as u64,
+        )
+    })
+    .await
+    .map_err(|e| CmdError::new(error::IO, format!("预览线程异常：{e}")))
 }
 
 /// 池内每份文件算一次候选（挑批与撤销回填共用）
@@ -988,6 +1037,8 @@ fn run_suggest_cli(samples: &str, out: &str, force: bool) -> i32 {
             files: &files,
             existing_dirs: &[],
             oldest_first: force,
+            // 诊断入口（--suggest）不吃用户补充要求：它是用来对拍 prompt 的
+            hint: None,
             timeout: Duration::from_secs(timeout_secs),
         },
         &mut on_stage,
@@ -1058,6 +1109,23 @@ fn main() {
             };
             std::fs::create_dir_all(&dir)?;
             let conn = index::open(&dir.join("index.db")).map_err(|e| e.to_string())?;
+
+            // 图片缩略图走 asset 协议：把已配置的源区（和归档区）加进读取白名单。
+            // 不写死 `**` —— 白名单越小，将来前端万一被注入也有边界。
+            // 新增源区时由 `add_source_root` 再补一条。
+            {
+                let scope = app.asset_protocol_scope();
+                let mut roots: Vec<String> = index::list_source_roots(&conn)
+                    .map(|v| v.into_iter().map(|r| r.path).collect())
+                    .unwrap_or_default();
+                if let Some(a) = index::get_setting(&conn, "archive_root").ok().flatten() {
+                    roots.push(a);
+                }
+                for r in roots {
+                    let _ = scope.allow_directory(&r, true);
+                }
+            }
+
             app.manage(AppState::new(conn, dir));
             Ok(())
         })
@@ -1086,7 +1154,8 @@ fn main() {
             undo_migration,
             latest_migration,
             requeue_confirmed,
-            save_note
+            save_note,
+            preview_file
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

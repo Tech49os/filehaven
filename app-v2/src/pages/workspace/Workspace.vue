@@ -5,7 +5,7 @@
  * 键盘是主通道：回车确认 / 1-3 选备选 / N 新建 / S 暂缓 / P 先放着 /
  * ↑↓ 换卡 / Ctrl+Z 撤销。所有按钮都同时可点，鼠标用户不会被落下。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '../../components/AppIcon.vue'
 import FileCard from '../../components/FileCard.vue'
@@ -13,8 +13,12 @@ import NewDirInput from '../../components/NewDirInput.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import { mapKey } from '../../core/keys'
 import { statusLabel } from '../../core/format'
+import { toCmdError } from '../../core/cmdError'
+import { useNarrow } from '../../core/useNarrow'
+import * as ipc from '../../core/ipc'
 import { useAppStore } from '../../stores/app'
 import { useBatchStore } from '../../stores/batch'
+import type { FilePreview } from '../../core/types'
 
 const router = useRouter()
 const app = useAppStore()
@@ -23,6 +27,22 @@ const store = useBatchStore()
 const busy = ref(false)
 const editingNote = ref<number | null>(null)
 const noteDraft = ref('')
+/** 打开/定位失败时的提示（不塞进 store.error，那是批次加载的错） */
+const actionErr = ref<string | null>(null)
+/** 窗口窄时右栏收成抽屉，靠顶部按钮开合 */
+const narrow = useNarrow()
+const drawer = ref(false)
+
+/**
+ * 预览缓存：一份文件一次会话只读一次磁盘。
+ *
+ * 用 Map 的 key 是 fileId，值允许是 null（读过但没结果）—— 这样「读失败」也不会
+ * 每切一次卡就重试一次，把界面拖住。
+ */
+const previews = ref<Map<number, FilePreview | null>>(new Map())
+const currentPreview = computed(() =>
+  store.current ? (previews.value.get(store.current.file.id) ?? null) : null,
+)
 
 const currentAck = computed(() =>
   store.current && store.lastAck?.fileId === store.current.file.id ? store.lastAck : null,
@@ -39,6 +59,28 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
 })
+
+/** 换卡就取一次预览；同一份文件命中缓存，不再读磁盘 */
+watch(
+  () => store.current?.file.id,
+  (id) => void ensurePreview(id),
+  { immediate: true },
+)
+
+async function ensurePreview(id: number | undefined) {
+  if (!id || previews.value.has(id)) return
+  try {
+    const p = await ipc.previewFile(id)
+    const next = new Map(previews.value)
+    next.set(id, p)
+    previews.value = next
+  } catch {
+    // 预览只是锦上添花：读不出来也得能继续判定
+    const next = new Map(previews.value)
+    next.set(id, null)
+    previews.value = next
+  }
+}
 
 async function onKey(e: KeyboardEvent) {
   // 文本输入优先：焦点在 input/textarea 时只放 Esc/Enter 出去
@@ -80,12 +122,46 @@ async function onKey(e: KeyboardEvent) {
       if (store.inputOpen) {
         e.preventDefault()
         store.closeInput()
+      } else if (drawer.value) {
+        drawer.value = false
       }
       break
     case 'undo':
       e.preventDefault()
       await store.undo()
       break
+    case 'open':
+      e.preventDefault()
+      await openCurrent()
+      break
+    case 'reveal':
+      e.preventDefault()
+      await revealCurrent()
+      break
+  }
+}
+
+/** 用系统默认程序打开当前文件（Word/Excel/看图器都行） */
+async function openCurrent() {
+  const it = store.current
+  if (!it) return
+  actionErr.value = null
+  try {
+    await ipc.openPath(it.file.absPath)
+  } catch (e) {
+    actionErr.value = toCmdError(e).message
+  }
+}
+
+/** 在资源管理器中定位（文件已经不在了会由后端报错） */
+async function revealCurrent() {
+  const it = store.current
+  if (!it) return
+  actionErr.value = null
+  try {
+    await ipc.revealPath(it.file.absPath)
+  } catch (e) {
+    actionErr.value = toCmdError(e).message
   }
 }
 
@@ -106,8 +182,13 @@ async function onNewDirConfirm(input: string) {
 
 async function reload() {
   busy.value = true
+  // 换一批等于「磁盘可能变了」，预览缓存一起作废
+  previews.value = new Map()
+  actionErr.value = null
   try {
     await store.load(12)
+    // 当前这份的 id 可能没变，watch 不会触发，所以显式补一次
+    void ensurePreview(store.current?.file.id)
   } finally {
     busy.value = false
   }
@@ -140,7 +221,7 @@ function goSuggest() {
 </script>
 
 <template>
-  <div class="ws">
+  <div class="ws" :class="{ narrow }">
     <header class="top">
       <div class="title">
         <template v-if="store.total > 0">
@@ -155,6 +236,18 @@ function goSuggest() {
       </div>
       <div class="acts">
         <span v-if="store.remaining > 0" class="rest">池里还有 {{ store.remaining }} 份</span>
+        <!-- 窄窗时右栏收进抽屉，这里给一个入口（宽窗不需要，右栏一直在） -->
+        <button
+          v-if="narrow"
+          class="btn drawer-btn"
+          :class="{ on: drawer }"
+          :aria-expanded="drawer"
+          @click="drawer = !drawer"
+        >
+          <AppIcon name="list" :size="12" />
+          已确认 {{ store.confirmedCount }}
+          <template v-if="parkedInBatch.length">/ 放着 {{ parkedInBatch.length }}</template>
+        </button>
         <button
           class="btn"
           :disabled="busy || store.undoStack.length === 0"
@@ -168,7 +261,7 @@ function goSuggest() {
       </div>
     </header>
 
-    <p v-if="store.error" class="err" role="alert">{{ store.error }}</p>
+    <p v-if="store.error || actionErr" class="err" role="alert">{{ store.error ?? actionErr }}</p>
 
     <!-- 0 目录空态（验收 11）：不报错、不阻塞，只换一条路 -->
     <EmptyState
@@ -213,11 +306,14 @@ function goSuggest() {
           :deferred-badge="store.deferredBadge.has(store.current.file.id)"
           :ack="currentAck"
           :busy="busy"
+          :preview="currentPreview"
           @accept="run(() => store.accept())"
           @pick="run(() => store.pick($event))"
           @new-dir="store.openInput()"
           @defer="run(() => store.defer())"
           @park="run(() => store.park())"
+          @open="openCurrent"
+          @reveal="revealCurrent"
         />
 
         <div v-if="store.inputOpen" class="newdir">
@@ -235,12 +331,14 @@ function goSuggest() {
           <span><kbd>S</kbd> 暂缓</span>
           <span><kbd>P</kbd> 先放着</span>
           <span><kbd>↑</kbd><kbd>↓</kbd> 换一份</span>
+          <span><kbd>O</kbd> 打开</span>
+          <span><kbd>L</kbd> 定位</span>
           <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销</span>
         </p>
       </main>
 
-      <!-- 右：本批已确认 -->
-      <aside class="right">
+      <!-- 右：本批已确认（窄窗时是抽屉，见 .ws.narrow） -->
+      <aside v-if="!narrow || drawer" class="right">
         <h3>本批已确认 {{ store.confirmedList.length }}</h3>
         <TransitionGroup tag="ul" name="rise" class="done">
           <li v-for="it in store.confirmedList" :key="it.file.id" class="drow">
@@ -347,6 +445,38 @@ function goSuggest() {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr) 208px;
   gap: 14px;
+  position: relative;
+}
+
+/* 窄窗：右栏收成抽屉，两栏并排。中间卡片从 ~468px 回到 ~640px（1160 默认窗口下） */
+.ws.narrow .cols {
+  grid-template-columns: 176px minmax(0, 1fr);
+}
+
+.ws.narrow .right {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 264px;
+  z-index: 6;
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.1);
+  animation: drawer-in var(--dur) var(--ease-out) both;
+}
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.drawer-btn.on {
+  background: var(--c-primary-bg);
+  color: var(--c-primary);
 }
 
 .left,
@@ -479,6 +609,11 @@ h3.mt {
   flex-direction: column;
   gap: 10px;
   overflow: auto;
+}
+
+/* 卡片吃满剩余高度：按钮贴着卡片底部，比「一张小卡浮在一大片灰底上」稳当 */
+.mid :deep(.card) {
+  flex: 1 0 auto;
 }
 
 .newdir {

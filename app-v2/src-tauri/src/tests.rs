@@ -1294,7 +1294,7 @@ mod suggest_dirs {
             source: "桌面".into(),
             mtime: 0,
         }];
-        let p = sd::build_prompt(&samples, &[]);
+        let p = sd::build_prompt(&samples, &[], None);
         assert!(!p.contains("已有"));
         assert!(p.contains("1|word|桌面|安全检查报告.docx"));
         assert!(p.contains("只输出 JSON"));
@@ -1310,9 +1310,70 @@ mod suggest_dirs {
             source: "桌面".into(),
             mtime: 0,
         }];
-        let p = sd::build_prompt(&samples, &["安全检查/年度".to_string(), "合同".to_string()]);
+        let p = sd::build_prompt(&samples, &["安全检查/年度".to_string(), "合同".to_string()], None);
         assert!(p.contains("安全检查/年度"));
         assert!(p.contains("沿用这些维度"));
+    }
+
+    // ---------------- 用户补充要求（2026-11-20 实测反馈）
+
+    // 反馈原话：「无法将我的主观意见给到模型，只能让模型一遍又一遍的生成没什么意义」。
+    // 真因是 prompt 里没有任何位置能接收用户的话，只剩「换一批」换样本重跑。
+    fn one_sample() -> Vec<sd::Sample> {
+        vec![sd::Sample {
+            no: 1,
+            name: "安全检查报告.docx".into(),
+            kind: "word".into(),
+            source: "桌面".into(),
+            mtime: 0,
+        }]
+    }
+
+    // 没提要求时，prompt 必须跟以前**一字不差**（T5.8 的实跑结论建立在那个 prompt 上）
+    #[test]
+    fn prompt_without_hint_is_unchanged() {
+        let p = sd::build_prompt(&one_sample(), &[], None);
+        assert!(!p.contains("补充要求"));
+        assert!(!p.contains("他额外"));
+        // 老内容逐段点一下，防止「悄悄改了 prompt 还说没改」
+        assert!(p.contains("你在帮一位办公人员整理电脑里的文档"));
+        assert!(p.contains("1|word|桌面|安全检查报告.docx"));
+        assert!(p.contains("只输出 JSON"));
+    }
+
+    // 提了要求就要原样带进 prompt，并且明确「优先满足」
+    #[test]
+    fn prompt_carries_hint_and_says_follow_it_first() {
+        let p = sd::build_prompt(&one_sample(), &[], Some("我们按客户分，主要做招投标"));
+        assert!(p.contains("我们按客户分，主要做招投标"), "{p}");
+        assert!(p.contains("补充要求"));
+        assert!(p.contains("优先满足"), "必须说清和他说的冲突时先听他的");
+        // 要求仍然在样本行之前，模型先读要求再读样本
+        let hint_at = p.find("补充要求").unwrap();
+        let sample_at = p.find("1|word|桌面").unwrap();
+        assert!(hint_at < sample_at);
+    }
+
+    // 多行 / 超长的话要压成一行并截断：换行会打乱 prompt 的分段，几千字只会拖慢推理
+    #[test]
+    fn hint_is_squashed_to_one_line_and_capped() {
+        let h = sd::normalize_hint("  按客户分\n第二行\r\n  第三行  ").unwrap();
+        assert!(!h.contains('\n') && !h.contains('\r'));
+        assert!(h.starts_with("按客户分"), "{h}");
+        assert!(h.contains("第三行"));
+
+        let long = "啊".repeat(2000);
+        let h2 = sd::normalize_hint(&long).unwrap();
+        assert!(h2.chars().count() <= sd::MAX_HINT_CHARS);
+        assert!(!h2.is_empty());
+    }
+
+    // 空白等于没提
+    #[test]
+    fn blank_hint_is_none() {
+        assert!(sd::normalize_hint("").is_none());
+        assert!(sd::normalize_hint("   \n\t ").is_none());
+        assert!(sd::normalize_hint("\r\n").is_none());
     }
 
     // ---------------- T5.4 解析容错
@@ -1422,6 +1483,44 @@ mod suggest_dirs {
         let s = sd::validate(raw(&json), 20).unwrap();
         assert_eq!(s.option_b.len(), 3, "越界那条被剔掉，余 3 条仍可保留");
         assert!(s.option_b.iter().all(|d| d.name != "制度发布"));
+    }
+
+    // 小语料兜底（2026-11-20）：每个目录只有 1 份支撑时，严格门槛会整份扔掉。
+    // 十来份文件凑不出「6 个目录 × 每个 2 份」，实测连续几次都栽在这儿 ——
+    // 退一步按「≥1 份」放行，方案能到手比完美审核更重要。
+    #[test]
+    fn small_corpus_falls_back_to_single_sample() {
+        let json = r#"{"schemes":[
+            {"dimension":"按事项","dirs":[
+                {"name":"安全检查","basis":"a","samples":[1]},
+                {"name":"采购合同","basis":"b","samples":[2]},
+                {"name":"费用明细","basis":"c","samples":[3]}]},
+            {"dimension":"按用途","dirs":[
+                {"name":"通知公告","basis":"a","samples":[4]},
+                {"name":"原始记录","basis":"b","samples":[5]},
+                {"name":"汇报材料","basis":"c","samples":[6]}]}]}"#;
+        let s = sd::validate(raw(json), 12).expect("小语料也要能出方案");
+        assert_eq!(s.option_a.len(), 3);
+        assert_eq!(s.option_b.len(), 3);
+        // 支撑数如实报给界面：用户看到「样本 1 份」自己会判断可信度
+        assert!(s.option_a.iter().all(|d| d.file_count == 1));
+    }
+
+    // 但兜底不能变成「什么都收」：序号越界/目录名是泛词，照样剔
+    #[test]
+    fn fallback_still_rejects_bogus_dirs() {
+        let json = r#"{"schemes":[
+            {"dimension":"按事项","dirs":[
+                {"name":"安全检查","basis":"a","samples":[1]},
+                {"name":"采购合同","basis":"b","samples":[2]},
+                {"name":"费用明细","basis":"c","samples":[3]}]},
+            {"dimension":"按用途","dirs":[
+                {"name":"通知公告","basis":"a","samples":[99]},
+                {"name":"其他","basis":"b","samples":[5]},
+                {"name":"汇报材料","basis":"c","samples":[6]}]}]}"#;
+        let e = sd::validate(raw(json), 12).unwrap_err();
+        assert_eq!(e.code, MODEL_BAD_OUTPUT);
+        assert!(e.message.contains("V1"), "{}", e.message);
     }
 
     // V2 负例3：序号 0（模型从 0 开始数）也算越界 —— 提示词要求从 1 开始
@@ -1567,6 +1666,7 @@ mod suggest_dirs {
                 files: &files,
                 existing_dirs: &[],
                 oldest_first: false,
+                hint: None,
                 timeout: std::time::Duration::from_millis(100),
             },
             &mut |s, _| stages.push(s.to_string()),
@@ -2170,5 +2270,113 @@ mod note {
         db::set_note(&conn, id, "先放着").unwrap();
         db::set_note(&conn, id, "   ").unwrap();
         assert_eq!(db::file_row(&conn, id).unwrap().unwrap().note, None);
+    }
+}
+
+// ================================================================ 正文预览
+//
+// 2026-11-20 反馈：「整理台只能看到文件名称，路径和内容我看不到，也无法快速打开文件」。
+// 这里管「读得到什么」：正文摘要、图片交给缩略图、读不出来的要说清为什么。
+// 打开文件/定位是纯系统调用，不在这一层的测试范围。
+
+mod preview {
+    use crate::preview;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    fn tmp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    fn docx(dir: &Path, body: &str) -> PathBuf {
+        let p = dir.join("t.docx");
+        let f = std::fs::File::create(&p).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        z.start_file("word/document.xml", opts).unwrap();
+        z.write_all(
+            format!("<w:document><w:body><w:p><w:r><w:t>{body}</w:t></w:r></w:p></w:body></w:document>")
+                .as_bytes(),
+        )
+        .unwrap();
+        z.finish().unwrap();
+        p
+    }
+
+    #[test]
+    fn plain_text_is_returned_verbatim() {
+        let d = tmp();
+        let p = d.path().join("note.txt");
+        std::fs::write(&p, "安全检查记录：三楼配电箱").unwrap();
+        let pv = preview::make(&p, "word", "txt", 40);
+        assert_eq!(pv.kind, "text");
+        assert!(pv.text.contains("三楼配电箱"), "{:?}", pv.text);
+        assert!(!pv.truncated);
+        assert!(pv.reason.is_empty());
+    }
+
+    // 一屏能读个大概就行，多了会把候选人列表挤走
+    #[test]
+    fn long_text_is_capped_and_flagged() {
+        let d = tmp();
+        let p = d.path().join("long.md");
+        std::fs::write(&p, "合同条款".repeat(600)).unwrap();
+        let pv = preview::make(&p, "word", "md", 10_000);
+        assert_eq!(pv.text.chars().count(), preview::PREVIEW_CAP);
+        assert!(pv.truncated, "截断了就要说，不然用户以为文件就这么短");
+    }
+
+    // docx 是这批文件里最多的，必须真能读出中文正文
+    #[test]
+    fn docx_body_is_extracted() {
+        let d = tmp();
+        let p = docx(d.path(), "2026 年度消防演练方案");
+        let pv = preview::make(&p, "word", "docx", std::fs::metadata(&p).unwrap().len());
+        assert_eq!(pv.kind, "text");
+        assert!(pv.text.contains("消防演练"), "{:?}", pv.text);
+    }
+
+    // 假 docx（改了扩展名的 exe）不能 panic，也不能假装有正文
+    #[test]
+    fn broken_docx_degrades_with_a_reason() {
+        let d = tmp();
+        let p = d.path().join("fake.docx");
+        std::fs::write(&p, b"MZ\x90\x00 not a zip at all").unwrap();
+        let pv = preview::make(&p, "word", "docx", 20);
+        assert_eq!(pv.kind, "none");
+        assert!(pv.text.is_empty());
+        assert!(!pv.reason.is_empty(), "读不出正文时一定要说清，不能给个空白框");
+    }
+
+    // 文件被移走/删了：说明白，别让用户对着空白怀疑程序坏了
+    #[test]
+    fn missing_file_explains_instead_of_empty() {
+        let d = tmp();
+        let pv = preview::make(&d.path().join("gone.docx"), "word", "docx", 10);
+        assert_eq!(pv.kind, "none");
+        assert!(pv.reason.contains("不在") || pv.reason.contains("找不到"), "{:?}", pv.reason);
+    }
+
+    // 图片走缩略图，不抽正文
+    #[test]
+    fn image_reports_image_kind() {
+        let d = tmp();
+        let p = d.path().join("a.png");
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n").unwrap();
+        let pv = preview::make(&p, "image", "png", 8);
+        assert_eq!(pv.kind, "image");
+        assert!(pv.text.is_empty());
+        assert!(pv.reason.is_empty(), "图片有缩略图，不必再写一句废话");
+    }
+
+    // PDF 这一版不解析：老实说，别装
+    #[test]
+    fn pdf_says_it_is_not_parsed() {
+        let d = tmp();
+        let p = d.path().join("a.pdf");
+        std::fs::write(&p, b"%PDF-1.7\n").unwrap();
+        let pv = preview::make(&p, "pdf", "pdf", 9);
+        assert_eq!(pv.kind, "none");
+        assert!(pv.reason.contains("PDF"), "{:?}", pv.reason);
     }
 }

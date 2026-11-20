@@ -14,6 +14,10 @@ export type KeyCmd =
   | { t: 'move'; d: 1 | -1 }
   | { t: 'escape' }
   | { t: 'undo' }
+  /** 打开当前文件（系统默认程序） */
+  | { t: 'open' }
+  /** 在资源管理器中定位当前文件 */
+  | { t: 'reveal' }
 
 export interface KeyEventLike {
   key: string
@@ -63,6 +67,11 @@ export function mapKey(e: KeyEventLike, ctx: KeyCtx): KeyCmd | null {
       return { t: 'defer' }
     case 'p':
       return { t: 'park' }
+    // 判一份文件常要「打开确认一眼再回来」，来回摸鼠标会打断流水线
+    case 'o':
+      return { t: 'open' }
+    case 'l':
+      return { t: 'reveal' }
   }
   return null
 }

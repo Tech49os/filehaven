@@ -19,6 +19,11 @@ pub const MAX_SAMPLES: usize = 60;
 pub const PER_KIND: usize = 15;
 /// 已有目录最多带几行，防止 prompt 里目录清单比样本还长
 pub const MAX_EXISTING: usize = 30;
+/// 用户补充要求最多收多少字
+///
+/// 200 字足够说清「按客户分，我们主要做招投标，另外有人事培训一块」；
+/// 再长就纯是拖慢推理了（每多 100 token 大约多 1 秒），而且用户也不会一次打那么多。
+pub const MAX_HINT_CHARS: usize = 200;
 
 /// 泛词表：单独成一个目录名就判违规（V3）
 pub const FAN_WORDS: &[&str] = &[
@@ -250,11 +255,39 @@ fn sort_by_mtime(items: &mut Vec<&SampleInput>, oldest_first: bool) {
 
 // ---------------------------------------------------------------- prompt
 
+/// 把用户写的话收拾成能塞进 prompt 的一行
+///
+/// 三件事：换行压成空格（换行会打乱 prompt 的分段结构）、连续空白压成一个、
+/// 超长截断。返回 `None` 表示「他没说什么」，此时 prompt 与加这个功能之前**一字不差**
+/// —— T5.8 那几次实跑结论建立在原 prompt 上，不能因为加了个空输入框就变味。
+pub fn normalize_hint(raw: &str) -> Option<String> {
+    let one_line: String = raw
+        .chars()
+        .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
+        .collect();
+    let squashed = one_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if squashed.is_empty() {
+        return None;
+    }
+    Some(squashed.chars().take(MAX_HINT_CHARS).collect())
+}
+
 /// prompt 钉死在详设 §7.6，改了必须重跑 T5.8 实跑
-pub fn build_prompt(samples: &[Sample], existing_dirs: &[String]) -> String {
+///
+/// `hint` 是 2026-11-20 新增的用户补充要求（实测反馈：无法把主观意见给到模型）。
+/// 传 `None` 时输出与旧版完全一致，见上面 `normalize_hint` 的说明。
+pub fn build_prompt(samples: &[Sample], existing_dirs: &[String], hint: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str("你在帮一位办公人员整理电脑里的文档。下面是他文件的抽样（已去掉旧版本），\n");
     s.push_str("每行格式：序号|类型|来源|主文件名。来源是他电脑上的哪个目录。\n\n");
+
+    if let Some(h) = hint.map(str::trim).filter(|h| !h.is_empty()) {
+        s.push_str(&format!(
+            "他额外提了补充要求：{h}\n\
+             （这是他自己写的，**优先满足**；和下面任何一条冲突时，先按他说的分，\
+             但仍然要给两套方案，且两套的维度名不能相同。）\n\n"
+        ));
+    }
 
     if !existing_dirs.is_empty() {
         let listed: Vec<String> = existing_dirs
@@ -389,7 +422,35 @@ fn reject(gate: &str, detail: impl std::fmt::Display) -> CmdError {
 }
 
 /// V1~V5（详设 §7.6）。剔除型违规逐目录剔除后复审，整份作废返回 `MODEL_BAD_OUTPUT`。
+///
+/// **两级门槛**（2026-11-20 加）：先按「每个目录至少 2 份支撑」严格判；
+/// 过不了就退回「至少 1 份」再判一次。
+///
+/// 为什么要有第二级：V2 的本意是「别让模型凭空编目录」，而引用 1 个**真实存在**
+/// 的样本并不算编 —— 真正编造时引用的是越界序号或 0。但小语料（十来份文件）里，
+/// 两套 × 每套 3 个目录 = 6 个目录，要求每个都凑够 2 份支撑在数学上就做不到，
+/// 于是一份完全合理的方案被整份扔掉、用户被推回手写。实测（12 份语料，qwen3.5:4b/9b）
+/// 连续多次都栽在这儿，所以退一步：**能不弱就弱，不能让用户白等一场还什么都拿不到**。
 pub fn validate(raw: RawSchemes, sample_count: usize) -> Result<DirSuggestion, CmdError> {
+    let mut first_err: Option<CmdError> = None;
+    for min_samples in [2usize, 1] {
+        match validate_with(&raw, sample_count, min_samples) {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    Err(first_err.unwrap_or_else(|| reject("V1", "没有可用的方案")))
+}
+
+fn validate_with(
+    raw: &RawSchemes,
+    sample_count: usize,
+    min_samples: usize,
+) -> Result<DirSuggestion, CmdError> {
     if raw.schemes.len() < 2 {
         return Err(reject("V1", format!("只给了 {} 套方案", raw.schemes.len())));
     }
@@ -423,7 +484,7 @@ pub fn validate(raw: RawSchemes, sample_count: usize) -> Result<DirSuggestion, C
         let mut kept: Vec<SuggestedDir> = Vec::new();
         for d in &s.dirs {
             let name = d.name.trim().to_string();
-            if !passes_gates(&name, &d.samples, sample_count) {
+            if !passes_gates(&name, &d.samples, sample_count, min_samples) {
                 continue;
             }
             if !seen.insert(name.clone()) {
@@ -507,9 +568,9 @@ pub fn is_filler_composed(name: &str) -> bool {
 }
 
 /// V2 + V3 + V4：一个目录是否留下
-fn passes_gates(name: &str, samples: &[usize], sample_count: usize) -> bool {
-    // V2：至少 2 个支撑，且序号都在 1..=sample_count
-    if samples.len() < 2 {
+fn passes_gates(name: &str, samples: &[usize], sample_count: usize, min_samples: usize) -> bool {
+    // V2：至少 min_samples 个支撑，且序号都在 1..=sample_count
+    if samples.len() < min_samples {
         return false;
     }
     if samples.iter().any(|&i| i == 0 || i > sample_count) {
@@ -538,6 +599,8 @@ pub struct RunInput<'a> {
     pub existing_dirs: &'a [String],
     /// 「换一批」
     pub oldest_first: bool,
+    /// 用户自己写的补充要求（已 `normalize_hint` 过）
+    pub hint: Option<&'a str>,
     pub timeout: Duration,
 }
 
@@ -563,7 +626,7 @@ pub fn run(
     // 8GB 显存装不下 9b + 4b，请求前先把别的卸掉（历史坑）
     llm::unload_others(inp.base, inp.model, Duration::from_secs(5));
 
-    let prompt = build_prompt(&samples, inp.existing_dirs);
+    let prompt = build_prompt(&samples, inp.existing_dirs, inp.hint);
     let raw = llm::generate(inp.base, inp.model, &prompt, inp.timeout)?;
 
     on_stage("validating", t0.elapsed().as_millis() as u64);

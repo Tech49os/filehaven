@@ -9,6 +9,7 @@ const pickDirectory = vi.fn()
 const addSourceRoot = vi.fn()
 const removeSourceRoot = vi.fn()
 const scanAll = vi.fn()
+const push = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   bootState,
@@ -22,6 +23,7 @@ vi.mock('../../core/ipc', () => ({
   previewDirName: vi.fn(),
 }))
 vi.mock('../../core/events', () => ({ onScanProgress: vi.fn().mockResolvedValue(() => {}) }))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push, replace: push }) }))
 
 const Settings = (await import('./Settings.vue')).default
 
@@ -113,5 +115,26 @@ describe('设置页 · 源区（回归：移除后加不回来）', () => {
     await btn(w, '添加源区')!.trigger('click')
     await flushPromises()
     expect(addSourceRoot).not.toHaveBeenCalled()
+  })
+})
+
+describe('设置页 · 目录结构', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset().mockResolvedValue(boot([{ id: 1, path: 'C:/桌面', enabled: true }]))
+    listDirs.mockReset().mockResolvedValue([])
+    diskFreeGb.mockReset().mockResolvedValue(120.5)
+    push.mockReset()
+  })
+
+  // 目录建议以前只在引导里跑一次，配置完成后 App.vue 就把 /onboarding 重定向走，
+  // 于是「换个分法」永远没有入口 —— 想再让 AI 给一版只能删库。
+  it('配置完成后仍能回到 AI 目录建议', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const entry = btn(w, 'AI 建议目录')
+    expect(entry).toBeTruthy()
+    await entry!.trigger('click')
+    expect(push).toHaveBeenCalledWith('/onboarding/dirs')
   })
 })

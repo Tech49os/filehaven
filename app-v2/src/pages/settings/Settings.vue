@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Card from '../../components/Card.vue'
 import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
@@ -14,6 +15,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const app = useAppStore()
 const dirs = useDirsStore()
+const router = useRouter()
 
 const collapsed = ref<Set<number>>(new Set())
 const adding = ref(false)
@@ -168,7 +170,14 @@ async function removeRoot(id: number) {
 
     <Card title="目录结构">
       <template #action>
-        <button class="btn" @click="adding = true">新建目录</button>
+        <div class="acts">
+          <!-- 目录建议以前只在引导里出现一次，之后再也回不去：想换个分法只能手动一条条建。
+               入口放这儿，写一句要求就能重来一版（点进去不会动已有目录，采纳是逐条新建/复用） -->
+          <button class="btn ghost" @click="router.push('/onboarding/dirs')">
+            <AppIcon name="sparkle" :size="12" /> AI 建议目录
+          </button>
+          <button class="btn" @click="adding = true">新建目录</button>
+        </div>
       </template>
       <DirTree
         v-if="dirs.tree.length > 0"

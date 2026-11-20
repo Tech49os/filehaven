@@ -100,6 +100,15 @@ const modelTip = computed(() => {
   padding: 10px 10px 0;
 }
 
+/* 窄窗时侧栏也让一步：省下来的 24px 直接给中间的卡片 */
+@media (max-width: 1240px) {
+  .side {
+    width: 176px;
+    flex-basis: 176px;
+    padding: 8px 8px 0;
+  }
+}
+
 .group-title {
   font-size: 11px;
   font-weight: 500;

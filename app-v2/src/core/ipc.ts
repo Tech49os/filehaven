@@ -18,6 +18,7 @@ import type {
   DirNamePreview,
   DirNode,
   DirSuggestion,
+  FilePreview,
   FileRow,
   MigrationPreview,
   MigrationResult,
@@ -100,8 +101,18 @@ export function acceptDirs(names: string[]) {
 }
 
 /** M5 未接入时后端没有这个命令，失败由页面降级处理 */
-export function suggestDirs(force = false) {
-  return invoke<DirSuggestion>('suggest_dirs', { force })
+export function suggestDirs(force = false, hint = '') {
+  return invoke<DirSuggestion>('suggest_dirs', { force, hint: hint.trim() || null })
+}
+
+/**
+ * 一份文件的正文预览
+ *
+ * 700 字上限、图片只回标记（缩略图走 asset 协议）、读不出正文时给原因。
+ * 前端按 fileId 缓存结果，同一份文件一次会话只读一次。
+ */
+export function previewFile(fileId: number) {
+  return invoke<FilePreview>('preview_file', { fileId })
 }
 
 // ---------------------------------------------------------------- 批次 / 判定

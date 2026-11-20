@@ -1,14 +1,29 @@
 # 项目长期约定（文件管家 / 本地智能文件归档客户端）
 
-## 当前阶段：P1 完成，已出包 v0.3.0-alpha.1（2026-11-18 23:35，分支 `feat/p1`，提交 `3fff316`）
+## 当前阶段：P1 完成 + 两轮实测反馈修复，已出包 v0.3.0-alpha.3（2026-11-20 11:34，分支 `feat/p1`）
 
 `设计文档_v1.1_人机协作整理.md` + `设计文档_P1_详细设计_v1.0.md` + `P1_实施计划_任务清单_v1.0.md`（58 任务 9 里程碑）。
 **M0~M8 全部完成并提交**，代码在 `app-v2/`（旧 `app/` 保留不动）。
 功能链：引导（源区/归档区/目录方案）→ 整理台（推荐+理由+键盘流水线）→ 待迁移（分组/冲突/已改拦截）
 → 三段式迁移（复制/SHA-256/隔离区，每文件一事务）→ 撤销（逆序还原，sha 不符只记该条失败）。
-发布件：`发布/文件管家_v0.3.0-alpha.1.exe`（6.1MB）+ `文件管家_0.3.0-alpha.1_x64-setup.exe`（2.3MB NSIS）。
-验收：`验收清单_P1.md` 14 条全过，截图在 `验收截图/`。
-测试基线：`cargo test` **95** passed、`vitest` **86** passed（16 文件）、`vue-tsc` 零错误、`app:build` 通过。
+发布件：`发布/文件管家_v0.3.0-alpha.3.exe`（7.0MB）+ `文件管家_0.3.0-alpha.3_x64-setup.exe`（2.6MB NSIS）。
+验收：`验收清单_P1.md` 14 条全过；隔离库端到端 `app-v2/test/e2e-p1fix.py` 已扩到 **28 条**（对发布版 exe 全过）。
+测试基线：`cargo test` **112** passed、`vitest` **107** passed（18 文件）、`vue-tsc` 零错误、`app:build` 通过。
+
+**alpha.3 修的三件事**：① 目录建议能听人话（`suggest_dirs` 加 `hint` + prompt 补一段；
+方案里可改名/删除/新增，设置页补「AI 建议目录」入口，之前配置完成后就再也进不去）；
+② 整理台看得见路径与内容（新增 `preview_file` + `preview.rs`，复用 `extract`；卡片加完整路径、
+打开/定位按钮、正文摘要、图片缩略图走 asset 协议）；③ 窄窗自动收栏（`useNarrow` 1240px，
+右栏变抽屉，卡片 468→760px）。**V2 门槛改成两级**（≥2 份支撑 → 退到 ≥1 份），
+否则小语料会被整份扔掉。明细见 `.workbuddy/memory/2026-11-20.md`。
+
+**三条铁律**：① 任何时候出现「不明黑框」，先 grep `Command::new` ——
+`windows_subsystem="windows"` 的 GUI 进程起任何控制台子进程都会弹框；
+② 别把同步 HTTP / 探活挂进 `refreshBoot()` 的默认路径，它在每次判定后都会被调；
+③ 界面里任何「配置完就消失」的一次性页面都要留后门入口（目录建议栽过一次）。
+
+**隔离验证**：`FILEBUTLER_DATA_DIR=<空目录>` + `WEBVIEW2_USER_DATA_FOLDER=<独立目录>`
+可开一个不碰用户真实索引库的实例（`APPDATA` 改不动，`dirs` 走 `SHGetKnownFolderPath`）。
 
 **驱动界面必须用 CDP，不要用 SendInput/PostMessage**：这台机器上键盘事件送不进 WebView2（鼠标能进）。
 启动前设 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"`，用 `app-v2/test/cdp.py`

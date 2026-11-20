@@ -158,6 +158,19 @@ export interface BatchItem {
   needsYou: boolean
 }
 
+/**
+ * 一份文件的预览（`preview_file`）
+ *
+ * `kind === 'image'` 时 `text` 为空 —— 前端直接拿 `absPath` 走 asset 协议显示缩略图，
+ * 不在后端解码。读不出正文时 `reason` 一定有话，前端原样显示。
+ */
+export interface FilePreview {
+  text: string
+  truncated: boolean
+  reason: string
+  kind: 'text' | 'image' | 'none'
+}
+
 export interface BatchView {
   batchId: number
   seq: number
