@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS files (                 -- P1
   summary        TEXT,                             -- 废弃占位：P3 才写
   note           TEXT,
   target_name    TEXT,                             -- 归档时改成的名字（NULL = 保持原名）
+  tag_locked     INTEGER NOT NULL DEFAULT 0,        -- P3：人改过标签，队列重跑不许覆盖
+  archived_path  TEXT,                             -- P3：迁移后在归档区的真实路径
+  archive_dir_id INTEGER,                          -- P3：迁移落到了哪个归档目录
   discovered_at  INTEGER NOT NULL,
   last_seen_at   INTEGER NOT NULL,
   missing        INTEGER NOT NULL DEFAULT 0        -- 废弃：以 status='missing' 为准 (C7)

@@ -159,6 +159,30 @@ pub struct BootState {
     pub watch_enabled: bool,
 }
 
+/// 一个标签（界面上要显示、要能点、要能删）
+///
+/// `kind` 决定样式与可删性：`type`/`time` 是基础标签不许删，
+/// `topic` 是模型给的，`user` 是人自己加的。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagRef {
+    pub id: i64,
+    pub name: String,
+    /// type|time|topic|keyword|user
+    pub kind: String,
+}
+
+/// 标签词表里的一行（T1.5 设置页）
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagCount {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    /// 挂了多少份文件
+    pub file_count: i64,
+}
+
 /// 列表/卡片里的一份文件
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +206,10 @@ pub struct FileRow {
     pub summary: Option<String>,
     /// basic | deep
     pub tag_level: String,
+    /// 人改过标签：队列重跑只写 summary，不覆盖标签（T1.4）
+    pub tag_locked: bool,
+    /// 标签，按 `type → time → topic → keyword → user` 排好（T1.1，批量补，不进主查询）
+    pub tags: Vec<TagRef>,
 }
 
 /// 一条候选目录（reason 非空，服务端保证）

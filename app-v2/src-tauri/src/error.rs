@@ -20,6 +20,10 @@ pub const MODEL_TIMEOUT: &str = "MODEL_TIMEOUT";
 pub const MODEL_BAD_OUTPUT: &str = "MODEL_BAD_OUTPUT";
 /// 文件太少，不值得问模型（少于 10 份）
 pub const TOO_FEW_FILES: &str = "TOO_FEW_FILES";
+/// 输入不合法（空标签名、超长目录名一类）
+pub const BAD_INPUT: &str = "BAD_INPUT";
+/// 这个标签不许删（`type` / `time` 是基础标签，删了界面就没法按类型/时间找了）
+pub const TAG_LOCKED: &str = "TAG_LOCKED";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CmdError {

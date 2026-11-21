@@ -648,6 +648,51 @@ async fn drop_file(app: AppHandle, file_id: i64) -> Result<(), CmdError> {
     index::drop_file(&mut conn, file_id)
 }
 
+// ---------------------------------------------------------------- 标签（P3 M1）
+
+/// 人加一个标签（一律 `kind='user'`）
+#[tauri::command]
+async fn add_tag(
+    app: AppHandle,
+    file_id: i64,
+    name: String,
+) -> Result<model::TagRef, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::add_tag(&mut conn, file_id, &name)
+}
+
+/// 删一个标签（`type` / `time` 会被 `TAG_LOCKED` 拒掉）
+#[tauri::command]
+async fn remove_tag(app: AppHandle, file_id: i64, tag_id: i64) -> Result<(), CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::remove_tag(&mut conn, file_id, tag_id)
+}
+
+/// 标签词表（设置页）：user / topic + 使用份数
+#[tauri::command]
+async fn list_tags(app: AppHandle) -> Result<Vec<model::TagCount>, CmdError> {
+    let state = app.state::<AppState>();
+    let conn = lock_db(&state)?;
+    index::list_tags(&conn)
+}
+
+#[tauri::command]
+async fn delete_tag(app: AppHandle, tag_id: i64) -> Result<usize, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::delete_tag(&mut conn, tag_id)
+}
+
+/// 改名，撞名则合并；返回最终留下的标签 id
+#[tauri::command]
+async fn rename_tag(app: AppHandle, tag_id: i64, name: String) -> Result<i64, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::rename_tag(&mut conn, tag_id, &name)
+}
+
 // ---------------------------------------------------------------- 迁移
 
 /// 归档根（没有就 NOT_CONFIGURED —— 迁移类命令一律靠它）
@@ -1344,14 +1389,18 @@ fn run_suggest_cli(samples: &str, out: &str, force: bool) -> i32 {
     }
 }
 
-/// `--eval <cases.json> <out.json>`：不开 GUI、不碰库、不联网，只算推荐排名
+/// `--eval <cases.json> <out.json> [--no-tags]`：不开 GUI、不碰库、不联网，只算推荐排名
 ///
 /// 输入来自 `test/export-eval.py` 导出的留一集；输出每条 case 的**完整排名**，
 /// 阈值网格搜索放在 `test/eval_recommend.py` 里做 —— 改阈值不需要重编译。
 ///
 /// 留一法在这里落地：算某一条 case 的分数前，把它自己的文件名从
 /// `expectDir` 那个目录的已确认列表里摘掉，否则等于把答案喂给 familyMatch。
-fn run_eval_cli(cases: &str, out: &str) -> i32 {
+///
+/// `--no-tags`（P3 T0.3）把 case 与目录两侧的 `topicTags` 全部清空后再打分，
+/// 等价于「标签路关掉」—— A/B 的对照组。**只影响这个子命令**，
+/// `recommend::rank` 的线上调用完全不受影响。
+fn run_eval_cli(cases: &str, out: &str, no_tags: bool) -> i32 {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct RawDir {
@@ -1372,6 +1421,10 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
         expect_dir: String,
         #[serde(default)]
         has_deep_tags: bool,
+        #[serde(default)]
+        topic_tags: Vec<String>,
+        #[serde(default)]
+        tag_level: String,
     }
     #[derive(serde::Deserialize)]
     struct RawSet {
@@ -1423,12 +1476,22 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
                     &d.name,
                     &names,
                     &kind_hist,
-                    &d.topic_tags,
+                    // 对照组：标签路关掉
+                    if no_tags { &[] } else { &d.topic_tags },
                 ),
             ));
         }
 
-        let feat = file_feature_of(&c.file_name, &c.kind, c.mtime, Vec::new());
+        let feat = file_feature_of(
+            &c.file_name,
+            &c.kind,
+            c.mtime,
+            if no_tags {
+                Vec::new()
+            } else {
+                c.topic_tags.clone()
+            },
+        );
         let ranked = recommend::rank(&feat, &dirs);
         let rows: Vec<serde_json::Value> = ranked
             .iter()
@@ -1450,6 +1513,8 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
             "kind": c.kind,
             "expectDir": c.expect_dir,
             "hasDeepTags": c.has_deep_tags,
+            "tagLevel": c.tag_level,
+            "topicTags": c.topic_tags,
             // 1 起；null = 没进有理由的排名
             "rank": pos.map(|p| p + 1),
             "ranked": rows,
@@ -1461,6 +1526,7 @@ fn run_eval_cli(cases: &str, out: &str) -> i32 {
     let payload = serde_json::json!({
         "dirCount": set.dirs.len(),
         "caseCount": set.cases.len(),
+        "noTags": no_tags,
         // 阈值随产出一起写出来：Python 汇总不能拿自己的一套默认值，
         // 否则「脚本说 7.9%、代码实际 2.6%」这种对不上会一直存在
         "thresholds": {
@@ -1596,7 +1662,13 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                         index::apply_deep_tag(&mut conn, job.file_id, &d.tags, d.summary.as_deref())
                     };
                     match wrote {
-                        Ok(_) => {
+                        Ok(skipped_tags) => {
+                            if skipped_tags {
+                                eprintln!(
+                                    "deep tag skipped: user-locked（{} 的标签是人改过的，只写了 summary）",
+                                    job.name
+                                );
+                            }
                             if let Ok(mut st) = queue.stats_lock() {
                                 st.done += 1;
                                 st.note = None;
@@ -2020,7 +2092,8 @@ fn main() {
         std::process::exit(run_extract_cli(&args[2], &args[3]));
     }
     if args.len() >= 4 && args[1] == "--eval" {
-        std::process::exit(run_eval_cli(&args[2], &args[3]));
+        let no_tags = args.iter().skip(2).any(|a| a == "--no-tags");
+        std::process::exit(run_eval_cli(&args[2], &args[3], no_tags));
     }
     if args.len() >= 4 && args[1] == "--scan" {
         std::process::exit(run_scan_cli(&args[2], &args[3]));
@@ -2129,7 +2202,12 @@ fn main() {
             rescore_files,
             deep_tag_status,
             set_deep_tag,
-            set_watch_enabled
+            set_watch_enabled,
+            add_tag,
+            remove_tag,
+            list_tags,
+            delete_tag,
+            rename_tag
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

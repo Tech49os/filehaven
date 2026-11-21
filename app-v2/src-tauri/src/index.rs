@@ -132,6 +132,10 @@ pub fn open(path: &Path) -> Result<Connection, CmdError> {
     // schema.sql 是 CREATE TABLE IF NOT EXISTS —— 老库不会因为改了建表语句就多出列，
     // 后加的列必须在这里补一次（幂等）
     ensure_column(&conn, "files", "target_name", "TEXT")?;
+    // P3：人改过标签 → 队列只写 summary；归档后的真实路径（浏览页要能打开文件）
+    ensure_column(&conn, "files", "tag_locked", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "files", "archived_path", "TEXT")?;
+    ensure_column(&conn, "files", "archive_dir_id", "INTEGER")?;
     Ok(conn)
 }
 
@@ -915,7 +919,7 @@ pub fn set_note(conn: &Connection, file_id: i64, note: &str) -> Result<(), CmdEr
 // ---------------------------------------------------------------- 批次
 
 const FILE_COLS: &str =
-    "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name, summary, tag_level";
+    "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name, summary, tag_level, tag_locked";
 
 /// **按列名取值**，不用下标。
 ///
@@ -939,7 +943,90 @@ fn row_to_file(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FileRow>
         target_name: r.get("target_name")?,
         summary: r.get("summary")?,
         tag_level: r.get("tag_level")?,
+        tag_locked: r.get::<_, i64>("tag_locked")? != 0,
+        // 标签是**一对多**，塞进主查询会让行数翻倍并毁掉 LIMIT —— 走 attach_tags 批量补
+        tags: Vec::new(),
     })
+}
+
+/// 标签的展示顺序：`type → time → topic → keyword → user`，同类按 name。
+///
+/// 这个顺序在 SQL 里定，界面只按顺序铺、不再排序 —— 两处各排一遍迟早不一致。
+fn tag_rank(kind: &str) -> i32 {
+    match kind {
+        "type" => 0,
+        "time" => 1,
+        "topic" => 2,
+        "keyword" => 3,
+        "user" => 4,
+        _ => 9,
+    }
+}
+
+/// 批量取标签：`file_id → [TagRef]`（一条 SQL，禁 N+1）
+///
+/// 空入参**不发 SQL** —— 500 份列表里可能有 0 行的分组，白跑一条查询没意义。
+pub fn tags_for(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, Vec<crate::model::TagRef>>, CmdError> {
+    let mut out: HashMap<i64, Vec<crate::model::TagRef>> = HashMap::new();
+    for chunk in ids.chunks(500) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let marks = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT ft.file_id, t.id, t.name, t.kind
+             FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+             WHERE ft.file_id IN ({marks})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                crate::model::TagRef {
+                    id: r.get(1)?,
+                    name: r.get(2)?,
+                    kind: r.get(3)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (fid, tag) = row?;
+            out.entry(fid).or_default().push(tag);
+        }
+    }
+    // 顺序在内存里按同一个 rank 定：SQL 的 CASE 排序在 IN 大集合上不划算，
+    // 而这里每组最多 10 来个标签，sort 的代价可以忽略。rank 是同一套规则。
+    for v in out.values_mut() {
+        v.sort_by(|a, b| {
+            tag_rank(&a.kind)
+                .cmp(&tag_rank(&b.kind))
+                .then(a.name.cmp(&b.name))
+                .then(a.id.cmp(&b.id))
+        });
+    }
+    Ok(out)
+}
+
+/// 给一批行补标签（五个出口统一走这里：file_row / file_rows / pool_rows /
+/// rows_by_status / confirmed_for_migration）
+pub fn attach_tags(
+    conn: &Connection,
+    rows: &mut [crate::model::FileRow],
+) -> Result<(), CmdError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let mut map = tags_for(conn, &ids)?;
+    for row in rows.iter_mut() {
+        row.tags = map.remove(&row.id).unwrap_or_default();
+    }
+    Ok(())
 }
 
 /// 归档时用的名字：改过就用新名字，没改就是原名
@@ -1030,6 +1117,7 @@ pub fn pool_rows(conn: &Connection) -> Result<Vec<crate::model::FileRow>, CmdErr
     for r in rows {
         out.push(r?);
     }
+    attach_tags(conn, &mut out)?;
     Ok(out)
 }
 
@@ -1072,17 +1160,22 @@ pub fn file_rows(conn: &Connection, ids: &[i64]) -> Result<Vec<crate::model::Fil
             out.push(r);
         }
     }
+    attach_tags(conn, &mut out)?;
     Ok(out)
 }
 
 pub fn file_row(conn: &Connection, id: i64) -> Result<Option<crate::model::FileRow>, CmdError> {
-    let r = conn
+    let mut r = conn
         .query_row(
             &format!("SELECT {FILE_COLS} FROM files WHERE id=?1"),
             [id],
             row_to_file,
         )
         .optional()?;
+    if let Some(row) = r.as_mut() {
+        let mut one = std::slice::from_mut(row);
+        attach_tags(conn, &mut one)?;
+    }
     Ok(r)
 }
 
@@ -1225,34 +1318,47 @@ pub fn topic_tags_for(
 /// **失败不动 `tag_level`** —— 写不进去就是没读过，下一轮队列会再试。
 /// `summary` 为空写 NULL 而不是空串：NULL 表示「读过但没有可说的」，
 /// 与「没读过」（`tag_level='basic'`）是两件事，界面文案也不同。
+///
+/// **人改过标签的行（`tag_locked=1`）只写 summary 与 `tag_level`，tags 一个都不碰**（T1.4）：
+/// 不锁的话，「我删掉的标签又回来了」是必然 —— 队列每跑一轮就按模型结论重写一遍。
+/// 返回 `true` 表示本次跳过了 tags，调用方据此打日志。
 pub fn apply_deep_tag(
     conn: &mut Connection,
     file_id: i64,
     tags: &[String],
     summary: Option<&str>,
-) -> Result<(), CmdError> {
+) -> Result<bool, CmdError> {
     let tx = conn.transaction()?;
-    // 重跑时不留脏数据：只清 topic 类，基础标签（type/time/keyword）不能动
-    tx.execute(
-        "DELETE FROM file_tags WHERE file_id=?1
-           AND tag_id IN (SELECT id FROM tags WHERE kind='topic')",
-        params![file_id],
+    let locked: i64 = tx.query_row(
+        "SELECT COALESCE(tag_locked, 0) FROM files WHERE id=?1",
+        [file_id],
+        |r| r.get(0),
     )?;
-    for name in tags {
+
+    if locked == 0 {
+        // 重跑时不留脏数据：只清 topic 类，基础标签（type/time/keyword）不能动
         tx.execute(
-            "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'topic')",
-            params![name],
+            "DELETE FROM file_tags WHERE file_id=?1
+               AND tag_id IN (SELECT id FROM tags WHERE kind='topic')",
+            params![file_id],
         )?;
-        let tid: i64 = tx.query_row(
-            "SELECT id FROM tags WHERE name=?1 AND kind='topic'",
-            params![name],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1,?2,0.8)",
-            params![file_id, tid],
-        )?;
+        for name in tags {
+            tx.execute(
+                "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'topic')",
+                params![name],
+            )?;
+            let tid: i64 = tx.query_row(
+                "SELECT id FROM tags WHERE name=?1 AND kind='topic'",
+                params![name],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1,?2,0.8)",
+                params![file_id, tid],
+            )?;
+        }
     }
+
     let sum = summary.map(|s| s.trim()).filter(|s| !s.is_empty());
     tx.execute(
         "UPDATE files SET summary=?1, tag_level='deep' WHERE id=?2",
@@ -1265,7 +1371,7 @@ pub fn apply_deep_tag(
         params![file_id],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(locked != 0)
 }
 
 /// 下一条待深读的文件（T2.6 取件顺序）
@@ -1313,6 +1419,194 @@ pub fn next_deep_job(
         })
         .optional()?;
     Ok(job)
+}
+
+// ---------------------------------------------------------------- 人改标签（P3 M1）
+
+/// 标签名清洗：trim → 去首尾 `#` → 截到 20 字（**截断不是报错**：用户多打几个字
+/// 不该让整个动作失败）→ 空名报 `BAD_INPUT`
+pub fn clean_tag_name(raw: &str) -> Result<String, CmdError> {
+    let t = raw.trim().trim_matches('#').trim();
+    if t.is_empty() {
+        return Err(CmdError::new(
+            crate::error::BAD_INPUT,
+            "标签不能为空",
+        ));
+    }
+    let out: String = t.chars().take(20).collect();
+    Ok(out)
+}
+
+/// 人加一个标签：**一律 `kind='user'`**（T1.3）
+///
+/// 不写进 `topic` 的原因：队列重跑会按模型结论重写 topic，
+/// 人写的东西混进去就会被覆盖。`user` 永远只由人增删。
+/// 顺手 `tag_locked=1`：加过标签就等于表过态，别再让队列改。
+pub fn add_tag(
+    conn: &mut Connection,
+    file_id: i64,
+    raw: &str,
+) -> Result<crate::model::TagRef, CmdError> {
+    let name = clean_tag_name(raw)?;
+    let exists: Option<i64> = conn
+        .query_row("SELECT id FROM files WHERE id=?1", [file_id], |r| r.get(0))
+        .optional()?;
+    if exists.is_none() {
+        return Err(CmdError::new(
+            "NOT_FOUND",
+            format!("文件不存在：{file_id}"),
+        ));
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'user')",
+        params![name],
+    )?;
+    let tid: i64 = tx.query_row(
+        "SELECT id FROM tags WHERE name=?1 AND kind='user'",
+        params![name],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1,?2,1.0)",
+        params![file_id, tid],
+    )?;
+    tx.execute(
+        "UPDATE files SET tag_locked=1 WHERE id=?1",
+        [file_id],
+    )?;
+    tx.commit()?;
+    Ok(crate::model::TagRef {
+        id: tid,
+        name,
+        kind: "user".into(),
+    })
+}
+
+/// 删一个标签：`type` / `time` 拒绝（`TAG_LOCKED`），**不动 `tag_level`**（T1.3）
+///
+/// `tag_level` 保持 `deep` 是刻意的：删到一个不剩 ≠ 没读过。
+/// 这两件事在界面上文案不同（「读过但没结论」vs「还没读」）。
+pub fn remove_tag(conn: &mut Connection, file_id: i64, tag_id: i64) -> Result<(), CmdError> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT t.kind FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+             WHERE ft.file_id=?1 AND ft.tag_id=?2",
+            params![file_id, tag_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(kind) = kind else {
+        return Err(CmdError::new(
+            "NOT_FOUND",
+            format!("这份文件没有该标签（tag={tag_id}）"),
+        ));
+    };
+    if kind == "type" || kind == "time" {
+        return Err(CmdError::new(
+            crate::error::TAG_LOCKED,
+            format!("「{kind}」是基础标签，删了就没法按类型/时间找了"),
+        ));
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM file_tags WHERE file_id=?1 AND tag_id=?2",
+        params![file_id, tag_id],
+    )?;
+    tx.execute("UPDATE files SET tag_locked=1 WHERE id=?1", [file_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 标签词表（设置页）：`user` / `topic` 两类 + 使用份数（T1.5）
+pub fn list_tags(conn: &Connection) -> Result<Vec<crate::model::TagCount>, CmdError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.name, t.kind, COUNT(ft.file_id)
+         FROM tags t LEFT JOIN file_tags ft ON ft.tag_id = t.id
+         WHERE t.kind IN ('user','topic')
+         GROUP BY t.id, t.name, t.kind
+         ORDER BY t.kind DESC, COUNT(ft.file_id) DESC, t.name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::model::TagCount {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            kind: r.get(2)?,
+            file_count: r.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 删词表里的一条：级联清 `file_tags`，返回解绑份数
+pub fn delete_tag(conn: &mut Connection, tag_id: i64) -> Result<usize, CmdError> {
+    let kind: Option<String> = conn
+        .query_row("SELECT kind FROM tags WHERE id=?1", [tag_id], |r| r.get(0))
+        .optional()?;
+    let Some(kind) = kind else {
+        return Err(CmdError::new("NOT_FOUND", format!("标签不存在：{tag_id}")));
+    };
+    if kind == "type" || kind == "time" {
+        return Err(CmdError::new(
+            crate::error::TAG_LOCKED,
+            "基础标签不能从词表里删",
+        ));
+    }
+    let tx = conn.transaction()?;
+    let n = tx.execute("DELETE FROM file_tags WHERE tag_id=?1", [tag_id])?;
+    tx.execute("DELETE FROM tags WHERE id=?1", [tag_id])?;
+    tx.commit()?;
+    Ok(n)
+}
+
+/// 改名。撞名（同名同类）就**合并**到已有那条上 —— 报错会逼用户先删再改，
+/// 而合并正是用户想要的（「这两个其实是同一件事」）。
+pub fn rename_tag(conn: &mut Connection, tag_id: i64, raw: &str) -> Result<i64, CmdError> {
+    let name = clean_tag_name(raw)?;
+    let kind: Option<String> = conn
+        .query_row("SELECT kind FROM tags WHERE id=?1", [tag_id], |r| r.get(0))
+        .optional()?;
+    let Some(kind) = kind else {
+        return Err(CmdError::new("NOT_FOUND", format!("标签不存在：{tag_id}")));
+    };
+
+    let tx = conn.transaction()?;
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM tags WHERE name=?1 AND kind=?2 AND id<>?3",
+            params![name, kind, tag_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let final_id = match existing {
+        Some(target) => {
+            // 合并：把挂在这一条上的文件挪到目标上，重复的（同一文件两个标签）忽略
+            tx.execute(
+                "INSERT OR IGNORE INTO file_tags(file_id, tag_id, confidence)
+                 SELECT file_id, ?1, confidence FROM file_tags WHERE tag_id=?2",
+                params![target, tag_id],
+            )?;
+            tx.execute("DELETE FROM file_tags WHERE tag_id=?1", [tag_id])?;
+            tx.execute("DELETE FROM tags WHERE id=?1", [tag_id])?;
+            target
+        }
+        None => {
+            tx.execute(
+                "UPDATE tags SET name=?1 WHERE id=?2",
+                params![name, tag_id],
+            )?;
+            tag_id
+        }
+    };
+    tx.commit()?;
+    Ok(final_id)
 }
 
 /// 某个绝对路径属于哪个源区（取最长前缀，多个源区嵌套时不会挑错）
@@ -1502,6 +1796,15 @@ pub fn confirmed_for_migration(conn: &Connection) -> Result<Vec<ConfirmedRow>, C
     for r in rows {
         out.push(r?);
     }
+    // 带标签：待迁移清单里也要能看见标签（T1.1 的第五个出口）
+    {
+        let mut files: Vec<crate::model::FileRow> =
+            out.iter().map(|r| r.file.clone()).collect();
+        attach_tags(conn, &mut files)?;
+        for (slot, file) in out.iter_mut().zip(files) {
+            slot.file = file;
+        }
+    }
     Ok(out)
 }
 
@@ -1671,6 +1974,7 @@ pub fn rows_by_status(
     for r in rows {
         out.push(r?);
     }
+    attach_tags(conn, &mut out)?;
     Ok(out)
 }
 
