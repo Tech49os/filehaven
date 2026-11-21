@@ -14,12 +14,16 @@ import { useRouter } from 'vue-router'
 import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
 import FileList from '../../components/FileList.vue'
+import { useNarrow } from '../../core/useNarrow'
 import { iconOf } from '../../core/format'
 import { livePath } from '../../core/types'
 import type { DirNode, FileRow } from '../../core/types'
 import * as ipc from '../../core/ipc'
 
 const router = useRouter()
+/** 窄窗（≤1240px）：左树收成抽屉（T5.3，与整理台右栏同一手法） */
+const narrow = useNarrow()
+const drawer = ref(false)
 
 /** 左树选中的节点：虚拟视图（pool / parked / uncategorized）或目录 id */
 type Sel = { kind: 'pool' | 'parked' | 'uncat' | 'dir'; id: number | null }
@@ -70,6 +74,7 @@ async function select(sel: Sel) {
   activeId.value = null
   filterQ.value = ''
   filtering.value = false
+  if (narrow.value) drawer.value = false // 抽屉里点完就走
   clearTimeout(filterTimer)
   await loadList()
 }
@@ -184,9 +189,9 @@ async function onSubToggle() {
 </script>
 
 <template>
-  <div class="browser" @click="closeMenu">
-    <!-- 左树 -->
-    <aside class="side">
+  <div class="browser" :class="{ narrow }" @click="closeMenu">
+    <!-- 左树：窄窗时收成抽屉，用「目录」按钮呼出 -->
+    <aside v-if="!narrow || drawer" class="side">
       <div class="vhead">入口</div>
       <div
         class="vrow"
@@ -231,6 +236,9 @@ async function onSubToggle() {
     <!-- 右列表 -->
     <section class="main">
       <header class="bar">
+        <button v-if="narrow" class="btn ghost drawer-toggle" @click.stop="drawer = !drawer">
+          {{ drawer ? '收起' : '目录' }}
+        </button>
         <span class="where">
           {{
             selected.kind === 'pool'
@@ -315,6 +323,31 @@ async function onSubToggle() {
   gap: 14px;
   height: 100%;
   min-height: 0;
+  position: relative;
+}
+
+/* 窄窗（≤1240px）：左树收成抽屉，浮在列表上；与整理台右栏同一套手法（T5.3） */
+.browser.narrow .side {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 218px;
+  z-index: 6;
+  background: var(--c-bg);
+  box-shadow: 10px 0 28px rgba(0, 0, 0, 0.1);
+  animation: drawer-in var(--dur) var(--ease-out) both;
+}
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+.drawer-toggle {
+  flex: 0 0 auto;
+  font-size: 12px;
+  padding: 0 10px;
 }
 
 .side {

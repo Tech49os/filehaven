@@ -35,6 +35,35 @@ BACKDROPS = {
 # 必须达标的前景色。基准取最差的那个底色（窗口背景/侧栏都比白底深）
 CHECKED = ["--c-text", "--c-text-2", "--c-text-3"]
 
+# P3 新页面的专项组合（T5.3）：文字色 × 它实际会落的底色，逐对算。
+# indigo 是标签 chip（topic）的字色，落 --c-indigo-bg 上；
+SPECIAL_PAIRS = [
+    ("--c-indigo(topic chip 字)", "--c-indigo", "--c-indigo-bg"),
+]
+
+# 已知例外（只报告不拦截）：主按钮白字落在 #007aff（iOS 蓝，设计文档定死的品牌色）上是 4.02:1。
+# 白字已是该底色的对比度上限，要过 4.5 只能加深品牌色——那是全项目 7 处一致的既有视觉决策，
+# 不在 P3 范围内动。按 WCAG 大字标准（粗体 14pt ≈ 18.7px）主按钮文字也未达，如实记录。
+KNOWN_EXCEPTIONS = [
+    ("primary 按钮白字(已知例外)", "#ffffff", "--c-primary"),
+]
+
+
+def expand(name: str, css: str) -> str:
+    """token 名解析成不透明色；字面 hex 原样返回。rgba 叠白底换算。"""
+    if name.startswith("#"):
+        return name
+    m = re.search(rf"{re.escape(name)}\s*:\s*rgba?\(([^)]+)\)", css)
+    if not m:
+        return hex_of(name, css)
+    parts = [p.strip() for p in m.group(1).split(",")]
+    r, g, b = (int(float(p)) for p in parts[:3])
+    a = float(parts[3])
+    # 叠白底：c' = c*a + 255*(1-a)
+    bg = 255
+    mix = lambda c: round(c * a + bg * (1 - a))  # noqa: E731
+    return f"#{mix(r):02x}{mix(g):02x}{mix(b):02x}"
+
 
 def hex_of(name: str, css: str) -> str:
     m = re.search(rf"{re.escape(name)}\s*:\s*(#[0-9a-fA-F]{{6}})", css)
@@ -83,7 +112,31 @@ def main() -> int:
         for name, fg, bg, r in bad:
             print(f"  {name} {fg} on {bg} = {r:.2f}")
         return 1
-    print(f"\n全部 ≥ {args.min}:1（WCAG AA 小字）")
+
+    # P3 新页面专项组合
+    print("\n-- P3 新页面组合 --")
+    for label, fg_name, bg_name in SPECIAL_PAIRS:
+        fg = expand(fg_name, css)
+        bg = expand(bg_name, css)
+        r = ratio(fg, bg)
+        print(f"{label:<26}{fg} on {bg} = {r:.2f}")
+        if r < args.min:
+            bad.append((label, fg, bg, r))
+
+    if bad:
+        print(f"\n不达标（< {args.min}:1）：")
+        for item in bad:
+            print(f"  {item[0]} {item[1]} on {item[2]} = {item[3]:.2f}")
+        return 1
+
+    # 已知例外：只报告，不拦截
+    print("\n-- 已知例外（只报告，不拦截）--")
+    for label, fg_name, bg_name in KNOWN_EXCEPTIONS:
+        fg = expand(fg_name, css)
+        bg = expand(bg_name, css)
+        print(f"{label:<26}{fg} on {bg} = {ratio(fg, bg):.2f}")
+
+    print(f"\n全部 ≥ {args.min}:1（WCAG AA 小字；例外见上）")
     return 0
 
 

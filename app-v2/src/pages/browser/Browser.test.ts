@@ -24,6 +24,20 @@ vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
 
 const Browser = (await import('./Browser.vue')).default
 
+// 测试环境当宽窗：happy-dom 自带 matchMedia 且默认窗宽 1024，
+// 会让 useNarrow 判成窄窗、把左树收进抽屉，树的测试就全空了
+beforeEach(() => {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: (q: string) => ({
+      matches: false,
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }),
+  })
+})
+
 function file(over: Partial<FileRow> = {}): FileRow {
   return {
     id: 1,
