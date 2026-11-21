@@ -1,31 +1,31 @@
 # 项目长期约定（文件管家 / 本地智能文件归档客户端）
 
-## 当前阶段：P3 全部完成，已出包 v0.5.0-alpha.1（2026-11-21，分支 `feat/p3`）
+## 当前阶段：P4 全部完成，已出包 v0.6.0-alpha.1（2026-11-21，分支 `feat/p4`，还原点 tag `p3-done`）
 
-P1（骨架闭环）→ P2（推荐变准，v0.4.0-alpha.1）→ **P3（会读会查，当前）** 全部交付。
-P3 功能链：评测口径重建（留一集带标签 29 条 + `--no-tags` 开关）→ 标签可见可编辑
-（FileRow.tags / kind 体系 / tag_locked / 词表管理）→ 浏览页（archived_path + 回填 + 未归类分组）
-→ 检索三入口（Ctrl+K / 高级筛选 / 目录内筛选，一套查询层 5000 份 p95 8ms）
-→ 视觉通道（9b，闸门 8/10 裁决默认开）→ 待定区「让 AI 说明」（插队异步）→ 图片解读开关。
-**ModelGate 三向互斥**（model_gate.rs，目录建议/文本深读/视觉深读共用一把；MODEL_BUSY 不记失败；
-目录建议等闸 70s 拿不到就报错放弃，绝不硬上——8GB 显存两个模型并发会打崩 llama-server）。
-发布件：`发布/文件管家_v0.5.0-alpha.1.exe` + NSIS。
-最终基线：`cargo test` **207** / `vitest` **206**（25 文件）/ `vue-tsc` 0 / e2e **115** 条全过
-（p1 42 / p2 25 / p2r 4 / p3 44）/ contrast 过。
-台账：`P3_执行状态.md`（逐里程碑证据）、`P3_推荐评测报告.md`（A/B：标签路不动 top1、top3 全集 +2.4pp）。
+P1（骨架）→ P2（推荐变准）→ P3（会读会查，v0.5.0-alpha.1）→ **P4（收敛，当前）** 全部交付。
+§14 原定的「增量监听 / 撤销迁移」在 P1/P2 已提前做完，P4 实际交付：
+**重新归类**（浏览页右键，归档区内二次迁移：复制→SHA-256→旧副本进隔离区、撞名错开 `_2`、
+按批次撤销且不回池；`migrations.kind` + `migration_items.old_dir_id` 两列；撤销双保险：
+新副本被改过拒绝、旧位置有同名拒绝、普通批次撤已被重归类的文件自动跳过）
+→ **扫描件视觉解读**（Windows.Data.Pdf 渲染第 1 页 150 DPI 走 9b 视觉通道；真机闸门 **10/10** 默认开；
+渲染失败按 Skip「明确不解读」；与图片解读共用同一开关）→ 三闸复测 4/0/0ms → 出包。
+发布件：`发布/文件管家_v0.6.0-alpha.1.exe`（8.6MB）+ NSIS（3.0MB）。
+最终基线：cargo **215** / vitest **208** / vue-tsc 0 / e2e **125** 条全过
+（p1 42 / p2 25 / p2r 4 / p3 54）/ contrast 过 / `验收清单_P4.md` 12 条全过。
+台账：`P4_执行状态.md`、`验收清单_P4.md`、`P4_实施计划_任务清单_v1.0.md`（范围裁决 + 4 项设计决策）。
 
-**P3 新硬经验（都栽过）**：
-- **release exe 只编 Rust 不重打前端 dist**：`cargo build --release` 后界面还是旧版 ——
-  改完前端必须 `npm run build` 再编 Rust；评测/验收产物要对输出字段，不能只看跑通了。
-- **e2e 抓到 Search.vue watch 漏 tagIds**（点 chip 只亮不重搜）：旧 vitest 侥幸绿是因为
-  先点标签再点类型，类型点击的请求顺带带了 tags。单交互单断言，别让用例里混多个触发源。
-- **happy-dom 有 matchMedia 且默认窗宽 1024**：useNarrow 误判窄窗会藏 DOM ——
-  测试 beforeEach stub matchMedia 成宽窗。
-- **events mock 必须与真实模块同形**（Promise→UnlistenFn），同步返回函数会让组件 `.then` 炸掉。
-- **Stats.currentId 完成后立刻清空再 emit**，否则前端「正在读」永远转圈。
-- **vim 插队队列**：Queue.push_front FIFO+去重；explains 完成态收敛靠 done 前进 OR !running。
-- **git bash 的 PATH 里 `C:/...` 的冒号会砸分隔符**，要用 `/c/...` 形式（tauri build 找不到 cargo 栽过）。
-- **视觉裁决必须人工看原图**（ViewImage），9b 输出「看起来像对的」不算数。
+**P4 新硬经验（都栽过）**：
+- **windows crate 的安全包装可能不全**：0.58 的 `RenderWithOptionsToStreamAsync` 在 vtable 里
+  但没生成安全方法 → 手写 `Interface::vtable` unsafe 调用即可，别赌版本升级。
+- **`GetFileFromPathAsync` 不吃 `..` 相对段**，报错文案「路径过长」极具误导性 → `dunce::canonicalize` 先行。
+- **强杀 cargo 会损坏 `target/debug/incremental`**：rustc 0 CPU 空转假死 → 清 incremental +
+  `CARGO_INCREMENTAL=0`（本机增量编译不可靠，全量编译也只有 ~1 分钟）。
+- **OS 文件事件投递延迟会漂**（实测 >400ms，feat/p3 上同样复现，非代码回归）：
+  watch debounce 测试窗口放宽 400→1200ms；perf 类测试偶发抖动复跑即绿。
+- **改 SELECT 加列必须同步对闭包索引**（migration_items 列序错位栽过一次）。
+- **e2e 断言别用「A 在且 B 不在」的子串判断**：`安全检查报告` 包含 `检查报告`；用 endswith 精确锚定。
+- **run-e2e 默认取发布目录版本号最新的 exe**：版本 bump 前的新构建必须用 `FILEBUTLER_EXE` 指定，
+  否则跑到旧包上假绿；e2e 跑完确认无 filemanager 残留进程再 tauri build（vite 清 dist 会被锁）。
 
 **三条铁律**：① 任何时候出现「不明黑框」，先 grep `Command::new` ——
 `windows_subsystem="windows"` 的 GUI 进程起任何控制台子进程都会弹框；
