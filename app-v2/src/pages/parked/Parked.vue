@@ -14,21 +14,55 @@
  * 别的文件归档过了，开批时算的候选早就不作数。
  */
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Card from '../../components/Card.vue'
 import AppIcon from '../../components/AppIcon.vue'
 import { useAppStore } from '../../stores/app'
 import * as ipc from '../../core/ipc'
+import { onDeepTagProgress } from '../../core/events'
 import { formatSize, kindLabel } from '../../core/format'
 import { humanize, toCmdError } from '../../core/cmdError'
-import type { ParkedItem } from '../../core/types'
+import type { DeepTagStats, ParkedItem } from '../../core/types'
 
 const app = useAppStore()
+const router = useRouter()
 
 const items = ref<ParkedItem[]>([])
 const loading = ref(false)
 const busy = ref<number | null>(null)
 const err = ref<string | null>(null)
+
+// —— 「让 AI 看看这是什么」（P3 T4.5） ——
+const deep = ref<DeepTagStats | null>(null)
+/** 点了还没读到结论的文件（按钮中间态「正在读…」） */
+const explaining = ref<number[]>([])
+let lastDone = 0
+let stopDeep: (() => void) | null = null
+
+const deepOff = computed(() => deep.value !== null && !deep.value.enabled)
+const reading = (id: number) => explaining.value.includes(id)
+
+async function askExplain(it: ParkedItem) {
+  if (reading(it.file.id)) return
+  try {
+    // 不同步等待：立刻回 queued，结论走 deep-tag-progress 事件
+    await ipc.explainFile(it.file.id)
+    explaining.value = [...explaining.value, it.file.id]
+    err.value = null
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  }
+}
+
+/** 静默刷新：不闪 loading，行内 summary 原地更新 */
+async function refreshSilently() {
+  try {
+    items.value = await ipc.listParked()
+  } catch {
+    /* 保持原样，下一轮事件再试 */
+  }
+}
 
 const empty = computed(() => !loading.value && items.value.length === 0)
 
@@ -43,6 +77,35 @@ async function load() {
     loading.value = false
   }
 }
+
+onMounted(async () => {
+  void load()
+  try {
+    const s = await ipc.deepTagStatus()
+    deep.value = s ?? null
+    lastDone = s?.done ?? 0
+  } catch {
+    /* 拿不到状态就当开着，点了真关着会收到后端的明确报错 */
+  }
+  stopDeep = null
+  void onDeepTagProgress((snap) => {
+    deep.value = snap
+    if (explaining.value.length === 0) {
+      lastDone = snap.done
+      return
+    }
+    // 我们在等结论：done 前进或队列空闲 → 该份读完了，收敛等待集并原地刷新
+    if (snap.done > lastDone || !snap.running) {
+      lastDone = snap.done
+      explaining.value = explaining.value.filter((id) => snap.currentId === id)
+      void refreshSilently()
+    }
+  }).then((off) => {
+    stopDeep = off
+  })
+})
+
+onUnmounted(() => stopDeep?.())
 
 /** 三个动作都是写操作：做完刷计数，行从列表里消失（而不是整页闪一下重载） */
 async function act(fileId: number, fn: () => Promise<void>) {
@@ -133,6 +196,18 @@ onMounted(load)
           <span v-else class="you">这份没有足够像的目录，得你自己建一个</span>
 
           <span class="spacer" />
+          <template v-if="deepOff">
+            <span class="you">深度解读已关闭</span>
+            <button class="btn ghost" @click="router.push('/settings')">去开启</button>
+          </template>
+          <button
+            v-else-if="!it.file.summary"
+            class="btn ghost"
+            :disabled="busy !== null || reading(it.file.id)"
+            @click="askExplain(it)"
+          >
+            {{ reading(it.file.id) ? '正在读…' : '让 AI 看看这是什么' }}
+          </button>
           <button class="btn ghost" :disabled="busy !== null" @click="unpark(it)">捞回</button>
           <button class="btn ghost" :disabled="busy !== null" @click="drop(it)">移出</button>
         </div>

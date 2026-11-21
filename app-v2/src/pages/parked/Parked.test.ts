@@ -1,15 +1,37 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import type { FileRow, ParkedItem } from '../../core/types'
+import type { DeepTagStats, FileRow, ParkedItem } from '../../core/types'
 
 const bootState = vi.fn()
 const listParked = vi.fn()
 const assignParked = vi.fn()
 const unpark = vi.fn()
 const dropFile = vi.fn()
+const explainFile = vi.fn()
+const deepTagStatus = vi.fn()
+const push = vi.fn()
 
-vi.mock('../../core/ipc', () => ({ bootState, listParked, assignParked, unpark, dropFile }))
+/** 捕获 deep-tag-progress 的订阅回调，测试里直接调用它模拟后端推事件 */
+let deepCb: ((s: DeepTagStats) => void) | null = null
+
+vi.mock('../../core/ipc', () => ({
+  bootState,
+  listParked,
+  assignParked,
+  unpark,
+  dropFile,
+  explainFile,
+  deepTagStatus,
+}))
+vi.mock('../../core/events', () => ({
+  onDeepTagProgress: vi.fn((cb: (s: DeepTagStats) => void) => {
+    deepCb = cb
+    // 与真实 events.ts 同形：返回 Promise<UnlistenFn>
+    return Promise.resolve(() => {})
+  }),
+}))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
 
 const Parked = (await import('./Parked.vue')).default
 
@@ -52,8 +74,21 @@ function item(over: Partial<ParkedItem> = {}, f: Partial<FileRow> = {}): ParkedI
   }
 }
 
-async function mountWith(rows: ParkedItem[]) {
+async function mountWith(rows: ParkedItem[], deep: DeepTagStats | null = null) {
   listParked.mockResolvedValue(rows)
+  deepTagStatus.mockResolvedValue(
+    deep ?? {
+      done: 0,
+      failed: 0,
+      remaining: 0,
+      current: '',
+      currentId: null,
+      running: false,
+      paused: false,
+      enabled: true,
+      note: null,
+    },
+  )
   bootState.mockResolvedValue({
     configured: true,
     archiveRoot: 'D:/文档归档',
@@ -84,6 +119,10 @@ describe('待定区（P2 T4.3）', () => {
     assignParked.mockReset().mockResolvedValue(undefined)
     unpark.mockReset().mockResolvedValue(undefined)
     dropFile.mockReset().mockResolvedValue(undefined)
+    explainFile.mockReset().mockResolvedValue({ queued: true })
+    deepTagStatus.mockReset()
+    deepCb = null
+    push.mockReset()
   })
 
   it('几份就渲染几行，文件名/类型/大小都在', async () => {
@@ -177,5 +216,96 @@ describe('待定区标签行：与卡片同一套语义', () => {
   it('没标签的文件不渲染标签行（不留空行）', async () => {
     const w = await mountWith([item({}, { tags: [] })])
     expect(w.find('.tags').exists()).toBe(false)
+  })
+})
+
+// ------------------------------------------------ 让 AI 说明（P3 T4.5）
+
+describe('待定区「让 AI 说明」三态', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset()
+    listParked.mockReset()
+    assignParked.mockReset().mockResolvedValue(undefined)
+    unpark.mockReset().mockResolvedValue(undefined)
+    dropFile.mockReset().mockResolvedValue(undefined)
+    explainFile.mockReset().mockResolvedValue({ queued: true })
+    deepTagStatus.mockReset()
+    deepCb = null
+    push.mockReset()
+  })
+
+  function deepStats(over: Partial<DeepTagStats> = {}): DeepTagStats {
+    return {
+      done: 0,
+      failed: 0,
+      remaining: 0,
+      current: '',
+      currentId: null,
+      running: false,
+      paused: false,
+      enabled: true,
+      note: null,
+      ...over,
+    }
+  }
+
+  it('未解读的文件有「让 AI 看看这是什么」按钮；点了变「正在读…」并锁住', async () => {
+    const w = await mountWith([
+      item({}, { id: 1, summary: null, tagLevel: 'basic' }),
+    ])
+    const btn = w.findAll('.acts button').find((b) => b.text().includes('让 AI'))!
+    expect(btn.exists()).toBe(true)
+
+    await btn.trigger('click')
+    await flushPromises()
+    expect(explainFile).toHaveBeenCalledWith(1)
+
+    const reading = w.findAll('.acts button').find((b) => b.text() === '正在读…')!
+    expect(reading.exists()).toBe(true)
+    expect(reading.attributes('disabled')).toBeDefined()
+  })
+
+  it('已经有解读的文件不给按钮（原地显示 summary 就够了）', async () => {
+    const w = await mountWith([item()])
+    const texts = w.findAll('.acts button').map((b) => b.text())
+    expect(texts).not.toContain('让 AI 看看这是什么')
+    expect(texts).toEqual(expect.arrayContaining(['捞回', '移出']))
+  })
+
+  it('深度解读关着时：说「深度解读已关闭」并给「去开启」，不静默失败', async () => {
+    const w = await mountWith(
+      [item({}, { id: 1, summary: null, tagLevel: 'basic' })],
+      deepStats({ enabled: false }),
+    )
+    expect(w.text()).toContain('深度解读已关闭')
+    const go = w.findAll('button').find((b) => b.text() === '去开启')!
+    expect(go.exists()).toBe(true)
+    await go.trigger('click')
+    expect(push).toHaveBeenCalledWith('/settings')
+    expect(explainFile).not.toHaveBeenCalled()
+  })
+
+  it('读到后原地更新：事件推进 done → 静默刷新 → summary 显示、按钮消失', async () => {
+    const w = await mountWith([
+      item({}, { id: 1, summary: null, tagLevel: 'basic' }),
+    ])
+    await w.findAll('.acts button').find((b) => b.text().includes('让 AI'))!.trigger('click')
+    await flushPromises()
+
+    // 后端读完：done 前进、currentId 清空；listParked 这次返回带 summary 的行
+    listParked.mockResolvedValue([
+      item({}, { id: 1, summary: '这是一份安全检查通知。', tagLevel: 'deep' }),
+    ])
+    deepCb!(
+      deepStats({ done: 1, currentId: null, running: false, remaining: 0 }),
+    )
+    await flushPromises()
+
+    expect(w.find('.sum').text()).toBe('这是一份安全检查通知。')
+    const texts = w.findAll('.acts button').map((b) => b.text())
+    expect(texts).not.toContain('让 AI 看看这是什么')
+    expect(texts).not.toContain('正在读…')
+    expect(texts).toEqual(expect.arrayContaining(['捞回', '移出']))
   })
 })

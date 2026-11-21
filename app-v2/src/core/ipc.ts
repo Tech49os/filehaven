@@ -193,6 +193,14 @@ export function setDeepTag(opts: { enabled?: boolean; paused?: boolean }) {
   })
 }
 
+/**
+ * 待定区「让 AI 看看这是什么」（P3 T4.5）：插队解读一份文件。
+ * 立即返回 `{queued:true}`，**不同步等待**——结论走 `deep-tag-progress` 事件。
+ */
+export function explainFile(fileId: number) {
+  return invoke<{ queued: boolean }>('explain_file', { fileId })
+}
+
 // ---------------------------------------------------------------- 监听
 
 /**

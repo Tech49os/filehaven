@@ -302,6 +302,8 @@ export interface DeepTagStats {
   /** 还剩多少份没深读 */
   remaining: number
   current: string
+  /** 正在读哪一份（T4.5）：待定区「正在读…」按钮态靠它收敛 */
+  currentId: number | null
   running: boolean
   paused: boolean
   enabled: boolean

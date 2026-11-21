@@ -394,6 +394,8 @@ pub struct Stats {
     pub remaining: i64,
     /// 正在处理哪一份
     pub current: String,
+    /// 正在处理哪一份的 id（T4.5）：待定区「正在读…」按钮态靠它收敛
+    pub current_id: Option<i64>,
     pub running: bool,
     pub paused: bool,
     pub enabled: bool,
@@ -416,6 +418,8 @@ pub struct Queue {
     pub batch: Arc<Mutex<Vec<i64>>>,
     /// 本轮已失败的文件，别在原地打转
     failed_ids: Arc<Mutex<Vec<i64>>>,
+    /// 用户点「让 AI 说明」插队的 id（T4.5）：worker 取件前先看这里，FIFO
+    explain_front: Arc<Mutex<Vec<i64>>>,
 }
 
 impl Queue {
@@ -429,6 +433,28 @@ impl Queue {
             stats: Arc::new(Mutex::new(Stats::default())),
             batch: Arc::new(Mutex::new(Vec::new())),
             failed_ids: Arc::new(Mutex::new(Vec::new())),
+            explain_front: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// T4.5：把一份文件插到深读队列最前。重复点同一份去重，返回是否真的排上了
+    pub fn push_front(&self, id: i64) -> bool {
+        if let Ok(mut v) = self.explain_front.lock() {
+            if !v.contains(&id) {
+                v.push(id);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 取出下一个插队件（先插先读）。没有就 None，worker 回落到 SQL 取件
+    pub fn pop_front(&self) -> Option<i64> {
+        let mut v = self.explain_front.lock().ok()?;
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.remove(0))
         }
     }
 
@@ -750,6 +776,18 @@ mod tests {
     // T2.6 的 wait_idle 双人锁已被 §3.4 的 ModelGate 取代：
     // 等待/超时/让位的等价断言在 model_gate.rs（second_owner_waits_and_times_out /
     // waiter_gets_gate_after_holder_releases），不再保留两套机制。
+
+    // T4.5：插队队列——去重、先插先读
+    #[test]
+    fn push_front_dedups_and_drains_fifo() {
+        let q = Queue::new(true);
+        assert!(q.push_front(7));
+        assert!(!q.push_front(7), "同一个 id 重复点不许排两次");
+        assert!(q.push_front(9));
+        assert_eq!(q.pop_front(), Some(7), "先插的先读");
+        assert_eq!(q.pop_front(), Some(9));
+        assert_eq!(q.pop_front(), None);
+    }
 
     #[test]
     fn priority_order() {

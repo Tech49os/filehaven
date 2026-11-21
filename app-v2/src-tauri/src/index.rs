@@ -1423,6 +1423,33 @@ pub fn next_deep_job(
     Ok(job)
 }
 
+/// T4.5：按 id 取深读任务（「让 AI 说明」插队用）。
+///
+/// 与 `next_deep_job` 的差别：不管 tag_level（deep 的也允许重读，tag_locked 由
+/// `apply_deep_tag` 兜底），但 missing/skipped 的不给——文件已经出局，取了也是白跑。
+pub fn job_by_id(
+    conn: &Connection,
+    file_id: i64,
+) -> Result<Option<crate::deep_tag::Job>, CmdError> {
+    conn.query_row(
+        "SELECT id, name, abs_path, ext, kind, size FROM files
+         WHERE id=?1 AND status NOT IN ('missing','skipped')",
+        [file_id],
+        |r| {
+            Ok(crate::deep_tag::Job {
+                file_id: r.get(0)?,
+                name: r.get(1)?,
+                abs_path: r.get(2)?,
+                ext: r.get(3)?,
+                kind: r.get(4)?,
+                size: r.get::<_, i64>(5)? as u64,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 // ---------------------------------------------------------------- 人改标签（P3 M1）
 
 /// 标签名清洗：trim → 去首尾 `#` → 截到 20 字（**截断不是报错**：用户多打几个字

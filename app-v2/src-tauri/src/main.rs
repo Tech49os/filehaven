@@ -1706,7 +1706,7 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                 continue;
             }
 
-            // 1) 取下一份（短锁）
+            // 1) 取下一份（短锁）：插队列优先（T4.5「让 AI 说明」），否则按 SQL 优先级
             let picked = {
                 let conn = match lock_db(&state) {
                     Ok(c) => c,
@@ -1715,8 +1715,13 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                         continue;
                     }
                 };
-                let batch = queue.batch.lock().map(|b| b.clone()).unwrap_or_default();
-                let job = index::next_deep_job(&conn, &batch).ok().flatten();
+                let job = match queue.pop_front() {
+                    Some(id) => index::job_by_id(&conn, id).ok().flatten(),
+                    None => {
+                        let batch = queue.batch.lock().map(|b| b.clone()).unwrap_or_default();
+                        index::next_deep_job(&conn, &batch).ok().flatten()
+                    }
+                };
                 let remaining = index::deep_remaining(&conn).unwrap_or(0);
                 let (base, model) = llm_cfg(&conn);
                 (job, remaining, base, model)
@@ -1734,6 +1739,7 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                 if let Ok(mut st) = queue.stats_lock() {
                     st.running = false;
                     st.current.clear();
+                    st.current_id = None;
                 }
                 emit_deep(&app, &queue);
                 std::thread::sleep(Duration::from_millis(1500));
@@ -1749,6 +1755,7 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
             if let Ok(mut st) = queue.stats_lock() {
                 st.running = true;
                 st.current = job.name.clone();
+                st.current_id = Some(job.file_id);
                 st.note = note.clone();
             }
             emit_deep(&app, &queue);
@@ -1846,6 +1853,13 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                 }
             }
 
+            // 完成后立刻清 currentId：待定区的「正在读…」按钮态靠它收敛，
+            // 留着会让按钮永远转圈（T4.5）
+            if let Ok(mut st) = queue.stats_lock() {
+                st.current.clear();
+                st.current_id = None;
+                st.running = false;
+            }
             emit_deep(&app, &queue);
             std::thread::sleep(Duration::from_millis(deep_tag::GAP_MS));
         }
@@ -1853,6 +1867,31 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
 }
 
 const GAP_MS: u64 = deep_tag::GAP_MS;
+
+/// 待定区「让 AI 看看这是什么」（P3 T4.5）：把一份文件插到深读队列最前。
+///
+/// **不同步等待**——单份 60s，同步返回会让人以为卡死。立即回 `{queued:true}`，
+/// 真正的结论走 `deep-tag-progress` 事件（带 currentId），前端按 id 收敛按钮态。
+#[tauri::command]
+async fn explain_file(app: AppHandle, file_id: i64) -> Result<serde_json::Value, CmdError> {
+    let q = app.state::<Arc<deep_tag::Queue>>().inner().clone();
+    // 深读关着时不静默失败：明确报 NOT_CONFIGURED，前端给「去开启」入口
+    if !q.enabled() {
+        return Err(CmdError::new(
+            error::NOT_CONFIGURED,
+            "深度解读未开启，请先到设置里打开",
+        ));
+    }
+    {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::file_row(&conn, file_id)?.ok_or_else(|| {
+            CmdError::new(error::DB, format!("找不到这份文件的记录（id={file_id}）"))
+        })?;
+    }
+    q.push_front(file_id);
+    Ok(serde_json::json!({ "queued": true }))
+}
 
 #[tauri::command]
 async fn deep_tag_status(
@@ -2348,6 +2387,7 @@ fn main() {
             rescore_files,
             deep_tag_status,
             set_deep_tag,
+            explain_file,
             set_watch_enabled,
             add_tag,
             remove_tag,

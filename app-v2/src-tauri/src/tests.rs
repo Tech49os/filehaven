@@ -4356,3 +4356,73 @@ mod p3_m3 {
         assert!(ms <= 100, "1000 份关键词检索要 ≤100ms，实测 {ms}ms");
     }
 }
+
+// ================================================================ P3 M4：待定区「让 AI 说明」（T4.5）
+
+mod p3_m4 {
+    use crate::deep_tag::Queue;
+    use crate::index as db;
+    use crate::model::ScannedFile;
+    use crate::plan::mtime_ms;
+    use crate::tests::index::fresh_db;
+
+    /// 两份 basic 文件：乙比甲新。SQL 取件顺序（mtime DESC）会先拿乙
+    fn seed_two() -> (rusqlite::Connection, Vec<i64>) {
+        let src = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+        let mut scanned = Vec::new();
+        for (i, name) in ["甲.docx", "乙.docx"].iter().enumerate() {
+            let p = src.path().join(name);
+            std::fs::write(&p, b"body text").unwrap();
+            let m = std::fs::metadata(&p).unwrap();
+            scanned.push(ScannedFile {
+                name: name.to_string(),
+                path: p.to_string_lossy().to_string(),
+                ext: "docx".into(),
+                kind: "word".into(),
+                size: m.len(),
+                mtime: mtime_ms(&m) + i as i64 * 1000,
+            });
+        }
+        db::upsert_files(&mut conn, root.id, &scanned).unwrap();
+        let ids: Vec<i64> = db::list_queued(&conn, Some(root.id))
+            .unwrap()
+            .into_iter()
+            .map(|(id, ..)| id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        (conn, ids)
+    }
+
+    /// T4.5：用户点了「让 AI 说明」的文件，下一次取件必须是它，不按 SQL 排序来
+    #[test]
+    fn explain_front_job_beats_sql_order() {
+        let (conn, ids) = seed_two();
+        // 前提：不插队时先取到的是更新的乙
+        let sql_first = db::next_deep_job(&conn, &[]).unwrap().unwrap();
+        assert_eq!(sql_first.file_id, ids[1], "前提不成立：SQL 顺序应先取乙");
+
+        let q = Queue::new(true);
+        q.push_front(ids[0]); // 用户点的是更旧的甲
+        let front = q.pop_front();
+        let picked = match front {
+            Some(id) => db::job_by_id(&conn, id).unwrap(),
+            None => db::next_deep_job(&conn, &[]).unwrap(),
+        };
+        assert_eq!(picked.unwrap().file_id, ids[0], "插队的甲必须先于乙被读");
+    }
+
+    /// 插队目标已出局（skipped）或不存在 → 取不到，worker 静默丢件，不许报错
+    #[test]
+    fn explain_target_out_of_game_returns_none() {
+        let (mut conn, ids) = seed_two();
+        conn.execute(
+            "UPDATE files SET status='skipped' WHERE id=?1",
+            [ids[0]],
+        )
+        .unwrap();
+        assert!(db::job_by_id(&conn, ids[0]).unwrap().is_none());
+        assert!(db::job_by_id(&conn, 999_999).unwrap().is_none());
+    }
+}
