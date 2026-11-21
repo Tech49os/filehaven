@@ -196,6 +196,12 @@ def go(p, hash_route):
 def verify():
     cdp.wait_port(30)
     p = cdp.Page()
+    # 应用默认窗宽 1160 ≤ 1240，useNarrow 会把左树收进抽屉（T5.3 的预期行为）——
+    # e2e 覆盖成宽视口，按完整三栏布局测
+    p.call(
+        'Page.setDeviceMetricsOverride',
+        {'width': 1440, 'height': 900, 'deviceScaleFactor': 0, 'mobile': False},
+    )
     deadline = time.time() + 40
     while time.time() < deadline:
         t = p.text()

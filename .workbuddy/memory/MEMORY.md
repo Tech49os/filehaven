@@ -1,36 +1,31 @@
 # 项目长期约定（文件管家 / 本地智能文件归档客户端）
 
-## 当前阶段：P1 完成 + 四轮实测反馈修复，已出包 v0.3.0-alpha.5（2026-11-20 15:45，分支 `feat/p1`）
+## 当前阶段：P3 全部完成，已出包 v0.5.0-alpha.1（2026-11-21，分支 `feat/p3`）
 
-`设计文档_v1.1_人机协作整理.md` + `设计文档_P1_详细设计_v1.0.md` + `P1_实施计划_任务清单_v1.0.md`（58 任务 9 里程碑）。
-**M0~M8 全部完成并提交**，代码在 `app-v2/`（旧 `app/` 保留不动）。
-功能链：引导（源区/归档区/目录方案）→ 整理台（推荐+理由+键盘流水线）→ 待迁移（分组/冲突/已改拦截）
-→ 三段式迁移（复制/SHA-256/隔离区，每文件一事务）→ 撤销（逆序还原，sha 不符只记该条失败）。
-发布件：`发布/文件管家_v0.3.0-alpha.5.exe`（7.0MB）+ `文件管家_0.3.0-alpha.5_x64-setup.exe`（2.58MB NSIS）。
-验收：`验收清单_P1.md` 14 条全过；隔离库端到端 `app-v2/test/e2e-p1fix.py` 已扩到 **42 条**（对发布版 exe 全过）。
-测试基线：`cargo test` **118** passed、`vitest` **126** passed（19 文件）、`vue-tsc` 零错误、`app:build` 通过。
-汇总文档：`BUG修复汇总_v0.3.0-alpha.5.md`（四轮 15 条反馈的现象/真因/改法/证据）。
+P1（骨架闭环）→ P2（推荐变准，v0.4.0-alpha.1）→ **P3（会读会查，当前）** 全部交付。
+P3 功能链：评测口径重建（留一集带标签 29 条 + `--no-tags` 开关）→ 标签可见可编辑
+（FileRow.tags / kind 体系 / tag_locked / 词表管理）→ 浏览页（archived_path + 回填 + 未归类分组）
+→ 检索三入口（Ctrl+K / 高级筛选 / 目录内筛选，一套查询层 5000 份 p95 8ms）
+→ 视觉通道（9b，闸门 8/10 裁决默认开）→ 待定区「让 AI 说明」（插队异步）→ 图片解读开关。
+**ModelGate 三向互斥**（model_gate.rs，目录建议/文本深读/视觉深读共用一把；MODEL_BUSY 不记失败；
+目录建议等闸 70s 拿不到就报错放弃，绝不硬上——8GB 显存两个模型并发会打崩 llama-server）。
+发布件：`发布/文件管家_v0.5.0-alpha.1.exe` + NSIS。
+最终基线：`cargo test` **207** / `vitest` **206**（25 文件）/ `vue-tsc` 0 / e2e **115** 条全过
+（p1 42 / p2 25 / p2r 4 / p3 44）/ contrast 过。
+台账：`P3_执行状态.md`（逐里程碑证据）、`P3_推荐评测报告.md`（A/B：标签路不动 top1、top3 全集 +2.4pp）。
 
-**alpha.5 修的两件事**（明细见 `.workbuddy/memory/2026-11-20.md` 第四轮）：
-① 待迁移文件多了排版错乱 = 「改名」标签自占一格（4 格变 5 格）+ `.groups` 是滚动 flex 列里
-唯一可压缩的子项被压扁溢出 → 标签进名字格、滚动收敛到 `.scroll`、`.groups{flex:0 0 auto}`；
-② 「还有多少待整理」没入口 → 侧栏整理台加灰底角标 + 顶部「还有 N 份待整理」。
-顺带修 `Counts` camelCase 与前端蛇形不一致导致角标 **NaN**。
-
-**alpha.4 修的七件事**（明细见 `.workbuddy/memory/2026-11-20.md` 第三轮）：
-① 42MB pptx 读不出正文 → `extract` 不再按**文件总大小**放弃，Office 改按 entry 限读 8MB；
-② 已确认卡「文字贴边」实为 `flex:1 0 auto` 撑出大片空白 → 按内容高 + 内边距 20/22；
-③ 0 目录那块 241px 虚线空态 → 一行提示条；④ 进整理台不再重开批次（`ensureLoaded`，
-**空批次不算有批次**）+ 头部只报「待确认 N 份」；⑤ 新目录后 `rescore_files` 重算候选
-+ N 输入框自绘联想下拉；⑥ 确认前可改名（`files.target_name` + `clean_file_name`，
-迁移按新名落盘，原名留隔离区）；⑦ 定位改 `raw_arg` + `/select,"路径"`。
-
-**alpha.3 修的三件事**：① 目录建议能听人话（`suggest_dirs` 加 `hint` + prompt 补一段；
-方案里可改名/删除/新增，设置页补「AI 建议目录」入口，之前配置完成后就再也进不去）；
-② 整理台看得见路径与内容（新增 `preview_file` + `preview.rs`，复用 `extract`；卡片加完整路径、
-打开/定位按钮、正文摘要、图片缩略图走 asset 协议）；③ 窄窗自动收栏（`useNarrow` 1240px，
-右栏变抽屉，卡片 468→760px）。**V2 门槛改成两级**（≥2 份支撑 → 退到 ≥1 份），
-否则小语料会被整份扔掉。明细见 `.workbuddy/memory/2026-11-20.md`。
+**P3 新硬经验（都栽过）**：
+- **release exe 只编 Rust 不重打前端 dist**：`cargo build --release` 后界面还是旧版 ——
+  改完前端必须 `npm run build` 再编 Rust；评测/验收产物要对输出字段，不能只看跑通了。
+- **e2e 抓到 Search.vue watch 漏 tagIds**（点 chip 只亮不重搜）：旧 vitest 侥幸绿是因为
+  先点标签再点类型，类型点击的请求顺带带了 tags。单交互单断言，别让用例里混多个触发源。
+- **happy-dom 有 matchMedia 且默认窗宽 1024**：useNarrow 误判窄窗会藏 DOM ——
+  测试 beforeEach stub matchMedia 成宽窗。
+- **events mock 必须与真实模块同形**（Promise→UnlistenFn），同步返回函数会让组件 `.then` 炸掉。
+- **Stats.currentId 完成后立刻清空再 emit**，否则前端「正在读」永远转圈。
+- **vim 插队队列**：Queue.push_front FIFO+去重；explains 完成态收敛靠 done 前进 OR !running。
+- **git bash 的 PATH 里 `C:/...` 的冒号会砸分隔符**，要用 `/c/...` 形式（tauri build 找不到 cargo 栽过）。
+- **视觉裁决必须人工看原图**（ViewImage），9b 输出「看起来像对的」不算数。
 
 **三条铁律**：① 任何时候出现「不明黑框」，先 grep `Command::new` ——
 `windows_subsystem="windows"` 的 GUI 进程起任何控制台子进程都会弹框；
