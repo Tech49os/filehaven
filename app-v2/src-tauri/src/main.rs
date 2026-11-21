@@ -1746,6 +1746,25 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                 continue;
             };
 
+            // T4.6：图片任务的口径。kind=image 的送/跳只由 ext/size 决定，不用抽正文就能判
+            let vision_job = job.kind == "image"
+                && matches!(
+                    deep_tag::should_deep_tag(&job.kind, &job.ext, 1, job.size),
+                    deep_tag::Decision::Send { .. }
+                );
+
+            if job.kind == "image" && !queue.vision_enabled() {
+                // 图片解读关着：不读、不占模型闸、不算这份文件失败（本轮跳过，
+                // 重新打开时 clear_failed 会再给机会）。计一次 skipped 让设置页看得见
+                queue.mark_failed(job.file_id);
+                if let Ok(mut st) = queue.stats_lock() {
+                    st.vision_skipped += 1;
+                }
+                emit_deep(&app, &queue);
+                std::thread::sleep(Duration::from_millis(GAP_MS));
+                continue;
+            }
+
             if queue.already_failed(job.file_id) {
                 // 本轮已经失败过：跳过它，别在原地打转（重启后会再给一次机会）
                 std::thread::sleep(Duration::from_millis(GAP_MS));
@@ -1805,6 +1824,12 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                             if let Ok(mut st) = queue.stats_lock() {
                                 st.done += 1;
                                 st.note = None;
+                                if vision_job {
+                                    st.vision_done += 1;
+                                } else if job.kind == "image" {
+                                    // 图片但被 Skip（格式不支持/超大）：模型根本没跑
+                                    st.vision_skipped += 1;
+                                }
                             }
                         }
                         Err(e) => {
@@ -1917,6 +1942,7 @@ async fn set_deep_tag(
     queue: tauri::State<'_, Arc<deep_tag::Queue>>,
     enabled: Option<bool>,
     paused: Option<bool>,
+    vision_enabled: Option<bool>,
 ) -> Result<deep_tag::Stats, CmdError> {
     let q = queue.inner().clone();
     if let Some(e) = enabled {
@@ -1924,6 +1950,12 @@ async fn set_deep_tag(
         let state = app.state::<AppState>();
         let conn = lock_db(&state)?;
         index::set_setting(&conn, "deep_tag_enabled", if e { "1" } else { "0" })?;
+    }
+    if let Some(v) = vision_enabled {
+        q.set_vision_enabled(v);
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::set_setting(&conn, "deep_vision_enabled", if v { "1" } else { "0" })?;
     }
     if let Some(p) = paused {
         q.set_paused(p);
@@ -2327,6 +2359,16 @@ fn main() {
                 .map(|v| v != "0")
                 .unwrap_or(true);
             let queue = Arc::new(deep_tag::Queue::new(enabled));
+            // 图片解读开关（T4.6）：默认值由 T4.3 视觉闸门裁决，用户可改（写库）
+            let vision = index::get_setting(
+                &app.state::<AppState>().db.lock().unwrap(),
+                "deep_vision_enabled",
+            )
+            .ok()
+            .flatten()
+            .map(|v| v != "0")
+            .unwrap_or(deep_tag::VISION_DEFAULT_ON);
+            queue.set_vision_enabled(vision);
             app.manage(queue.clone());
             spawn_deep_tag(app.handle().clone(), queue);
 

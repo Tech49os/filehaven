@@ -1,0 +1,141 @@
+{
+  "model": "qwen3.5:9b",
+  "count": 10,
+  "usable_raw": 8,
+  "verdict": "可用 8/10（≥6 达标）：8 张产出的标签逐条对照原图无编造（存疑的 2 张已人工看图核实）；2 张 HTTP 400（Ollama 拒绝个别编码的图，按不可用计）。结论：图片解读默认开启。",
+  "results": [
+    {
+      "file": "C:/Users/kingb/Desktop/归档/安环大屏1.png",
+      "name": "安环大屏1.png",
+      "size": 2931048,
+      "ms": 44474,
+      "ok": true,
+      "tags": [
+        "数据大屏",
+        "实验室管理",
+        "可视化平台"
+      ],
+      "summary": "这是一张智能实验室可视化平台的系统截图，展示了人员、项目、安全及能耗等关键指标。",
+      "judgment": "可用：智能实验室可视化大屏截图，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/安环大屏2.jpg",
+      "name": "安环大屏2.jpg",
+      "size": 228567,
+      "ms": 26563,
+      "ok": true,
+      "tags": [
+        "智能实验室",
+        "能耗监控",
+        "环境安全",
+        "可视化平台"
+      ],
+      "summary": "这是一张智能实验室可视化平台的系统截图，展示能耗、环境监测及三废数据。",
+      "judgment": "可用：同系列大屏，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/安环大屏3.jpg",
+      "name": "安环大屏3.jpg",
+      "size": 224004,
+      "ms": 27721,
+      "ok": true,
+      "tags": [
+        "智能实验室",
+        "可视化平台",
+        "安全监控",
+        "数据大屏"
+      ],
+      "summary": "这是一张展示智能实验室可视化平台的系统截图，包含气瓶、危化品及人员等安全数据。",
+      "judgment": "可用：同系列大屏，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/安环大屏4.png",
+      "name": "安环大屏4.png",
+      "size": 2978376,
+      "ms": 32413,
+      "ok": true,
+      "tags": [
+        "系统截图",
+        "可视化大屏",
+        "智能实验室"
+      ],
+      "summary": "这是一张智能实验室可视化平台的系统截图，展示了园区概况、能耗监测及环境监测等数据。",
+      "judgment": "可用：同系列大屏，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/油化厂.png",
+      "name": "油化厂.png",
+      "size": 4203291,
+      "ms": 30137,
+      "ok": true,
+      "tags": [
+        "可视化平台",
+        "罐体管理",
+        "预警监控",
+        "数据看板"
+      ],
+      "summary": "承装物信息管理可视化平台截图，展示罐体动态、周转天数、证书预警及区域追踪等数据。",
+      "judgment": "可用：承装物信息管理可视化平台截图，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/20260917-185927.jpg",
+      "name": "20260917-185927.jpg",
+      "size": 1641264,
+      "ms": 21437,
+      "ok": true,
+      "tags": [
+        "智能工厂",
+        "AI 智能体",
+        "工业数字化",
+        "自动化系统"
+      ],
+      "summary": "展示智能工厂智匠智能体的功能模块与交互界面的宣传图。",
+      "judgment": "可用：已人工看图核实——「智能工厂智匠智能体」宣传图，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/lchkhneagjjojibd.png",
+      "name": "lchkhneagjjojibd.png",
+      "size": 379722,
+      "ms": 18569,
+      "ok": true,
+      "tags": [
+        "价格表",
+        "智能工厂",
+        "服务报价",
+        "数字化系统"
+      ],
+      "summary": "智能工厂数字化系统深化建设项目服务价格总表，含6项服务及含税单价。",
+      "judgment": "可用：已人工看图核实——「智能工厂数字化系统深化建设项目服务价格总表」，标签命中"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/下载/20260908/缩小图片.png",
+      "name": "缩小图片.png",
+      "size": 1242615,
+      "ok": false,
+      "error": "HTTPError: HTTP Error 400: Bad Request",
+      "judgment": "不可用：HTTP 400（Ollama 拒绝该图，按失败计）"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/下载/20260908/苹果风格后台.jpg",
+      "name": "苹果风格后台.jpg",
+      "size": 679788,
+      "ok": false,
+      "error": "HTTPError: HTTP Error 400: Bad Request",
+      "judgment": "不可用：HTTP 400（Ollama 拒绝该图，按失败计）"
+    },
+    {
+      "file": "C:/Users/kingb/Desktop/归档/下载/20260908/下载.png",
+      "name": "下载.png",
+      "size": 31302,
+      "ms": 9869,
+      "ok": true,
+      "tags": [
+        "图表",
+        "AI模型对比"
+      ],
+      "summary": "这是一张展示多个大语言模型在五项能力上雷达对比的图表。",
+      "judgment": "可用：LLM 能力雷达对比图表，标签命中"
+    }
+  ],
+  "verdict_usable": 8
+}

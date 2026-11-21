@@ -155,6 +155,16 @@ async function togglePauseDeep() {
   }
 }
 
+/** 图片解读独立开关（P3 T4.6）：与主开关分开写库，关着时图片任务直接跳过 */
+async function toggleVision() {
+  const on = !(deep.value?.visionEnabled ?? true)
+  try {
+    deep.value = await ipc.setDeepTag({ visionEnabled: on })
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  }
+}
+
 // ---------------------------------------------------------------- 新文件监听（P2 T3.7）
 
 const watchBusy = ref(false)
@@ -333,6 +343,18 @@ async function removeRoot(id: number) {
         <i class="dot" :class="{ on: deep?.enabled && !deep?.paused && !deep?.note }" />
         <span>{{ deep?.enabled ? (deep?.paused ? '已暂停' : '运行中') : '已关闭' }}</span>
         <span v-if="deep?.current" class="dim mono ellipsis">{{ deep.current }}</span>
+      </div>
+      <div class="row">
+        <i class="dot" :class="{ on: deep?.visionEnabled }" />
+        <span>图片解读{{ deep?.visionEnabled ? '' : '（已关）' }}</span>
+        <span class="dim">
+          较慢，单张 15~30 秒 · 已读 {{ deep?.visionDone ?? 0 }} 张 · 跳过
+          {{ deep?.visionSkipped ?? 0 }} 张
+        </span>
+        <span class="spacer" />
+        <button class="btn ghost" @click="toggleVision">
+          {{ deep?.visionEnabled ? '关掉' : '打开' }}
+        </button>
       </div>
       <p class="hint mono">
         完成 {{ deep?.done ?? 0 }} / {{ deepTotal }} · 失败 {{ deep?.failed ?? 0 }} ·

@@ -399,14 +399,26 @@ pub struct Stats {
     pub running: bool,
     pub paused: bool,
     pub enabled: bool,
+    /// 图片已解读张数（T4.6）：走视觉通道跑完的
+    pub vision_done: usize,
+    /// 图片被跳过的次数（T4.6）：格式不支持 / 超大 / 用户把图片解读关了
+    pub vision_skipped: usize,
+    /// 图片解读现在开没开（T4.6）
+    pub vision_enabled: bool,
     /// 队列为什么停着（模型未响应 / 用户关掉）
     pub note: Option<String>,
 }
+
+/// 「图片解读」的出厂默认值 —— 由 T4.3 视觉闸门裁决：
+/// 10 张真实语料图 ≥6 张可用才默认开，否则默认关（用户可手动打开）。
+pub const VISION_DEFAULT_ON: bool = true;
 
 /// 队列句柄（放进 AppState，前端与目录建议都要摸它）
 pub struct Queue {
     enabled: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    /// 图片解读开关（T4.6）：关着时图片任务直接跳过，不占模型闸
+    vision_enabled: Arc<AtomicBool>,
     /// 目录建议要独占显存时置 true，队列让路（P2 语义不动；占闸期间队列也会让路，双保险）
     pub paused_for_suggest: Arc<AtomicBool>,
     /// 模型闸（P3 §3.4）：目录建议 / 文本深读 / 视觉深读 三向互斥。
@@ -427,6 +439,7 @@ impl Queue {
         Self {
             enabled: Arc::new(AtomicBool::new(enabled)),
             paused: Arc::new(AtomicBool::new(false)),
+            vision_enabled: Arc::new(AtomicBool::new(VISION_DEFAULT_ON)),
             paused_for_suggest: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(ModelGate::default()),
             stop: Arc::new(AtomicBool::new(false)),
@@ -462,6 +475,7 @@ impl Queue {
         let mut s = self.stats.lock().map(|g| g.clone()).unwrap_or_default();
         s.paused = self.paused.load(Ordering::Relaxed);
         s.enabled = self.enabled.load(Ordering::Relaxed);
+        s.vision_enabled = self.vision_enabled.load(Ordering::Relaxed);
         s
     }
 
@@ -479,6 +493,26 @@ impl Queue {
 
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
+    }
+
+    /// 图片解读开关（T4.6）。打开时把上一轮的失败清掉——
+    /// 关着的时候图片任务按「本轮失败」记账才能让队列往前走，重开后该给机会
+    pub fn set_vision_enabled(&self, on: bool) {
+        self.vision_enabled.store(on, Ordering::Relaxed);
+        if on {
+            self.clear_failed();
+        }
+    }
+
+    pub fn vision_enabled(&self) -> bool {
+        self.vision_enabled.load(Ordering::Relaxed)
+    }
+
+    /// 本轮失败名单清空（重开图片解读时用）
+    pub fn clear_failed(&self) {
+        if let Ok(mut v) = self.failed_ids.lock() {
+            v.clear();
+        }
     }
 
     pub fn stop(&self) {

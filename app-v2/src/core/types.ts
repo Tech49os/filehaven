@@ -309,6 +309,12 @@ export interface DeepTagStats {
   enabled: boolean
   /** 停下来的原因（如「队列已停：模型未响应」） */
   note: string | null
+  /** 图片已解读张数（T4.6） */
+  visionDone: number
+  /** 图片被跳过的次数（T4.6）：格式不支持 / 超大 / 图片解读关着 */
+  visionSkipped: number
+  /** 图片解读现在开没开（T4.6） */
+  visionEnabled: boolean
 }
 
 // ---------------------------------------------------------------- 事件

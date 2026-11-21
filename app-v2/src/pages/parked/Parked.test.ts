@@ -87,6 +87,9 @@ async function mountWith(rows: ParkedItem[], deep: DeepTagStats | null = null) {
       paused: false,
       enabled: true,
       note: null,
+      visionDone: 0,
+      visionSkipped: 0,
+      visionEnabled: true,
     },
   )
   bootState.mockResolvedValue({
@@ -246,6 +249,9 @@ describe('待定区「让 AI 说明」三态', () => {
       paused: false,
       enabled: true,
       note: null,
+      visionDone: 0,
+      visionSkipped: 0,
+      visionEnabled: true,
       ...over,
     }
   }

@@ -186,10 +186,16 @@ export function deepTagStatus() {
 }
 
 /** 开关 / 暂停（`enabled` 会写库，重启后还是用户的意愿） */
-export function setDeepTag(opts: { enabled?: boolean; paused?: boolean }) {
+export function setDeepTag(opts: {
+  enabled?: boolean
+  paused?: boolean
+  /** 图片解读独立开关（T4.6），写库 */
+  visionEnabled?: boolean
+}) {
   return invoke<DeepTagStats>('set_deep_tag', {
     enabled: opts.enabled ?? null,
     paused: opts.paused ?? null,
+    visionEnabled: opts.visionEnabled ?? null,
   })
 }
 

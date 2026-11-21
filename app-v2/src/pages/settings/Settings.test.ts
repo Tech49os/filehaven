@@ -314,3 +314,62 @@ describe('设置页 · 标签词表', () => {
     expect(w.findAll('.tagrow').length).toBe(1)
   })
 })
+
+// ------------------------------------------------ 图片解读开关（P3 T4.6）
+
+describe('设置页 · 图片解读开关', () => {
+  const stats = (over: Record<string, unknown> = {}) => ({
+    done: 12,
+    failed: 0,
+    remaining: 30,
+    current: '',
+    running: false,
+    paused: false,
+    enabled: true,
+    note: null,
+    visionDone: 5,
+    visionSkipped: 2,
+    visionEnabled: true,
+    ...over,
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset().mockResolvedValue(boot([{ id: 1, path: 'C:/桌面', enabled: true }]))
+    listDirs.mockReset().mockResolvedValue([])
+    diskFreeGb.mockReset().mockResolvedValue(120.5)
+    deepTagStatus.mockReset().mockResolvedValue(stats())
+    setDeepTag.mockReset()
+  })
+
+  it('开关写库：点「关掉」传 visionEnabled=false，点「打开」传 true', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+
+    setDeepTag.mockResolvedValueOnce(stats({ visionEnabled: false }))
+    await btn(w, '关掉')!.trigger('click')
+    await flushPromises()
+    expect(setDeepTag).toHaveBeenCalledWith({ visionEnabled: false })
+    expect(w.text()).toContain('（已关）')
+
+    setDeepTag.mockResolvedValueOnce(stats({ visionEnabled: true }))
+    await btn(w, '打开')!.trigger('click')
+    await flushPromises()
+    expect(setDeepTag).toHaveBeenCalledWith({ visionEnabled: true })
+  })
+
+  it('统计数字：已读/跳过张数亮出来，不藏起来', async () => {
+    deepTagStatus.mockResolvedValueOnce(stats({ visionDone: 7, visionSkipped: 3 }))
+    const w = mount(Settings)
+    await flushPromises()
+    expect(w.text()).toContain('已读 7 张')
+    expect(w.text()).toContain('跳过 3 张')
+  })
+
+  it('模型未响应时把 note 原样亮出来，不静默', async () => {
+    deepTagStatus.mockResolvedValueOnce(stats({ note: '队列已停：模型未响应' }))
+    const w = mount(Settings)
+    await flushPromises()
+    expect(w.text()).toContain('队列已停：模型未响应')
+  })
+})
