@@ -693,6 +693,46 @@ async fn rename_tag(app: AppHandle, tag_id: i64, name: String) -> Result<i64, Cm
     index::rename_tag(&mut conn, tag_id, &name)
 }
 
+/// 浏览页目录树（P3 T2.4）：归档目录 + 直属已迁移份数
+#[tauri::command]
+async fn browse_tree(app: AppHandle) -> Result<Vec<model::DirNode>, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::browse_tree(&conn)
+    })
+    .await
+    .map_err(|e| CmdError::new("JOIN_ERROR", e.to_string()))?
+}
+
+/// 浏览页列表（P3 T2.3）：`dirId=None` 是「未归类」分组
+#[tauri::command]
+async fn browse_dir(
+    app: AppHandle,
+    dir_id: Option<i64>,
+    include_subdirs: bool,
+) -> Result<Vec<model::FileRow>, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::browse_dir(&conn, dir_id, include_subdirs)
+    })
+    .await
+    .map_err(|e| CmdError::new("JOIN_ERROR", e.to_string()))?
+}
+
+/// 整理池全量（P3 T2.5：浏览页「待整理」虚拟视图，只读）
+#[tauri::command]
+async fn pool_rows(app: AppHandle) -> Result<Vec<model::FileRow>, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        index::pool_rows(&conn)
+    })
+    .await
+    .map_err(|e| CmdError::new("JOIN_ERROR", e.to_string()))?
+}
+
 // ---------------------------------------------------------------- 迁移
 
 /// 归档根（没有就 NOT_CONFIGURED —— 迁移类命令一律靠它）
@@ -1038,7 +1078,8 @@ async fn preview_file(app: AppHandle, file_id: i64) -> Result<preview::Preview, 
 
     tauri::async_runtime::spawn_blocking(move || {
         preview::make(
-            Path::new(&row.abs_path),
+            // 已归档的文件源路径已进隔离区，读归档后的真实路径（P3 T2.1）
+            Path::new(row.live_path()),
             &row.kind,
             &row.ext,
             row.size.max(0) as u64,
@@ -2115,7 +2156,15 @@ fn main() {
                     .unwrap_or_else(|_| PathBuf::from(".")),
             };
             std::fs::create_dir_all(&dir)?;
-            let conn = index::open(&dir.join("index.db")).map_err(|e| e.to_string())?;
+            let mut conn = index::open(&dir.join("index.db")).map_err(|e| e.to_string())?;
+
+            // 老数据回填（P3 T2.2）：archived_path 列是 P3 才有的，已迁移的行从
+            // migration_items 反推一次。只跑一次（settings 标记位），失败不挡启动。
+            match index::backfill_archived_paths(&mut conn) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("backfill archived_path: {n} rows"),
+                Err(e) => eprintln!("backfill archived_path failed: {e}"),
+            }
 
             // 图片缩略图走 asset 协议：把已配置的源区（和归档区）加进读取白名单。
             // 不写死 `**` —— 白名单越小，将来前端万一被注入也有边界。
@@ -2207,7 +2256,10 @@ fn main() {
             remove_tag,
             list_tags,
             delete_tag,
-            rename_tag
+            rename_tag,
+            browse_tree,
+            browse_dir,
+            pool_rows
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

@@ -208,8 +208,20 @@ pub struct FileRow {
     pub tag_level: String,
     /// 人改过标签：队列重跑只写 summary，不覆盖标签（T1.4）
     pub tag_locked: bool,
+    /// 迁移成功后的落盘路径（NULL = 还没归档）；源文件已进隔离区，`abs_path` 对已迁移文件是死路
+    pub archived_path: Option<String>,
+    /// 归档目录 id（NULL = 未归档 / 目录后来被删了）
+    pub archive_dir_id: Option<i64>,
     /// 标签，按 `type → time → topic → keyword → user` 排好（T1.1，批量补，不进主查询）
     pub tags: Vec<TagRef>,
+}
+
+impl FileRow {
+    /// 读路径统一走这里（P3 T2.1）：已归档用归档路径，其余用源路径。
+    /// `open_path` / `reveal_path` / `preview_file` / 缩略图一律传这个，不许各处手写 `??`。
+    pub fn live_path(&self) -> &str {
+        self.archived_path.as_deref().unwrap_or(&self.abs_path)
+    }
 }
 
 /// 一条候选目录（reason 非空，服务端保证）

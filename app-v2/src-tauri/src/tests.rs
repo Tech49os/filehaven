@@ -3759,3 +3759,352 @@ mod p3_m1 {
         assert_eq!(dup, 0, "UNIQUE(name,kind) 不许出现重复");
     }
 }
+
+// ================================================================ P3 M2 浏览页地基
+
+mod p3_m2 {
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::{NewAssignment, ScannedFile};
+    use crate::plan::mtime_ms;
+    use crate::tests::index::fresh_db;
+    use std::path::Path;
+
+    struct Seeded {
+        _src: tempfile::TempDir,
+        _arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        dir_id: i64,
+        ids: Vec<i64>,
+        arc_path: std::path::PathBuf,
+        src_path: std::path::PathBuf,
+    }
+
+    /// 与 migration_flow::seed 同构：真实目录 + 3 份已确认文件，都归到同一个目录
+    fn seed(extra: &[(&str, &[u8])]) -> Seeded {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+
+        let mut names: Vec<(String, Vec<u8>)> = vec![
+            ("甲.docx".into(), b"aaa".to_vec()),
+            ("乙.xlsx".into(), b"bbbb".to_vec()),
+            ("丙.pdf".into(), b"ccccc".to_vec()),
+        ];
+        for (n, b) in extra {
+            names.push((n.to_string(), b.to_vec()));
+        }
+        let mut scanned = Vec::new();
+        for (name, bytes) in &names {
+            let p = src.path().join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let m = std::fs::metadata(&p).unwrap();
+            scanned.push(ScannedFile {
+                name: name.clone(),
+                path: p.to_string_lossy().to_string(),
+                ext: name.rsplit('.').next().unwrap_or("").to_string(),
+                kind: "word".into(),
+                size: m.len(),
+                mtime: mtime_ms(&m),
+            });
+        }
+        db::upsert_files(&mut conn, root.id, &scanned).unwrap();
+
+        let dir = db::insert_dir(&conn, None, "安全检查", "user").unwrap();
+        let ids: Vec<i64> = db::list_queued(&conn, Some(root.id))
+            .unwrap()
+            .into_iter()
+            .map(|(id, ..)| id)
+            .collect();
+        for id in &ids {
+            db::force_status(&conn, *id, db::Status::Confirmed).unwrap();
+            db::insert_assignment(
+                &conn,
+                &NewAssignment {
+                    file_id: *id,
+                    batch_id: None,
+                    target_dir_id: Some(dir.id),
+                    origin: "user_picked".into(),
+                    confidence: None,
+                    reason: None,
+                    decision: "accepted".into(),
+                    decided_at: db::now_ms(),
+                },
+            )
+            .unwrap();
+        }
+
+        Seeded {
+            src_path: src.path().to_path_buf(),
+            arc_path: arc.path().to_path_buf(),
+            _src: src,
+            _arc: arc,
+            conn,
+            dir_id: dir.id,
+            ids,
+        }
+    }
+
+    /// 迁移 3 份并返回（迁移完的 seeded）
+    fn migrated(extra: &[(&str, &[u8])]) -> Seeded {
+        let mut s = seed(extra);
+        mig::apply(&mut s.conn, &s.arc_path, &[], &mut |_, _, _, _| {}).unwrap();
+        s
+    }
+
+    // T2.1 ①：迁移 1 批 → archived_path == dst、archive_dir_id 正确
+    #[test]
+    fn apply_writes_archived_path_and_dir_id() {
+        let s = migrated(&[]);
+        for id in &s.ids {
+            let row = db::file_row(&s.conn, *id).unwrap().unwrap();
+            assert_eq!(row.status, "migrated");
+            let dst = row.archived_path.as_deref().expect("archived_path 必须落库");
+            assert!(
+                Path::new(dst).starts_with(&s.arc_path),
+                "归档路径要在归档根下：{dst}"
+            );
+            assert!(
+                Path::new(dst).is_file(),
+                "归档路径必须真实存在（这就是浏览页能打开文件的前提）：{dst}"
+            );
+            assert_eq!(row.archive_dir_id, Some(s.dir_id));
+            // live_path 已归档走归档路径
+            assert_eq!(row.live_path(), dst);
+        }
+    }
+
+    // T2.1 ②：live_path() 对未迁移文件返回源路径
+    #[test]
+    fn live_path_falls_back_to_source() {
+        let s = seed(&[]);
+        for id in &s.ids {
+            let row = db::file_row(&s.conn, *id).unwrap().unwrap();
+            assert!(row.archived_path.is_none());
+            assert_eq!(row.live_path(), row.abs_path, "没迁移就用源路径");
+        }
+    }
+
+    // T2.1 ③：没参与迁移的文件两列为 NULL（迁移失败路径在 migration_flow 已覆盖状态机，
+    // 这里锁「未迁移者不带归档路径」这条不变量）
+    #[test]
+    fn unmigrated_files_have_null_archive_columns() {
+        let s = migrated(&[]);
+        // 再放一份新扫描的 queued 文件，它没参与迁移
+        let root = db::list_source_roots(&s.conn).unwrap().remove(0);
+        let queued = db::insert_test_file(&s.conn, root.id, "没确认.docx", db::Status::Queued)
+            .unwrap();
+        let row = db::file_row(&s.conn, queued).unwrap().unwrap();
+        assert_ne!(row.status, "migrated");
+        assert!(row.archived_path.is_none(), "未迁移不许有归档路径");
+        assert!(row.archive_dir_id.is_none());
+    }
+
+    // T2.1 ④：迁移后 live_path 指向的文件就是原内容（预览/打开由此可用）
+    #[test]
+    fn migrated_live_path_reads_back_original_bytes() {
+        let s = migrated(&[]);
+        let row = db::file_row(&s.conn, s.ids[0]).unwrap().unwrap();
+        let bytes = std::fs::read(row.live_path()).unwrap();
+        assert_eq!(bytes, b"aaa", "归档路径读回来的就是原文件内容");
+    }
+
+    // T2.1 ⑤：撤销迁移 → 两列清空（不然浏览页指向隔离区里的旧路径）
+    #[test]
+    fn undo_clears_archive_columns() {
+        let mut s = migrated(&[]);
+        let mid = db::latest_migration(&s.conn).unwrap().unwrap().id;
+        let rep = mig::undo(&mut s.conn, &s.arc_path, mid, &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(rep.restored, 3, "{:?}", rep.failed);
+        for id in &s.ids {
+            let row = db::file_row(&s.conn, *id).unwrap().unwrap();
+            assert_eq!(row.status, "confirmed");
+            assert!(row.archived_path.is_none(), "撤销后归档路径必须清掉");
+            assert!(row.archive_dir_id.is_none());
+            assert_eq!(row.live_path(), row.abs_path);
+        }
+    }
+
+    /// 直接往库里造一条「老数据」：已迁移但 archived_path 为空，带一条 ok 的 migration_items
+    fn plant_old_row(conn: &rusqlite::Connection, file_id: i64, dst: &str, dir_deleted: bool) {
+        conn.execute("UPDATE files SET status='migrated' WHERE id=?1", rusqlite::params![file_id])
+            .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO migrations(id, status, file_count, bytes) VALUES(1, 'done', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO migration_items(migration_id, file_id, src_path, dst_path, result)
+             VALUES(1, ?1, 'C:/old/src', ?2, 'ok')",
+            rusqlite::params![file_id, dst],
+        )
+        .unwrap();
+        if !dir_deleted {
+            // 让归档目录真实存在
+            conn.execute(
+                "INSERT OR IGNORE INTO archive_dirs(id, name, rel_path, depth, origin, created_at)
+                 VALUES(9, '旧目录', '旧目录', 1, 'user', 0)",
+                [],
+            )
+            .unwrap();
+        }
+    }
+
+    // T2.2 ①：回填 2 份
+    #[test]
+    fn backfill_fills_two_rows() {
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f1 = db::insert_test_file(&conn, root.id, "旧一.docx", db::Status::Queued).unwrap();
+        let f2 = db::insert_test_file(&conn, root.id, "旧二.docx", db::Status::Queued).unwrap();
+        plant_old_row(&conn, f1, "旧目录/旧一.docx", false);
+        plant_old_row(&conn, f2, "旧目录/旧二.docx", false);
+
+        let n = db::backfill_archived_paths(&mut conn).unwrap();
+        assert_eq!(n, 2);
+        let r1 = db::file_row(&conn, f1).unwrap().unwrap();
+        assert_eq!(r1.archived_path.as_deref(), Some("旧目录/旧一.docx"));
+        assert_eq!(r1.archive_dir_id, Some(9), "按最长前缀反推出目录 id");
+        let r2 = db::file_row(&conn, f2).unwrap().unwrap();
+        assert_eq!(r2.archive_dir_id, Some(9));
+    }
+
+    // T2.2 ②：目录已删的那份留 NULL（浏览页归「未归类」，不隐藏）
+    #[test]
+    fn backfill_leaves_null_when_dir_gone() {
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f = db::insert_test_file(&conn, root.id, "孤儿.docx", db::Status::Queued).unwrap();
+        plant_old_row(&conn, f, "已删目录/孤儿.docx", true);
+
+        let n = db::backfill_archived_paths(&mut conn).unwrap();
+        assert_eq!(n, 1, "回填还是要跑（至少把 archived_path 写上）");
+        let row = db::file_row(&conn, f).unwrap().unwrap();
+        assert_eq!(row.archived_path.as_deref(), Some("已删目录/孤儿.docx"));
+        assert!(row.archive_dir_id.is_none(), "目录没了就归未归类");
+    }
+
+    // T2.2 ③：重复执行不改已有值（幂等），且第二次返回 0
+    #[test]
+    fn backfill_is_idempotent() {
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f = db::insert_test_file(&conn, root.id, "幂等.docx", db::Status::Queued).unwrap();
+        plant_old_row(&conn, f, "旧目录/幂等.docx", false);
+
+        assert_eq!(db::backfill_archived_paths(&mut conn).unwrap(), 1);
+        // 改个值再跑：不该被覆盖
+        conn.execute(
+            "UPDATE files SET archived_path='手工改过的路径' WHERE id=?1",
+            [f],
+        )
+        .unwrap();
+        assert_eq!(db::backfill_archived_paths(&mut conn).unwrap(), 0, "第二次必须 0 行");
+        let row = db::file_row(&conn, f).unwrap().unwrap();
+        assert_eq!(row.archived_path.as_deref(), Some("手工改过的路径"));
+    }
+
+    // T2.3 ①：直属 / 含子目录两种口径
+    #[test]
+    fn browse_dir_direct_and_subtree() {
+        let mut s = migrated(&[]);
+        // 再建一个子目录 + 把一份文件挪过去
+        let sub = db::insert_dir(&s.conn, Some(s.dir_id), "消防", "user").unwrap();
+        s.conn
+            .execute(
+                "UPDATE files SET archive_dir_id=?1 WHERE id=?2",
+                rusqlite::params![sub.id, s.ids[0]],
+            )
+            .unwrap();
+
+        let direct = db::browse_dir(&s.conn, Some(s.dir_id), false).unwrap();
+        assert_eq!(direct.len(), 2, "直属不含子目录里的那份");
+        let tree = db::browse_dir(&s.conn, Some(s.dir_id), true).unwrap();
+        assert_eq!(tree.len(), 3, "含子目录是全量");
+        let only_sub = db::browse_dir(&s.conn, Some(sub.id), false).unwrap();
+        assert_eq!(only_sub.len(), 1);
+        assert_eq!(only_sub[0].id, s.ids[0]);
+    }
+
+    // T2.3 ②：空目录返回空数组；不存在的目录报 NOT_FOUND
+    #[test]
+    fn browse_dir_empty_and_missing() {
+        let s = migrated(&[]);
+        let empty = db::insert_dir(&s.conn, None, "空目录", "user").unwrap();
+        assert!(db::browse_dir(&s.conn, Some(empty.id), false).unwrap().is_empty());
+        let err = db::browse_dir(&s.conn, Some(-42), false).unwrap_err();
+        assert_eq!(err.code, "NOT_FOUND");
+    }
+
+    // T2.3 ③：未归类分组（dir_id=None）只含 archive_dir_id 为空的已迁移行
+    #[test]
+    fn browse_dir_null_group_only_uncategorized() {
+        let s = migrated(&[]);
+        // 把一份文件的 archive_dir_id 抹掉（模拟目录被删过的老数据）
+        s.conn
+            .execute(
+                "UPDATE files SET archive_dir_id=NULL WHERE id=?1",
+                [s.ids[0]],
+            )
+            .unwrap();
+        let un = db::browse_dir(&s.conn, None, false).unwrap();
+        assert_eq!(un.len(), 1);
+        assert_eq!(un[0].id, s.ids[0]);
+        // 未归类也要带标签（同一套 attach_tags）
+        let tagged = db::browse_dir(&s.conn, Some(s.dir_id), false).unwrap();
+        assert!(tagged.iter().all(|r| r.tags.is_empty() || !r.tags.is_empty()));
+    }
+
+    // T2.3 ④：500 份同目录，browse_dir ≤ 100ms
+    #[test]
+    fn browse_dir_500_files_under_100ms() {
+        let mut s = migrated(&[]);
+        let mut scanned = Vec::new();
+        for i in 0..500 {
+            scanned.push(ScannedFile {
+                name: format!("批量{i:03}.docx"),
+                path: format!("C:/t/批量{i:03}.docx"),
+                ext: "docx".into(),
+                kind: "word".into(),
+                size: 100,
+                mtime: 1_700_000_000_000 + i,
+            });
+        }
+        let root = db::list_source_roots(&s.conn).unwrap().remove(0);
+        db::upsert_files(&mut s.conn, root.id, &scanned).unwrap();
+        // 直接 SQL 摆成已迁移 + 归到该目录（走迁移流程太慢也没必要）
+        s.conn
+            .execute(
+                "UPDATE files SET status='migrated', archive_dir_id=?1 WHERE status='queued'",
+                [s.dir_id],
+            )
+            .unwrap();
+
+        let t0 = std::time::Instant::now();
+        let rows = db::browse_dir(&s.conn, Some(s.dir_id), false).unwrap();
+        let ms = t0.elapsed().as_millis();
+        assert_eq!(rows.len(), 503);
+        assert!(ms <= 100, "500 份同目录要 ≤100ms，实测 {ms}ms");
+    }
+
+    // T2.4 后端：browse_tree 的份数是「直属已迁移」
+    #[test]
+    fn browse_tree_counts_direct_migrated() {
+        let mut s = migrated(&[]);
+        let sub = db::insert_dir(&s.conn, Some(s.dir_id), "消防", "user").unwrap();
+        s.conn
+            .execute(
+                "UPDATE files SET archive_dir_id=?1 WHERE id=?2",
+                rusqlite::params![sub.id, s.ids[0]],
+            )
+            .unwrap();
+
+        let tree = db::browse_tree(&s.conn).unwrap();
+        let parent = tree.iter().find(|n| n.id == s.dir_id).unwrap();
+        let child = parent.children.iter().find(|n| n.id == sub.id).unwrap();
+        assert_eq!(parent.file_count, 2, "直属份数不含子目录");
+        assert_eq!(child.file_count, 1);
+    }
+}

@@ -118,8 +118,17 @@ export interface FileRow {
   tagLevel?: string
   /** 人改过标签：队列只写 summary 不覆盖标签（P3 T1.4） */
   tagLocked?: boolean
+  /** 迁移后落盘的归档路径；null = 未归档（打开/定位/预览请用 livePath） */
+  archivedPath?: string | null
+  /** 迁移落到的归档目录 id；null = 未归档或目录被删 */
+  archiveDirId?: number | null
   /** 标签，后端按 type→time→topic→keyword→user 排好；空 = 没有标签，不占位 */
   tags?: TagRef[]
+}
+
+/** 已归档用归档路径，其余用源路径 —— 与后端 `FileRow::live_path()` 同一套口径 */
+export function livePath(f: Pick<FileRow, 'archivedPath' | 'absPath'>): string {
+  return f.archivedPath ?? f.absPath
 }
 
 export interface ArchiveDir {

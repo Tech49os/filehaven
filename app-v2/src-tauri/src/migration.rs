@@ -209,6 +209,12 @@ pub fn apply(
             )?;
             if item.result == ItemResult::Ok {
                 index::set_status(&tx, item.file_id, Status::Migrated)?;
+                // 归档后的真实路径（P3 T2.1）：源文件进了隔离区，abs_path 已是死路。
+                // 浏览页 / 打开 / 定位 / 预览全靠这两列。
+                tx.execute(
+                    "UPDATE files SET archived_path=?1, archive_dir_id=?2 WHERE id=?3",
+                    rusqlite::params![item.dst_path, p.dir_id, item.file_id],
+                )?;
             }
             tx.commit()?;
         }
@@ -310,6 +316,11 @@ pub fn undo(
             UndoOutcome::Restored => {
                 let tx = conn.transaction()?;
                 index::set_status(&tx, file_id, Status::Confirmed)?;
+                // 文件回去了，归档路径就不再成立；不清掉浏览页会指向隔离区里的旧路径
+                tx.execute(
+                    "UPDATE files SET archived_path=NULL, archive_dir_id=NULL WHERE id=?1",
+                    rusqlite::params![file_id],
+                )?;
                 tx.commit()?;
                 restored += 1;
             }

@@ -919,7 +919,7 @@ pub fn set_note(conn: &Connection, file_id: i64, note: &str) -> Result<(), CmdEr
 // ---------------------------------------------------------------- 批次
 
 const FILE_COLS: &str =
-    "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name, summary, tag_level, tag_locked";
+    "id, name, ext, kind, size, mtime, status, rel_path, abs_path, source_root_id, defer_count, note, target_name, summary, tag_level, tag_locked, archived_path, archive_dir_id";
 
 /// **按列名取值**，不用下标。
 ///
@@ -944,6 +944,8 @@ fn row_to_file(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::FileRow>
         summary: r.get("summary")?,
         tag_level: r.get("tag_level")?,
         tag_locked: r.get::<_, i64>("tag_locked")? != 0,
+        archived_path: r.get("archived_path")?,
+        archive_dir_id: r.get("archive_dir_id")?,
         // 标签是**一对多**，塞进主查询会让行数翻倍并毁掉 LIMIT —— 走 attach_tags 批量补
         tags: Vec::new(),
     })
@@ -2025,4 +2027,185 @@ pub fn assign_parked_file(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+// ================================================================ 浏览页地基（P3 M2）
+
+/// 老数据回填（T2.2）：迁移功能上线时还没有 `archived_path` 这两列，
+/// 已迁移的行只能从 `migration_items` 里反推。
+///
+/// 只在启动时跑一次（`backfill_archived` 标记位）；重复执行不改已有值。
+/// `dst_path` 按 `archive_dirs.rel_path` 最长前缀反推 `archive_dir_id`，
+/// 推不出的（目录被删过）两列都留 NULL —— 浏览页归到「未归类」，不隐藏、不报错。
+///
+/// 返回本次回填的行数（测试与日志用）。
+pub fn backfill_archived_paths(conn: &mut Connection) -> Result<usize, CmdError> {
+    if get_setting(conn, "backfill_archived")?.is_some() {
+        return Ok(0);
+    }
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT mi.file_id, mi.dst_path
+             FROM migration_items mi
+             JOIN migrations m ON m.id = mi.migration_id
+             JOIN files f ON f.id = mi.file_id
+             WHERE mi.result='ok' AND f.status='migrated' AND f.archived_path IS NULL
+             ORDER BY mi.id",
+        )?;
+        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        it.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let dirs: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, rel_path FROM archive_dirs")?;
+        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        it.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut n = 0usize;
+    for (file_id, dst) in rows {
+        // 最长前缀匹配：嵌套目录时不会挑错父目录
+        let best = dirs
+            .iter()
+            .filter(|(_, rel)| {
+                dst.starts_with(&format!("{rel}/")) || dst.starts_with(&format!("{rel}\\"))
+            })
+            .max_by_key(|(_, rel)| rel.len())
+            .map(|(id, _)| *id);
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE files SET archived_path=?1, archive_dir_id=?2
+             WHERE id=?3 AND status='migrated' AND archived_path IS NULL",
+            rusqlite::params![dst, best, file_id],
+        )?;
+        tx.commit()?;
+        n += 1;
+    }
+    set_setting(conn, "backfill_archived", "1")?;
+    Ok(n)
+}
+
+/// 归档路径按最长前缀反推目录 id（回填与浏览共用同一套口径）
+fn dir_id_for_path(dirs: &[(i64, String)], path: &str) -> Option<i64> {
+    dirs.iter()
+        .filter(|(_, rel)| path.starts_with(&format!("{rel}/")) || path.starts_with(&format!("{rel}\\")))
+        .max_by_key(|(_, rel)| rel.len())
+        .map(|(id, _)| *id)
+}
+
+/// 浏览页列表（T2.3）
+///
+/// `dir_id=None` 是「未归类」分组：已迁移但 `archive_dir_id` 是空的（老数据没推出来、
+/// 或目录后来被删了）。子目录用 rel_path 前缀先取 id 集合再 `IN`，不写相关子查询。
+pub fn browse_dir(
+    conn: &Connection,
+    dir_id: Option<i64>,
+    include_subdirs: bool,
+) -> Result<Vec<crate::model::FileRow>, CmdError> {
+    let mut rows = match dir_id {
+        None => {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_COLS} FROM files
+                 WHERE status='migrated' AND archive_dir_id IS NULL
+                 ORDER BY name, id"
+            ))?;
+            let it = stmt.query_map([], row_to_file)?;
+            it.collect::<Result<Vec<_>, _>>()?
+        }
+        Some(id) => {
+            // 目前的口径：直属 = archive_dir_id 精确等于；含子目录 = 该目录 rel_path 前缀下的所有 id
+            let rel: Option<String> = conn
+                .query_row(
+                    "SELECT rel_path FROM archive_dirs WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(rel) = rel else {
+                return Err(CmdError::new(
+                    "NOT_FOUND",
+                    format!("目录不存在：{id}"),
+                ));
+            };
+            let ids: Vec<i64> = if include_subdirs {
+                let pattern = format!("{rel}/%");
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM archive_dirs WHERE rel_path=?1 OR rel_path LIKE ?2",
+                )?;
+                let it = stmt.query_map(rusqlite::params![rel, pattern], |r| r.get(0))?;
+                it.collect::<Result<Vec<i64>, _>>()?
+            } else {
+                vec![id]
+            };
+            if ids.is_empty() {
+                Vec::new()
+            } else {
+                let marks = vec!["?"; ids.len()].join(",");
+                let sql = format!(
+                    "SELECT {FILE_COLS} FROM files
+                     WHERE status='migrated' AND archive_dir_id IN ({marks})
+                     ORDER BY name, id"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+                let it = stmt.query_map(params.as_slice(), row_to_file)?;
+                it.collect::<Result<Vec<_>, _>>()?
+            }
+        }
+    };
+    attach_tags(conn, &mut rows)?;
+    Ok(rows)
+}
+
+/// 浏览页目录树：归档目录 + 每个目录下已迁移文件的份数（直属，不含子目录）
+pub fn browse_tree(conn: &Connection) -> Result<Vec<DirNode>, CmdError> {
+    let mut flat: Vec<(i64, Option<i64>, DirNode)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.parent_id, d.name, d.rel_path, d.depth, d.origin,
+                    (SELECT COUNT(*) FROM files f
+                      WHERE f.status='migrated' AND f.archive_dir_id = d.id) AS file_count
+             FROM archive_dirs d
+             ORDER BY d.rel_path",
+        )?;
+        let it = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                DirNode {
+                    id: r.get(0)?,
+                    name: r.get(2)?,
+                    rel_path: r.get(3)?,
+                    depth: r.get(4)?,
+                    origin: r.get(5)?,
+                    file_count: r.get(6)?,
+                    children: Vec::new(),
+                },
+            ))
+        })?;
+        flat = it.collect::<Result<Vec<_>, _>>()?;
+    }
+    // 与 list_dir_nodes 同一套组装：深的一层先挂到父上，浅的后挂
+    let mut by_id: HashMap<i64, DirNode> = HashMap::new();
+    let mut order: Vec<(i64, i64, Option<i64>)> = Vec::new();
+    for (depth, parent_id, node) in flat {
+        order.push((depth, node.id, parent_id));
+        by_id.insert(node.id, node);
+    }
+    order.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut roots: Vec<DirNode> = Vec::new();
+    for (_, id, parent_id) in order {
+        let Some(node) = by_id.remove(&id) else {
+            continue;
+        };
+        match parent_id {
+            Some(pid) if by_id.contains_key(&pid) => {
+                by_id.get_mut(&pid).unwrap().children.push(node);
+            }
+            _ => roots.push(node),
+        }
+    }
+    Ok(roots)
 }

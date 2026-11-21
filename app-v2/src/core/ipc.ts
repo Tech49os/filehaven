@@ -226,14 +226,11 @@ export function requeueConfirmed(fileId: number) {
   return invoke<void>('requeue_confirmed', { fileId })
 }
 
-// ---------------------------------------------------------------- 浏览
+// ---------------------------------------------------------------- 浏览（P3 M2 后端落地，壳已删）
 
-export function browseDir(dirId: number | null) {
-  return invoke<FileRow[]>('browse_dir', { dirId })
-}
-
-export function searchFiles(q: string, dirId: number | null = null, limit = 200) {
-  return invoke<FileRow[]>('search_files', { q, dirId, limit })
+/** 浏览页列表：dirId=null 是「未归类」分组 */
+export function browseDirFiles(dirId: number | null, includeSubdirs = false) {
+  return invoke<FileRow[]>('browse_dir', { dirId, includeSubdirs })
 }
 
 // ---------------------------------------------------------------- 标签（P3 M1）
@@ -261,4 +258,14 @@ export function deleteTag(tagId: number) {
 /** 改名；撞名则合并到已有标签，返回合并后的 tag id */
 export function renameTag(tagId: number, name: string) {
   return invoke<number>('rename_tag', { tagId, name })
+}
+
+/** 浏览页目录树：归档目录 + 直属已迁移份数 */
+export function browseTree() {
+  return invoke<DirNode[]>('browse_tree')
+}
+
+/** 整理池全量（浏览页「待整理」虚拟视图） */
+export function poolRows() {
+  return invoke<FileRow[]>('pool_rows')
 }

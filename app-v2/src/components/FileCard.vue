@@ -14,6 +14,7 @@ import AppIcon from './AppIcon.vue'
 import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
 import { imageSrc } from '../core/preview'
+import { livePath } from '../core/types'
 import { shortPath } from '../core/text'
 import type { BatchItem, DecideAck, FilePreview, TagRef } from '../core/types'
 
@@ -71,7 +72,7 @@ const targetPath = computed(() => {
 /** 摘要默认只显示 4 行，够判断「这是哪一单」，又不会把候选和按钮顶出屏幕 */
 const expanded = ref(false)
 const thumb = computed(() =>
-  props.preview?.kind === 'image' ? imageSrc(f.value.absPath) : '',
+  props.preview?.kind === 'image' ? imageSrc(livePath(f.value)) : '',
 )
 
 /** 归档前改名（2026-11-20 反馈：想顺便把名字改得更明确） */

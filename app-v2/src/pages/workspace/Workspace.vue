@@ -13,6 +13,7 @@ import NewDirInput from '../../components/NewDirInput.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import { mapKey } from '../../core/keys'
 import { statusLabel } from '../../core/format'
+import { livePath } from '../../core/types'
 import { toCmdError } from '../../core/cmdError'
 import { useNarrow } from '../../core/useNarrow'
 import * as ipc from '../../core/ipc'
@@ -175,7 +176,7 @@ async function openCurrent() {
   if (!it) return
   actionErr.value = null
   try {
-    await ipc.openPath(it.file.absPath)
+    await ipc.openPath(livePath(it.file))
   } catch (e) {
     actionErr.value = toCmdError(e).message
   }
@@ -187,7 +188,7 @@ async function revealCurrent() {
   if (!it) return
   actionErr.value = null
   try {
-    await ipc.revealPath(it.file.absPath)
+    await ipc.revealPath(livePath(it.file))
   } catch (e) {
     actionErr.value = toCmdError(e).message
   }
