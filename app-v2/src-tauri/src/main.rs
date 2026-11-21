@@ -21,6 +21,7 @@ mod llm;
 mod migrate;
 mod migration;
 mod model;
+mod model_gate;
 mod plan;
 mod preview;
 mod recommend;
@@ -1080,23 +1081,23 @@ async fn suggest_dirs(
 
     let force = force.unwrap_or(false);
 
-    // 显存仲裁（T2.6）：目录建议与深度标签共用一张卡。
-    // 先让队列把当前这一份跑完（最多等 70s —— 单份超时 60s + 余量），
-    // 然后全程把队列按停，否则两个模型请求同时压 8GB 显存会把 llama-server 打崩。
-    let ok = {
+    // 显存仲裁（P3 §3.4 ModelGate）：目录建议 / 文本深读 / 视觉深读 三向互斥。
+    // 先按住队列（paused_for_suggest 语义不动），再占模型闸 —— 最多等 70s
+    //（单份超时 60s + 余量）。等不到就放弃这次建议，**绝不硬上**：
+    // 两个请求同压 8GB 显存会把 llama-server 打崩。
+    let got = {
         let q = app.state::<Arc<deep_tag::Queue>>().inner().clone();
         q.paused_for_suggest.store(true, Ordering::Relaxed);
-        q.wait_idle(70_000)
+        q.gate.acquire(model_gate::Owner::Suggest, 70_000)
     };
-    if !ok {
-        let _ = app.emit(
-            "suggest-stage",
-            model::SuggestStage {
-                stage: "waiting".into(),
-                elapsed_ms: 70_000,
-                note: "深度标签这一份还没跑完，仍按你的要求继续".into(),
-            },
-        );
+    if !got {
+        app.state::<Arc<deep_tag::Queue>>()
+            .paused_for_suggest
+            .store(false, Ordering::Relaxed);
+        return Err(CmdError::new(
+            error::MODEL_BUSY,
+            "深度解读正在占用模型（等了 70 秒还没空闲），稍后再试",
+        ));
     }
 
     let stage_app = app.clone();
@@ -1132,10 +1133,12 @@ async fn suggest_dirs(
 
     stop.store(true, Ordering::Relaxed);
     let _ = hb.join();
-    // 无论成功失败都要放开队列，否则一次超时就把深度标签永久按停
-    app.state::<Arc<deep_tag::Queue>>()
-        .paused_for_suggest
-        .store(false, Ordering::Relaxed);
+    // 无论成功失败都要放闸、放开队列，否则一次超时就把深度标签永久按停
+    {
+        let q = app.state::<Arc<deep_tag::Queue>>();
+        q.gate.release(model_gate::Owner::Suggest);
+        q.paused_for_suggest.store(false, Ordering::Relaxed);
+    }
 
     req.map_err(|e| CmdError::new(error::DB, format!("目录建议线程异常：{e}")))?
 }
@@ -1750,24 +1753,26 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
             }
             emit_deep(&app, &queue);
 
-            queue.busy.store(true, Ordering::Relaxed);
             let mut result = deep_tag::process_one(
                 &job,
                 &base,
                 &model,
                 Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
+                &queue.gate,
             );
-            // 失败重试 1 次（Ollama 偶发 500 / 半截 JSON）
-            if result.is_err() {
-                std::thread::sleep(Duration::from_millis(500));
-                result = deep_tag::process_one(
-                    &job,
-                    &base,
-                    &model,
-                    Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
-                );
+            // 失败重试 1 次（Ollama 偶发 500 / 半截 JSON）；闸被占不用重试，等下一轮
+            if let Err(e) = &result {
+                if e.code != error::MODEL_BUSY {
+                    std::thread::sleep(Duration::from_millis(500));
+                    result = deep_tag::process_one(
+                        &job,
+                        &base,
+                        &model,
+                        Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
+                        &queue.gate,
+                    );
+                }
             }
-            queue.busy.store(false, Ordering::Relaxed);
 
             match result {
                 Ok(d) => {
@@ -1805,6 +1810,13 @@ fn spawn_deep_tag(app: AppHandle, queue: Arc<deep_tag::Queue>) {
                     }
                 }
                 Err(e) => {
+                    if e.code == error::MODEL_BUSY {
+                        // 闸被别人占着（目录建议/视觉解读）：不是这份文件的问题，
+                        // 不记失败、不进 failed_ids，歇一下等下一轮再取
+                        eprintln!("deep-tag: {} 让路（模型闸被占），稍后重试", job.name);
+                        std::thread::sleep(Duration::from_millis(GAP_MS));
+                        continue;
+                    }
                     let down = e.code == error::MODEL_DOWN || e.code == error::MODEL_TIMEOUT;
                     queue.mark_failed(job.file_id);
                     if let Ok(mut st) = queue.stats_lock() {
@@ -1973,6 +1985,8 @@ fn run_deeptag_cli(dir: &str, out: &str, limit: usize) -> i32 {
             &base,
             &model,
             Duration::from_secs(deep_tag::LLM_TIMEOUT_SECS),
+            // CLI 没有别的模型通路，闸永远空闲；仍走同一签名保持链路一致
+            &model_gate::ModelGate::default(),
         );
         let ms = t0.elapsed().as_millis();
         times.push(ms);

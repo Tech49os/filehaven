@@ -8,7 +8,7 @@
 //!    所以提示词里用硬话压（不确定就返回空数组），代码里也不给「必须凑够 3 个」的压力。
 //! 3. **队列任何失败都不许冒泡成界面错误**，只能让该文件停在 `basic`。
 
-use crate::error::{CmdError, MODEL_BAD_OUTPUT};
+use crate::error::{CmdError, MODEL_BAD_OUTPUT, MODEL_BUSY};
 use crate::tag;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -235,6 +235,25 @@ pub fn text_of(path: &str, ext: &str, kind: &str, size: u64) -> String {
     s.trim().to_string()
 }
 
+// ---------------------------------------------------------------- 模型闸（P3 §3.4）
+
+use crate::model_gate::{ModelGate, Owner};
+
+/// RAII 闸守卫：拿到闸之后，无论后面成功失败都自动释放，不许手动管。
+///
+/// 手动 release 的问题在 `?` 和早返回——漏一条路径就是永久占闸，
+/// 队列从此哑掉。Drop 保证不漏。
+struct GateGuard<'a> {
+    gate: &'a ModelGate,
+    who: Owner,
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.release(self.who);
+    }
+}
+
 // ---------------------------------------------------------------- 优先级（T2.6）
 
 /// 取件优先级：当前批 → 待定区 → 池内 → 已迁移
@@ -289,11 +308,22 @@ pub fn process_one(
     base: &str,
     model: &str,
     timeout: std::time::Duration,
+    gate: &ModelGate,
 ) -> Result<DeepTag, CmdError> {
     let text = text_of(&job.abs_path, &job.ext, &job.kind, job.size);
     match should_deep_tag(&job.kind, &job.ext, text.chars().count(), job.size) {
         Decision::Skip(_) => Ok(DeepTag::default()),
         Decision::Send { vision } => {
+            // 模型闸（P3 §3.4）：发请求前必须占位。拿不到（目录建议/另一通道在跑）
+            // 返回 MODEL_BUSY，队列跳过这一轮，不死等。timeout=0：立刻判定。
+            let owner = if vision { Owner::Vision } else { Owner::Text };
+            if !gate.acquire(owner, 0) {
+                return Err(CmdError::new(
+                    MODEL_BUSY,
+                    "模型正被其他任务占用（目录建议/视觉解读），本轮跳过",
+                ));
+            }
+            let _guard = GateGuard { gate, who: owner };
             let raw = if vision {
                 // 视觉：读原图 → base64 直送（§3.4）。没有图像库，不做任何缩放
                 let bytes = std::fs::read(&job.abs_path)?;
@@ -375,10 +405,11 @@ pub struct Stats {
 pub struct Queue {
     enabled: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
-    /// 目录建议要独占显存时置 true，队列让路
+    /// 目录建议要独占显存时置 true，队列让路（P2 语义不动；占闸期间队列也会让路，双保险）
     pub paused_for_suggest: Arc<AtomicBool>,
-    /// 正在跑一份模型请求（目录建议要等它跑完）
-    pub busy: Arc<AtomicBool>,
+    /// 模型闸（P3 §3.4）：目录建议 / 文本深读 / 视觉深读 三向互斥。
+    /// 取代了旧的 `busy` + `wait_idle` 双人锁（同一职责两套机制并存必然漂移）
+    pub gate: Arc<ModelGate>,
     stop: Arc<AtomicBool>,
     stats: Arc<Mutex<Stats>>,
     /// 当前批快照：用户正在看的那批必须先有标签
@@ -393,7 +424,7 @@ impl Queue {
             enabled: Arc::new(AtomicBool::new(enabled)),
             paused: Arc::new(AtomicBool::new(false)),
             paused_for_suggest: Arc::new(AtomicBool::new(false)),
-            busy: Arc::new(AtomicBool::new(false)),
+            gate: Arc::new(ModelGate::default()),
             stop: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(Mutex::new(Stats::default())),
             batch: Arc::new(Mutex::new(Vec::new())),
@@ -426,22 +457,6 @@ impl Queue {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-    }
-
-    pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::Relaxed)
-    }
-
-    /// 等「当前这一份跑完」，最多等 `max_ms`（目录建议抢显存时用）
-    pub fn wait_idle(&self, max_ms: u64) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_ms);
-        while self.is_busy() {
-            if std::time::Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        true
     }
 
     pub fn set_batch(&self, ids: Vec<i64>) {
@@ -658,25 +673,68 @@ mod tests {
         (dir, job)
     }
 
-    // T2.4：整条链路（抽正文 → 拼提示词 → HTTP → 解析）在桩上跑通
+    // T2.4：整条链路（抽正文 → 拼提示词 → HTTP → 解析）在桩上跑通；结束闸必须已释放
     #[test]
     fn process_one_end_to_end_on_stub() {
         let base = stub_server(
             r#"{"response":"{\"tags\":[\"安全检查\",\"消防验收\"],\"summary\":\"2026年度安全检查通知。\"}"}"#,
         );
         let (_d, job) = write_txt("关于开展2026年度安全检查的通知，请各部门于11月底前完成自查并上报。");
-        let d = process_one(&job, &base, "test-model", std::time::Duration::from_secs(5)).unwrap();
+        let gate = ModelGate::default();
+        let d = process_one(&job, &base, "test-model", std::time::Duration::from_secs(5), &gate)
+            .unwrap();
         assert_eq!(d.tags, vec!["安全检查", "消防验收"]);
         assert!(d.summary.unwrap().contains("安全检查"));
+        assert_eq!(gate.owner(), None, "成功路径也要放闸，不许漏");
     }
 
-    // T2.4：模型返回垃圾 → BAD_OUTPUT，不 panic（队列靠这个判失败，进程要活着）
+    // T2.4：模型返回垃圾 → BAD_OUTPUT，不 panic（队列靠这个判失败，进程要活着）；失败也要放闸
     #[test]
     fn process_one_bad_json_is_error_not_panic() {
         let base = stub_server(r#"{"response":"我不会，你自己看着办"}"#);
         let (_d, job) = write_txt("这是一份足够长的正文，用来确保它会被送去模型而不是被当成无正文跳过。");
-        let e = process_one(&job, &base, "test-model", std::time::Duration::from_secs(5)).unwrap_err();
+        let gate = ModelGate::default();
+        let e = process_one(&job, &base, "test-model", std::time::Duration::from_secs(5), &gate)
+            .unwrap_err();
         assert_eq!(e.code, MODEL_BAD_OUTPUT);
+        assert_eq!(gate.owner(), None, "失败路径也要放闸（Drop 守卫兜底）");
+    }
+
+    // §3.4：闸被别人占着（目录建议在跑）→ MODEL_BUSY，绝不发 HTTP
+    #[test]
+    fn process_one_skips_model_when_gate_is_taken() {
+        let base = stub_server(r#"{"response":"不该被调到"}"#);
+        let (_d, job) = write_txt("关于开展2026年度安全检查的通知，请各部门于11月底前完成自查并上报。");
+        let gate = ModelGate::default();
+        assert!(gate.acquire(Owner::Suggest, 0));
+        let e = process_one(&job, &base, "test-model", std::time::Duration::from_secs(5), &gate)
+            .unwrap_err();
+        assert_eq!(e.code, MODEL_BUSY, "拿不到闸要立刻报 MODEL_BUSY，不死等");
+        assert_eq!(gate.owner(), Some(Owner::Suggest), "别人的闸不许被释放");
+        // 队列对 MODEL_BUSY 只跳过不记失败 —— 文件本身没问题
+    }
+
+    // §3.4：闸被占时，图片任务同样拿不到（视觉通道 owner=Vision）
+    #[test]
+    fn process_one_vision_job_respects_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("现场照片.png");
+        // 最小 PNG 头 + 任意字节即可：反正不会真的发出请求
+        std::fs::write(&p, [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        let job = Job {
+            file_id: 2,
+            name: "现场照片.png".into(),
+            abs_path: p.to_string_lossy().to_string(),
+            ext: "png".into(),
+            kind: "image".into(),
+            size: 8,
+        };
+        let base = stub_server(r#"{"response":"不该被调到"}"#);
+        let gate = ModelGate::default();
+        assert!(gate.acquire(Owner::Suggest, 0));
+        let e = process_one(&job, &base, "test-model", std::time::Duration::from_secs(5), &gate)
+            .unwrap_err();
+        assert_eq!(e.code, MODEL_BUSY);
     }
 
     // T2.4：同一份文件本轮失败后不再重取（否则队列原地打转）
@@ -689,29 +747,9 @@ mod tests {
         assert!(!q.already_failed(8));
     }
 
-    // T2.6：目录建议要等「当前这一份跑完」，但不能死等
-    #[test]
-    fn wait_idle_returns_when_queue_finishes_current() {
-        let q = std::sync::Arc::new(Queue::new(true));
-        q.busy.store(true, Ordering::Relaxed);
-        let q2 = q.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            q2.busy.store(false, Ordering::Relaxed);
-        });
-        let t0 = std::time::Instant::now();
-        assert!(q.wait_idle(3000), "应该在超时前等到空闲");
-        assert!(t0.elapsed().as_millis() >= 250, "不许立刻返回，那是没等");
-    }
-
-    #[test]
-    fn wait_idle_gives_up_when_queue_is_stuck() {
-        let q = Queue::new(true);
-        q.busy.store(true, Ordering::Relaxed);
-        let t0 = std::time::Instant::now();
-        assert!(!q.wait_idle(200), "超时要返回 false，让目录建议自己决定是否硬上");
-        assert!(t0.elapsed().as_millis() >= 190);
-    }
+    // T2.6 的 wait_idle 双人锁已被 §3.4 的 ModelGate 取代：
+    // 等待/超时/让位的等价断言在 model_gate.rs（second_owner_waits_and_times_out /
+    // waiter_gets_gate_after_holder_releases），不再保留两套机制。
 
     #[test]
     fn priority_order() {

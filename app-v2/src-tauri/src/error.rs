@@ -18,6 +18,8 @@ pub const NOT_CONFIGURED: &str = "NOT_CONFIGURED";
 pub const MODEL_DOWN: &str = "MODEL_DOWN";
 pub const MODEL_TIMEOUT: &str = "MODEL_TIMEOUT";
 pub const MODEL_BAD_OUTPUT: &str = "MODEL_BAD_OUTPUT";
+/// 模型闸被别人占着（目录建议 / 视觉解读），等满超时还没拿到——本轮跳过，不是文件的问题
+pub const MODEL_BUSY: &str = "MODEL_BUSY";
 /// 文件太少，不值得问模型（少于 10 份）
 pub const TOO_FEW_FILES: &str = "TOO_FEW_FILES";
 /// 输入不合法（空标签名、超长目录名一类）
