@@ -200,6 +200,9 @@ pub const VISION_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp"];
 /// 原图 ≤8MB（超了不做缩放 —— 没有图像库，硬加一个只为缩图不值）
 pub const VISION_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+/// 扫描件 PDF 上限（P4 M2）：第 1 页渲染成图走视觉通道；超大件不伺候
+pub const SCAN_PDF_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
 pub fn should_deep_tag(kind: &str, ext: &str, text_len: usize, size: u64) -> Decision {
     let ext = ext.trim_start_matches('.').to_lowercase();
     if kind == "code" || kind == "other" {
@@ -220,8 +223,11 @@ pub fn should_deep_tag(kind: &str, ext: &str, text_len: usize, size: u64) -> Dec
     }
     if text_len < MIN_TEXT {
         if ext == "pdf" {
-            // P3 T4.4：明确「不解析」，不装读。栅格化要引 pdfium（+8MB 原生依赖），留 P4
-            return Decision::Skip("扫描件：本机不解析图像页");
+            // P4 M2：扫描件第 1 页栅格化走视觉通道；失败时按 Skip 语义「明确不解读」
+            if size <= SCAN_PDF_MAX_BYTES {
+                return Decision::Send { vision: true };
+            }
+            return Decision::Skip("扫描件过大（>50MB）");
         }
         return Decision::Skip("无正文");
     }
@@ -325,36 +331,20 @@ pub fn process_one(
             }
             let _guard = GateGuard { gate, who: owner };
             let raw = if vision {
-                // 视觉：读原图 → base64 直送（§3.4）。没有图像库，不做任何缩放
-                let bytes = std::fs::read(&job.abs_path)?;
-                use std::io::Write as _;
-                let mut b64 = String::with_capacity((bytes.len() + 2) / 3 * 4 + 4);
-                let mut enc = Base64Writer { out: &mut b64 };
-                // 标准库没有 base64；手写一个小编码器（只在测试与真机用，性能足够）
-                let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                let b = &bytes;
-                let mut i = 0;
-                while i + 2 < b.len() {
-                    let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | b[i + 2] as u32;
-                    let _ = enc.write_all(&[
-                        table[(n >> 18) as usize & 63],
-                        table[(n >> 12) as usize & 63],
-                        table[(n >> 6) as usize & 63],
-                        table[n as usize & 63],
-                    ]);
-                    i += 3;
-                }
-                let rem = b.len() - i;
-                if rem == 1 {
-                    let n = (b[i] as u32) << 16;
-                    let _ = enc.write_all(&[table[(n >> 18) as usize & 63], table[(n >> 12) as usize & 63], b'=', b'=']);
-                } else if rem == 2 {
-                    let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
-                    let _ = enc.write_all(&[table[(n >> 18) as usize & 63], table[(n >> 12) as usize & 63], table[(n >> 6) as usize & 63], b'=']);
-                }
-                drop(enc);
+                // 视觉：图片读原图 / 扫描件 PDF 先渲染第 1 页（P4 M2）→ base64 直送
+                let img_b64: String = if job.ext.trim_start_matches('.').eq_ignore_ascii_case("pdf")
+                {
+                    match crate::pdf_render::render_first_page(&job.abs_path) {
+                        // 渲染失败（加密/损坏/非 Win10 1809+）：按 Skip 语义明确不解读
+                        None => return Ok(DeepTag::default()),
+                        Some(png) => b64_of(&png),
+                    }
+                } else {
+                    let bytes = std::fs::read(&job.abs_path)?;
+                    b64_of(&bytes)
+                };
                 let prompt = build_vision_prompt(&job.name);
-                crate::llm::generate_vision(base, model, &prompt, &b64, timeout)?
+                crate::llm::generate_vision(base, model, &prompt, &img_b64, timeout)?
             } else {
                 let prompt = build_prompt(&job.name, &job.kind, &text);
                 crate::llm::generate(base, model, &prompt, timeout)?
@@ -362,6 +352,36 @@ pub fn process_one(
             parse(&raw)
         }
     }
+}
+
+/// base64 编码（标准库没有，手写一个小编码器：性能足够，不引依赖）
+fn b64_of(bytes: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4 + 4);
+    let mut enc = Base64Writer { out: &mut out };
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let b = bytes;
+    let mut i = 0;
+    while i + 2 < b.len() {
+        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | b[i + 2] as u32;
+        let _ = enc.write_all(&[
+            table[(n >> 18) as usize & 63],
+            table[(n >> 12) as usize & 63],
+            table[(n >> 6) as usize & 63],
+            table[n as usize & 63],
+        ]);
+        i += 3;
+    }
+    let rem = b.len() - i;
+    if rem == 1 {
+        let n = (b[i] as u32) << 16;
+        let _ = enc.write_all(&[table[(n >> 18) as usize & 63], table[(n >> 12) as usize & 63], b'=', b'=']);
+    } else if rem == 2 {
+        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
+        let _ = enc.write_all(&[table[(n >> 18) as usize & 63], table[(n >> 12) as usize & 63], table[(n >> 6) as usize & 63], b'=']);
+    }
+    drop(enc);
+    out
 }
 
 /// 极简 base64 写出器（std::io::Write 适配，只为上面的手写编码器收口）
@@ -631,8 +651,14 @@ mod tests {
         assert_eq!(should_deep_tag("other", "zip", 500, 100), Decision::Skip("非文本可解读类型"));
         assert_eq!(should_deep_tag("word", "doc", 500, 100), Decision::Skip("老版二进制 Office，读不出正文"));
         assert_eq!(should_deep_tag("word", "docx", 5, 100), Decision::Skip("无正文"));
-        // P3 T4.4：扫描件明确「不解析」，不许有人顺手改成「识别中」
-        assert_eq!(should_deep_tag("pdf", "pdf", 5, 100), Decision::Skip("扫描件：本机不解析图像页"));
+        // P4 M2：扫描件走视觉通道（渲染第 1 页）；超 50MB 不伺候
+        assert_eq!(should_deep_tag("pdf", "pdf", 5, 100), Decision::Send { vision: true });
+        assert_eq!(
+            should_deep_tag("pdf", "pdf", 5, 60 * 1024 * 1024),
+            Decision::Skip("扫描件过大（>50MB）")
+        );
+        // 有文字层的 PDF 仍走文本分支
+        assert_eq!(should_deep_tag("pdf", "pdf", 500, 100), Decision::Send { vision: false });
         // P3 T4.1：图片走视觉分支（白名单 + 8MB 闸）
         assert_eq!(should_deep_tag("image", "png", 0, 100), Decision::Send { vision: true });
         assert_eq!(should_deep_tag("image", "jpg", 0, 100), Decision::Send { vision: true });

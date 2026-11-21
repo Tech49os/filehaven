@@ -151,6 +151,21 @@ def check(label, cond, detail=''):
     return bool(cond)
 
 
+def js_ctxmenu(p, selector, label):
+    """按文字找元素并派发 contextmenu 事件（右键菜单）。"""
+    js = (
+        "((sel,label)=>{const es=[...document.querySelectorAll(sel)];"
+        "const t=e=>(e.textContent||'').replace(/\\s+/g,'');"
+        "const e=es.filter(x=>t(x).includes(label)).sort((a,b)=>a.textContent.length-b.textContent.length)[0];"
+        "if(!e)return 'none';"
+        "const r=e.getBoundingClientRect();"
+        "e.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,"
+        "clientX:Math.round(r.left+6),clientY:Math.round(r.top+6)}));return 'ok';}"
+        ")(%s,%s)" % (json.dumps(selector), json.dumps(label))
+    )
+    return p.eval(js) == 'ok'
+
+
 def js_click(p, selector, label):
     """按文字在 selector 圈定的范围内找元素并 .click()。
 
@@ -351,6 +366,45 @@ def verify():
     conn.close()
     ok &= check('迁移件 archived_path 全部落库', has_path == len(rows) and len(rows) >= 3, f'{has_path}/{len(rows)}')
     ok &= check('有目录的件回填了 archive_dir_id', any(r[1] is not None for r in rows), str(rows))
+
+    # ------------------------------------------------ P4 M1：重新归类（归档区内二次迁移）
+    go(p, '#/browser')
+    time.sleep(0.8)
+    ok &= check('点「检查报告」目录（recat 前置）', js_click(p, '.tree .row', '检查报告'))
+    time.sleep(0.8)
+    # 右键迁移件 → 菜单出第四项 → 菜单内选目标目录
+    ok &= check('右键出上下文菜单', js_ctxmenu(p, '.list .row', '2025年度安全检查报告'))
+    time.sleep(0.5)
+    ok &= check('菜单有「重新归类…」', js_click(p, '.menu .mi', '重新归类'))
+    time.sleep(0.5)
+    ok &= check('候选不含当前目录，出「安全环保」', js_click(p, '.menu .mi', '安全环保'))
+    time.sleep(1.5)
+    # 磁盘真挪了 + 台账是 recategorize 批次（「安全环保」目录 rel_path 就是一层）
+    moved = ARC / '安全环保' / '2025年度安全检查报告.docx'
+    ok &= check('文件真挪到新目录（磁盘）', moved.is_file(), str(moved))
+    ok &= check(
+        '旧位置空出来',
+        not (ARC / '安全环保' / '检查报告' / '2025年度安全检查报告.docx').exists(),
+        '',
+    )
+    db2 = sqlite3.connect(f'file:{DATA / "index.db"}?mode=ro', uri=True)
+    row = db2.execute(
+        "SELECT archived_path, archive_dir_id FROM files WHERE name='2025年度安全检查报告.docx'"
+    ).fetchone()
+    kinds = db2.execute(
+        "SELECT kind FROM migrations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    db2.close()
+    ok &= check(
+        'archived_path 指向新目录',
+        bool(row and (row[0] or '').replace('/', '\\').endswith('安全环保\\2025年度安全检查报告.docx')),
+        str(row),
+    )
+    ok &= check('台账记成 recategorize 批次', bool(kinds and kinds[0] == 'recategorize'), str(kinds))
+    # 浏览页即时生效：新目录下能看到它
+    ok &= check('点「安全环保」目录', js_click(p, '.tree .row', '安全环保'))
+    time.sleep(0.8)
+    ok &= check('浏览页新目录列出该文件', wait_text(p, '2025年度安全检查报告', 4.0), p.text()[:300])
 
     print(f'\n==== e2e-p3 结果: {"ALL PASS" if ok else "有 FAIL"}')
     return 0 if ok else 1

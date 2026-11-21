@@ -22,6 +22,7 @@ mod migrate;
 mod migration;
 mod model;
 mod model_gate;
+mod pdf_render;
 mod plan;
 mod preview;
 mod recommend;
@@ -2323,6 +2324,10 @@ fn main() {
     if args.len() >= 3 && args[1] == "--perf-search" {
         std::process::exit(run_perf_search_cli(&args[2]));
     }
+    if args.len() >= 3 && args[1] == "--vision-one" {
+        // P4 M2 闸门用：单份扫描件走完整视觉管线（渲染 → 9b → 解析），不开 GUI
+        std::process::exit(run_vision_one_cli(&args[2]));
+    }
     if args.len() >= 4 && args[1] == "--scan" {
         std::process::exit(run_scan_cli(&args[2], &args[3]));
     }
@@ -2463,6 +2468,62 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
+}
+
+// ---------------------------------------------------------------- 扫描件视觉单测（P4 M2 闸门）
+
+/// 单份 PDF 走完整视觉管线：渲染第 1 页 → 9b → 打印 JSON。给 vision-pdf-gate.py 循环调用。
+fn run_vision_one_cli(path: &str) -> i32 {
+    let p = PathBuf::from(path);
+    let meta = match std::fs::metadata(&p) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("metadata: {e}");
+            return 1;
+        }
+    };
+    let job = deep_tag::Job {
+        file_id: 0,
+        name: p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        abs_path: p.to_string_lossy().to_string(),
+        ext: p
+            .extension()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        kind: "pdf".into(),
+        size: meta.len(),
+    };
+    let gate = model_gate::ModelGate::default();
+    let t0 = std::time::Instant::now();
+    match deep_tag::process_one(
+        &job,
+        llm::DEFAULT_BASE,
+        llm::DEFAULT_MODEL,
+        Duration::from_secs(120),
+        &gate,
+    ) {
+        Ok(d) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "elapsed_ms": t0.elapsed().as_millis() as u64,
+                    "tags": d.tags,
+                    "summary": d.summary,
+                })
+            );
+            0
+        }
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::json!({ "error": e.code, "message": e.message })
+            );
+            1
+        }
+    }
 }
 
 // ---------------------------------------------------------------- 检索性能基准（P3 T3.7）

@@ -35,6 +35,8 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 rusqlite = { version = "0.32", features = ["bundled", "trace"] }
 pdf-extract = "0.7"
 notify = "6"
+# 路径规范化（去 `..`、不带 \\?\ 前缀）：Windows.Data.Pdf 的 GetFileFromPathAsync 挑路径
+dunce = "1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -44,6 +46,15 @@ tempfile = "3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+] }
+# 扫描件 PDF 栅格化（P4 M2）：Windows.Data.Pdf 是系统自带渲染器，
+# 纯编译免 DLL 分发（pdfium 要 +8MB 原生依赖 + 管 DLL，弃）
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Data_Pdf",
+    "Graphics_Imaging",
+    "Storage",
+    "Storage_Streams",
 ] }
 
 [profile.release]
