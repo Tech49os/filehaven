@@ -152,3 +152,30 @@ describe('待定区（P2 T4.3）', () => {
     expect(w.findAll('.acts button').map((b) => b.text())).toEqual(['捞回', '移出'])
   })
 })
+
+// ------------------------------------------------ 标签一行（P3 T1.2）
+
+describe('待定区标签行：与卡片同一套语义', () => {
+  it('有标签就显示一行 chips；topic 带 .topic 类；超过 6 个折叠成 +N', async () => {
+    const tags = [
+      { id: 1, name: 'word', kind: 'type' },
+      { id: 2, name: '2026', kind: 'time' },
+      ...[3, 4, 5, 6, 7, 8].map((i) => ({ id: i, name: `话题${i}`, kind: 'topic' })),
+    ] as FileRow['tags']
+    const w = await mountWith([item({}, { tags })])
+    const line = w.find('.tags')
+    expect(line.exists()).toBe(true)
+    const chips = line.findAll('.tchip')
+    // 6 颗 + 1 个 +N
+    expect(chips.length).toBe(7)
+    expect(chips[2].classes()).toContain('topic')
+    expect(w.find('.tchip.more').text()).toBe('+2')
+    // title 里是全量名字
+    expect(line.attributes('title')).toContain('话题8')
+  })
+
+  it('没标签的文件不渲染标签行（不留空行）', async () => {
+    const w = await mountWith([item({}, { tags: [] })])
+    expect(w.find('.tags').exists()).toBe(false)
+  })
+})

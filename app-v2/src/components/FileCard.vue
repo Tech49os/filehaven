@@ -15,7 +15,7 @@ import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
 import { imageSrc } from '../core/preview'
 import { shortPath } from '../core/text'
-import type { BatchItem, DecideAck, FilePreview } from '../core/types'
+import type { BatchItem, DecideAck, FilePreview, TagRef } from '../core/types'
 
 const props = withDefaults(
   defineProps<{
@@ -41,6 +41,10 @@ const emit = defineEmits<{
   (e: 'reveal'): void
   /** 归档时改的名字；空串 = 恢复原名 */
   (e: 'rename', name: string): void
+  /** 人加一个标签（后端落 kind='user'） */
+  (e: 'addTag', name: string): void
+  /** 删一个标签（type/time 会被后端 TAG_LOCKED 拒掉） */
+  (e: 'removeTag', tagId: number): void
 }>()
 
 const f = computed(() => props.item.file)
@@ -70,13 +74,46 @@ const thumb = computed(() =>
   props.preview?.kind === 'image' ? imageSrc(f.value.absPath) : '',
 )
 
-/* ---- 归档前改名（2026-11-20 反馈：想顺便把名字改得更明确） ---- */
+/** 归档前改名（2026-11-20 反馈：想顺便把名字改得更明确） */
 const renaming = ref(false)
 const nameDraft = ref('')
 const renameEl = ref<HTMLInputElement | null>(null)
 /** 库里记的目标名；没改过是 null */
 const targetName = computed(() => f.value.targetName || null)
 const canRename = computed(() => !confirmed.value && !handledElsewhere.value)
+
+/* ---- 标签：看得见 + 改得动（P3 T1.2 / T1.3） ---- */
+const tags = computed<TagRef[]>(() => f.value.tags ?? [])
+/** 超过 6 个折叠成 +N（title 里有全量） */
+const MAX_TAGS = 6
+const visibleTags = computed(() => tags.value.slice(0, MAX_TAGS))
+const extraTags = computed(() => tags.value.length - visibleTags.value.length)
+const extraTitle = computed(() =>
+  tags.value
+    .slice(MAX_TAGS)
+    .map((t) => t.name)
+    .join('、'),
+)
+/** type/time 是基础标签，删了就没法按类型/时间找，后端也会拒 */
+const canRemove = (t: TagRef) => t.kind !== 'type' && t.kind !== 'time'
+
+/** 标签行里的内联输入：+ 号点开，回车提交、Esc 收起 */
+const addingTag = ref(false)
+const tagDraft = ref('')
+const tagEl = ref<HTMLInputElement | null>(null)
+
+function startAddTag() {
+  addingTag.value = true
+  tagDraft.value = ''
+  void nextTick(() => tagEl.value?.focus())
+}
+
+function commitAddTag() {
+  const v = tagDraft.value.trim()
+  addingTag.value = false
+  tagDraft.value = ''
+  if (v) emit('addTag', v)
+}
 
 /** 输入框里只放主干：扩展名由后端补回来，用户不用操心也不会被改坏 */
 function stemOf(name: string): string {
@@ -185,6 +222,44 @@ function cancelRename() {
       <button v-if="canRename" class="link" @click="startRename">再改</button>
       <button v-if="canRename" class="link" @click="emit('rename', '')">用原名</button>
     </p>
+
+    <!-- 标签行：type/time 灰底、topic 蓝底实心、user 虚线框；0 标签整个不渲染（不留空行） -->
+    <div v-if="tags.length > 0" class="tagsrow">
+      <span class="tlabel">标签</span>
+      <span
+        v-for="t in visibleTags"
+        :key="t.id"
+        class="chip"
+        :class="t.kind"
+        :title="t.kind === 'user' ? '你自己加的' : t.kind === 'topic' ? 'AI 深读给的' : t.kind === 'type' || t.kind === 'time' ? '基础标签（不可删）' : '扫描时按词匹配的'"
+      >
+        {{ t.name }}
+        <button
+          v-if="canRemove(t)"
+          class="x"
+          title="删掉这个标签"
+          @click="emit('removeTag', t.id)"
+        >×</button>
+      </span>
+      <span
+        v-if="extraTags > 0"
+        class="chip more"
+        :title="extraTitle"
+      >+{{ extraTags }}</span>
+      <button v-if="!addingTag" class="add" title="加一个自己的标签" @click="startAddTag">+</button>
+      <input
+        v-else
+        ref="tagEl"
+        v-model="tagDraft"
+        class="tag-input"
+        type="text"
+        placeholder="标签名，回车确认"
+        spellcheck="false"
+        @keydown.enter.stop.prevent="commitAddTag"
+        @keydown.esc.stop.prevent="addingTag = false"
+        @blur="commitAddTag"
+      />
+    </div>
 
     <!-- 深度解读的一句话结论：没有就不占位 -->
     <p v-if="summary" class="summary" :title="summary">
@@ -573,6 +648,91 @@ function cancelRename() {
   line-height: 1.7;
   color: var(--c-text-2);
   min-width: 0;
+}
+
+/* ---- 标签行（P3 T1.2） ---- */
+.tagsrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+.tlabel {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--c-text-3);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--c-field);
+  color: var(--c-text-2);
+  border: 1px solid transparent;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 基础标签灰底（默认样式就是），模型话题蓝底实心，用户标签虚线框 */
+.chip.topic {
+  background: var(--c-indigo-bg);
+  color: var(--c-indigo);
+  font-weight: 500;
+}
+.chip.user {
+  background: transparent;
+  border: 1px dashed var(--c-border-strong);
+  color: var(--c-text);
+}
+.chip.more {
+  background: transparent;
+  color: var(--c-text-3);
+}
+.chip .x {
+  border: 0;
+  background: transparent;
+  padding: 0 1px;
+  font-size: 12px;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.45;
+  cursor: pointer;
+}
+.chip .x:hover {
+  opacity: 1;
+  color: var(--c-danger);
+}
+.add {
+  border: 1px dashed var(--c-border-strong);
+  background: transparent;
+  border-radius: var(--r-pill);
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--c-text-3);
+}
+.add:hover {
+  color: var(--c-primary);
+  border-color: var(--c-primary);
+}
+.tag-input {
+  height: 22px;
+  width: 130px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--c-primary);
+  background: var(--c-surface);
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--c-text);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--c-primary-glow);
 }
 
 /* ---- 预览 ---- */

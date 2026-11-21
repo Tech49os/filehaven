@@ -13,6 +13,9 @@ const push = vi.fn()
 const deepTagStatus = vi.fn()
 const setDeepTag = vi.fn()
 const setWatchEnabled = vi.fn()
+const listTags = vi.fn()
+const deleteTag = vi.fn()
+const renameTag = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   bootState,
@@ -25,6 +28,9 @@ vi.mock('../../core/ipc', () => ({
   deepTagStatus,
   setDeepTag,
   setWatchEnabled,
+  listTags,
+  deleteTag,
+  renameTag,
   createDir: vi.fn(),
   previewDirName: vi.fn(),
 }))
@@ -252,5 +258,59 @@ describe('设置页 · 新文件监听开关', () => {
     expect(w.text()).toContain('已关闭，只在启动时扫一次')
     expect(w.text()).toContain('启动扫描')
     expect(btn(w, '开启监听')).toBeTruthy()
+  })
+})
+
+// ------------------------------------------------ 标签词表（P3 T1.5）
+
+describe('设置页 · 标签词表', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset().mockResolvedValue(boot([{ id: 1, path: 'C:/桌面', enabled: true }]))
+    listDirs.mockReset().mockResolvedValue([])
+    diskFreeGb.mockReset().mockResolvedValue(120.5)
+    deepTagStatus.mockReset().mockResolvedValue({
+      done: 0, failed: 0, remaining: 0, current: '', running: false,
+      paused: false, enabled: false, note: null,
+    })
+    listTags.mockReset()
+    deleteTag.mockReset()
+    renameTag.mockReset()
+  })
+
+  it('渲染 user/topic 两类标签 + 使用份数', async () => {
+    listTags.mockResolvedValue([
+      { id: 11, name: '安全检查', kind: 'topic', fileCount: 34 },
+      { id: 12, name: '重点跟进', kind: 'user', fileCount: 2 },
+    ])
+    const w = mount(Settings)
+    await flushPromises()
+
+    const rows = w.findAll('.tagrow')
+    expect(rows.length).toBe(2)
+    expect(w.text()).toContain('安全检查')
+    expect(w.text()).toContain('34 份')
+    expect(w.text()).toContain('自己加的')
+    expect(w.text()).toContain('AI 给的')
+  })
+
+  it('删掉一个标签后该行消失（先调命令再刷列表）', async () => {
+    listTags.mockResolvedValue([
+      { id: 11, name: '安全检查', kind: 'topic', fileCount: 34 },
+      { id: 12, name: '重点跟进', kind: 'user', fileCount: 2 },
+    ])
+    deleteTag.mockResolvedValue(34)
+    const w = mount(Settings)
+    await flushPromises()
+
+    const row = w.findAll('.tagrow').find((r) => r.text().includes('安全检查'))!
+    await row.findAll('button').find((b) => b.text() === '删除')!.trigger('click')
+    await flushPromises()
+
+    expect(deleteTag).toHaveBeenCalledWith(11)
+    const names = w.findAll('.tagrow').map((r) => r.text())
+    // 删掉的行要消失
+    expect(names.some((t) => t.includes('安全检查'))).toBe(false)
+    expect(w.findAll('.tagrow').length).toBe(1)
   })
 })

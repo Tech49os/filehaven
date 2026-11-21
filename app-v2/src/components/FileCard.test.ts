@@ -271,3 +271,69 @@ describe('长文件名与长路径：单行不换高、省略但 title 有全文
     expect(p.attributes('title')).toBe(abs)
   })
 })
+
+// ------------------------------------------------ 标签行（P3 T1.2）
+
+describe('卡片标签行：看得见、可删、超 6 折叠', () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+  })
+
+  const tag = (id: number, name: string, kind: 'type' | 'time' | 'topic' | 'keyword' | 'user') => ({
+    id,
+    name,
+    kind,
+  })
+
+  it('0 标签：容器整个不渲染，不留空行', () => {
+    const w = mount(FileCard, {
+      props: { item: item({ tags: [] }), dirCount: 2, position: { index: 0, total: 1 }, preview: null },
+    })
+    expect(w.find('.tagsrow').exists()).toBe(false)
+  })
+
+  it('5 个全显，顺序与 kind 类名按后端给的来', () => {
+    const tags = [
+      tag(1, 'word', 'type'),
+      tag(2, '2026', 'time'),
+      tag(3, '安全检查', 'topic'),
+      tag(4, '通知', 'keyword'),
+      tag(5, '重点', 'user'),
+    ]
+    const w = mount(FileCard, {
+      props: { item: item({ tags }), dirCount: 2, position: { index: 0, total: 1 }, preview: null },
+    })
+    const chips = w.findAll('.tagsrow .chip')
+    expect(chips.length).toBe(5)
+    expect(chips[2].classes()).toContain('topic')
+    expect(chips[4].classes()).toContain('user')
+  })
+
+  it('7 个显 6 个 + 「+1」，+N 的 title 给全量', () => {
+    const tags = [
+      tag(1, 'word', 'type'),
+      tag(2, '2026', 'time'),
+      ...[3, 4, 5, 6].map((i) => tag(i, `话题${i}`, 'topic' as const)),
+      tag(7, '排在最后的那个', 'user'),
+    ]
+    const w = mount(FileCard, {
+      props: { item: item({ tags }), dirCount: 2, position: { index: 0, total: 1 }, preview: null },
+    })
+    const chips = w.findAll('.tagsrow .chip')
+    expect(chips.length).toBe(7) // 6 颗 + 1 个 +N
+    expect(w.find('.chip.more').text()).toBe('+1')
+    expect(w.find('.chip.more').attributes('title')).toBe('排在最后的那个')
+  })
+
+  it('user 标签带 .user 类；type/time 不给删除按钮，topic 给', () => {
+    const tags = [tag(1, 'word', 'type'), tag(2, '安全检查', 'topic'), tag(3, '重点', 'user')]
+    const w = mount(FileCard, {
+      props: { item: item({ tags }), dirCount: 2, position: { index: 0, total: 1 }, preview: null },
+    })
+    // type 不可删，topic/user 可删
+    expect(w.findAll('.chip .x').length).toBe(2)
+    // 点 topic 的 × 发 removeTag 事件
+    w.findAll('.chip .x')[0].trigger('click')
+    expect(w.emitted('removeTag')![0]).toEqual([2])
+  })
+})

@@ -81,6 +81,22 @@ export interface ScanReport {
   elapsedMs: number
 }
 
+/** 一个标签：kind 决定样式与可删性（type/time 基础、topic 模型给、user 人写） */
+export interface TagRef {
+  id: number
+  name: string
+  kind: 'type' | 'time' | 'topic' | 'keyword' | 'user'
+}
+
+/** 标签词表里的一行（设置页 T1.5） */
+export interface TagCount {
+  id: number
+  name: string
+  kind: 'user' | 'topic'
+  /** 挂了多少份文件 */
+  fileCount: number
+}
+
 export interface FileRow {
   id: number
   name: string
@@ -100,6 +116,10 @@ export interface FileRow {
   summary?: string | null
   /** basic（只打了类型/时间标签）| deep（读过正文） */
   tagLevel?: string
+  /** 人改过标签：队列只写 summary 不覆盖标签（P3 T1.4） */
+  tagLocked?: boolean
+  /** 标签，后端按 type→time→topic→keyword→user 排好；空 = 没有标签，不占位 */
+  tags?: TagRef[]
 }
 
 export interface ArchiveDir {

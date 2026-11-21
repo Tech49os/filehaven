@@ -226,6 +226,32 @@ async function onRename(name: string) {
   await store.renameTarget(it.file.id, name)
 }
 
+/** 卡片上加标签：后端落 kind='user' 并锁定，前端就地补一颗（不整批重拉） */
+async function onAddTag(name: string) {
+  const it = store.current
+  if (!it) return
+  try {
+    const t = await ipc.addTag(it.file.id, name)
+    it.file.tags = [...(it.file.tags ?? []), t]
+    it.file.tagLocked = true
+  } catch (e) {
+    actionErr.value = String(e)
+  }
+}
+
+/** 删标签：就地摘掉；type/time 后端会拒，拒了就把错误亮出来 */
+async function onRemoveTag(tagId: number) {
+  const it = store.current
+  if (!it) return
+  try {
+    await ipc.removeTag(it.file.id, tagId)
+    it.file.tags = (it.file.tags ?? []).filter((t) => t.id !== tagId)
+    it.file.tagLocked = true
+  } catch (e) {
+    actionErr.value = String(e)
+  }
+}
+
 async function onNewDirConfirm(input: string) {
   store.closeInput()
   await run(() => store.newDirConfirm(input))
@@ -376,6 +402,8 @@ function goSuggest() {
           @open="openCurrent"
           @reveal="revealCurrent"
           @rename="onRename"
+          @add-tag="onAddTag"
+          @remove-tag="onRemoveTag"
         />
 
         <div v-if="store.inputOpen" class="newdir">

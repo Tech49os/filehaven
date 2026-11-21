@@ -27,6 +27,8 @@ import type {
   ParkedItem,
   ScanReport,
   SourceRoot,
+  TagCount,
+  TagRef,
   UndoReport,
 } from './types'
 
@@ -232,4 +234,31 @@ export function browseDir(dirId: number | null) {
 
 export function searchFiles(q: string, dirId: number | null = null, limit = 200) {
   return invoke<FileRow[]>('search_files', { q, dirId, limit })
+}
+
+// ---------------------------------------------------------------- 标签（P3 M1）
+
+/** 人加一个标签：一律落 kind='user'，并顺手锁定该文件的标签 */
+export function addTag(fileId: number, name: string) {
+  return invoke<TagRef>('add_tag', { fileId, name })
+}
+
+/** 删一个标签：type/time 会被后端以 TAG_LOCKED 拒掉 */
+export function removeTag(fileId: number, tagId: number) {
+  return invoke<void>('remove_tag', { fileId, tagId })
+}
+
+/** 标签词表（设置页）：user/topic 两类 + 使用份数 */
+export function listTags() {
+  return invoke<TagCount[]>('list_tags')
+}
+
+/** 从词表删除（级联清 file_tags），返回清掉的份数 */
+export function deleteTag(tagId: number) {
+  return invoke<number>('delete_tag', { tagId })
+}
+
+/** 改名；撞名则合并到已有标签，返回合并后的 tag id */
+export function renameTag(tagId: number, name: string) {
+  return invoke<number>('rename_tag', { tagId, name })
 }

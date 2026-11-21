@@ -32,7 +32,7 @@ md5 = "0.7"
 # 本地大模型调用（绕开 WebView 的 CORS 限制，见 llm.rs）
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # SQLite：bundled 编静态库，不依赖本机 dll
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "trace"] }
 pdf-extract = "0.7"
 notify = "6"
 

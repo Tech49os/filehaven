@@ -99,6 +99,21 @@ onMounted(load)
           {{ it.file.summary || '未解读' }}
         </p>
 
+        <!-- 标签一行（P3 T1.2）：超过 6 个折叠成 +N，title 给全量；0 标签不渲染 -->
+        <p
+          v-if="(it.file.tags ?? []).length > 0"
+          class="tags"
+          :title="(it.file.tags ?? []).map((t) => t.name).join('、')"
+        >
+          <span
+            v-for="t in (it.file.tags ?? []).slice(0, 6)"
+            :key="t.id"
+            class="tchip"
+            :class="t.kind"
+          >{{ t.name }}</span>
+          <span v-if="it.file.tags!.length > 6" class="tchip more">+{{ it.file.tags!.length - 6 }}</span>
+        </p>
+
         <p v-if="it.file.note" class="note">备注：{{ it.file.note }}</p>
 
         <div class="acts">
@@ -187,6 +202,42 @@ onMounted(load)
   margin: 0;
   font-size: 12px;
   color: var(--c-text-2);
+}
+
+/* 标签一行（P3 T1.2）：样式与卡片一致 —— topic 蓝底、user 虚线、基础灰底 */
+.tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  min-width: 0;
+}
+.tchip {
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  background: var(--c-field);
+  color: var(--c-text-2);
+  border: 1px solid transparent;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tchip.topic {
+  background: var(--c-indigo-bg);
+  color: var(--c-indigo);
+}
+.tchip.user {
+  background: transparent;
+  border: 1px dashed var(--c-border-strong);
+  color: var(--c-text);
+}
+.tchip.more {
+  background: transparent;
+  color: var(--c-text-3);
 }
 
 .acts {

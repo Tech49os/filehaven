@@ -3390,3 +3390,372 @@ mod watch_upsert_scope {
         assert_eq!(get("new.docx"), "queued");
     }
 }
+
+// ================================================================ P3 M1 标签：看得见、改得动
+
+mod p3_m1 {
+    use crate::index as db;
+    use rusqlite::params;
+
+    /// 任意 kind 的测试标签（type/time/keyword 基础标签没有现成 helper）
+    fn insert_tag_of_kind(conn: &rusqlite::Connection, file_id: i64, name: &str, kind: &str) -> i64 {
+        conn.execute(
+            "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, ?2)",
+            params![name, kind],
+        )
+        .unwrap();
+        let tid: i64 = conn
+            .query_row("SELECT id FROM tags WHERE name=?1 AND kind=?2", params![name, kind], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1,?2,0.9)",
+            params![file_id, tid],
+        )
+        .unwrap();
+        tid
+    }
+
+    // T1.1 ①：3 份文件 7 个标签跨 4 种 kind，各自数量与顺序正确
+    // 顺序 = type → time → topic → keyword → user，同类按 name
+    #[test]
+    fn attach_tags_returns_count_and_order_across_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let a = db::insert_test_file(&conn, root.id, "甲.docx", db::Status::Labeled).unwrap();
+        let b = db::insert_test_file(&conn, root.id, "乙.xlsx", db::Status::Labeled).unwrap();
+        let c = db::insert_test_file(&conn, root.id, "丙.pdf", db::Status::Labeled).unwrap();
+
+        insert_tag_of_kind(&conn, a, "word", "type");
+        insert_tag_of_kind(&conn, a, "2026", "time");
+        insert_tag_of_kind(&conn, a, "安全检查", "topic");
+        insert_tag_of_kind(&conn, a, "年度", "topic");
+        insert_tag_of_kind(&conn, a, "生产", "keyword");
+        insert_tag_of_kind(&conn, a, "重点跟进", "user");
+        insert_tag_of_kind(&conn, b, "excel", "type");
+        insert_tag_of_kind(&conn, b, "费率", "topic");
+
+        let rows = db::file_rows(&conn, &[a, b, c]).unwrap();
+        let ra = rows.iter().find(|r| r.id == a).unwrap();
+        let rb = rows.iter().find(|r| r.id == b).unwrap();
+        let rc = rows.iter().find(|r| r.id == c).unwrap();
+
+        // 甲：type(1) + time(1) + topic(2) + keyword(1) + user(1) = 6
+        let a_kinds: Vec<&str> = ra.tags.iter().map(|t| t.kind.as_str()).collect();
+        assert_eq!(ra.tags.len(), 6, "甲应有 6 个标签：{:?}", ra.tags);
+        assert_eq!(
+            a_kinds,
+            vec!["type", "time", "topic", "topic", "keyword", "user"],
+            "顺序必须是 type→time→topic→keyword→user：{:?}",
+            a_kinds
+        );
+        // 同类按 name（按码点序）：「安全检查」<「年度」
+        assert_eq!(ra.tags[2].name, "安全检查");
+        assert_eq!(ra.tags[3].name, "年度");
+
+        assert_eq!(rb.tags.len(), 2);
+        assert!(rc.tags.is_empty(), "丙没标签，不该 panic 也不该有占位");
+    }
+
+    // T1.1 ②：无标签文件 tags 为空、不 panic（并覆盖 file_row 单份出口）
+    #[test]
+    fn file_without_tags_is_empty_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "裸文件.docx", db::Status::Queued).unwrap();
+        let one = db::file_row(&conn, fid).unwrap().unwrap();
+        assert!(one.tags.is_empty());
+        let many = db::file_rows(&conn, &[fid, -1]).unwrap();
+        assert!(many.iter().all(|r| r.tags.is_empty()));
+    }
+
+    // T1.1 ③：tags_for 空入参不发 SQL（trace 只收 fn 指针，用线程局部计数
+    // —— 测试是并行跑的，静态量会被别的线程的 SELECT 污染）
+    thread_local! {
+        static TRACE_SELECTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn trace_select(sql: &str) {
+        if sql.contains("SELECT") {
+            TRACE_SELECTS.with(|c| c.set(c.get() + 1));
+        }
+    }
+    #[test]
+    fn tags_for_empty_ids_sends_no_sql() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        TRACE_SELECTS.with(|c| c.set(0));
+        conn.trace(Some(trace_select));
+        let out = db::tags_for(&conn, &[]).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            TRACE_SELECTS.with(std::cell::Cell::get),
+            0,
+            "空入参一条 SELECT 都不许发"
+        );
+    }
+
+    // T1.1 ④：同一份文件的标签顺序稳定（跑两次逐字相等）
+    #[test]
+    fn tag_order_is_stable_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "稳定.docx", db::Status::Labeled).unwrap();
+        insert_tag_of_kind(&conn, fid, "用户标注", "user");
+        insert_tag_of_kind(&conn, fid, "关键词甲", "keyword");
+        insert_tag_of_kind(&conn, fid, "主题乙", "topic");
+        insert_tag_of_kind(&conn, fid, "主题甲", "topic");
+        insert_tag_of_kind(&conn, fid, "pdf", "type");
+
+        let dump = |conn: &rusqlite::Connection| -> Vec<String> {
+            db::file_row(conn, fid)
+                .unwrap()
+                .unwrap()
+                .tags
+                .iter()
+                .map(|t| format!("{}|{}|{}", t.kind, t.name, t.id))
+                .collect()
+        };
+        let first = dump(&conn);
+        let second = dump(&conn);
+        assert_eq!(first, second, "两次读取顺序必须逐字相等");
+        assert_eq!(first.len(), 5);
+    }
+
+    // T1.1 ⑤：rows_by_status('parked') 也带标签（五个出口里最容易被漏的一个）
+    #[test]
+    fn rows_by_status_parked_carries_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "搁置件.docx", db::Status::Parked).unwrap();
+        insert_tag_of_kind(&conn, fid, "待定话题", "topic");
+
+        let rows = db::rows_by_status(&conn, "parked").unwrap();
+        let row = rows.iter().find(|r| r.id == fid).expect("parked 行要在列表里");
+        assert_eq!(row.tags.len(), 1);
+        assert_eq!(row.tags[0].name, "待定话题");
+    }
+
+    // T1.3 ①：新增落 kind='user'
+    #[test]
+    fn add_tag_lands_as_user_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "手动.docx", db::Status::Labeled).unwrap();
+        let t = db::add_tag(&mut conn, fid, "领导交办").unwrap();
+        assert_eq!(t.kind, "user");
+        assert_eq!(t.name, "领导交办");
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert!(row.tag_locked, "加标签即表过态，必须锁");
+        assert_eq!(row.tags.len(), 1);
+        assert_eq!(row.tags[0].kind, "user");
+    }
+
+    // T1.3 ②：同名重复不重复插（tags 表只有一行）
+    #[test]
+    fn add_tag_same_name_no_duplicate_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "重复.docx", db::Status::Labeled).unwrap();
+        let t1 = db::add_tag(&mut conn, fid, "同名").unwrap();
+        let t2 = db::add_tag(&mut conn, fid, "同名").unwrap();
+        assert_eq!(t1.id, t2.id);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE name='同名' AND kind='user'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "tags 表只许一行");
+        // 但同一文件重复加，file_tags 也不该翻倍
+        let ft: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_tags WHERE file_id=?1", [fid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ft, 1);
+    }
+
+    // T1.3 ③：超 20 字截断（不是报错）
+    #[test]
+    fn add_tag_truncates_over_20_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "长名.docx", db::Status::Labeled).unwrap();
+        let raw = "这是一个特别特别长的标签名远远超过二十个字符的长度限制内容继续往后写";
+        let t = db::add_tag(&mut conn, fid, raw).unwrap();
+        assert_eq!(t.name.chars().count(), 20, "截到 20 字，不是报错");
+    }
+
+    // T1.3 ④：空名 BAD_INPUT（含只带了 # 的）
+    #[test]
+    fn add_tag_empty_is_bad_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "空名.docx", db::Status::Labeled).unwrap();
+        for bad in ["", "   ", "###", "  ##  "] {
+            let err = db::add_tag(&mut conn, fid, bad).unwrap_err();
+            assert_eq!(err.code, "BAD_INPUT", "输入 {bad:?} 应拒空");
+        }
+    }
+
+    // T1.3 ⑤：删 type 报 TAG_LOCKED
+    #[test]
+    fn remove_tag_type_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "基础.docx", db::Status::Labeled).unwrap();
+        let tid = insert_tag_of_kind(&conn, fid, "word", "type");
+        let err = db::remove_tag(&mut conn, fid, tid).unwrap_err();
+        assert_eq!(err.code, "TAG_LOCKED");
+        // time 同理
+        let tid2 = insert_tag_of_kind(&conn, fid, "2026", "time");
+        assert_eq!(db::remove_tag(&mut conn, fid, tid2).unwrap_err().code, "TAG_LOCKED");
+    }
+
+    // T1.3 ⑥：删 topic 到空后 tag_level 仍是 deep（「读过但没结论」≠「没读过」）
+    #[test]
+    fn remove_all_tags_keeps_tag_level_deep() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "删空.docx", db::Status::Labeled).unwrap();
+        db::apply_deep_tag(&mut conn, fid, &["某话题".into()], Some("读过的一句话。")).unwrap();
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        let tid = row.tags[0].id;
+        db::remove_tag(&mut conn, fid, tid).unwrap();
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert!(row.tags.is_empty());
+        assert_eq!(row.tag_level, "deep", "删到不剩也是读过");
+        assert_eq!(row.summary.as_deref(), Some("读过的一句话。"), "summary 不能跟着没");
+    }
+
+    // T1.4 ①：手加 user 标签 → 跑 apply_deep_tag → user 还在、模型标签没进来、summary 已更新
+    #[test]
+    fn locked_row_keeps_user_tag_and_skips_model_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "锁定.docx", db::Status::Labeled).unwrap();
+        db::add_tag(&mut conn, fid, "我自己的标签").unwrap();
+
+        let skipped = db::apply_deep_tag(
+            &mut conn,
+            fid,
+            &["模型话题".to_string()],
+            Some("模型的新结论。"),
+        )
+        .unwrap();
+        assert!(skipped, "锁定行必须报告跳过了 tags");
+
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert_eq!(row.tags.len(), 1, "模型标签一个都不许写进来");
+        assert_eq!(row.tags[0].name, "我自己的标签");
+        assert_eq!(row.summary.as_deref(), Some("模型的新结论。"), "summary 照常更新");
+        assert_eq!(row.tag_level, "deep");
+    }
+
+    // T1.4 ②：未锁定行行为不变（回归）
+    #[test]
+    fn unlocked_row_behaves_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "没锁.docx", db::Status::Labeled).unwrap();
+        let skipped = db::apply_deep_tag(&mut conn, fid, &["新话题".into()], Some("结论。")).unwrap();
+        assert!(!skipped);
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert_eq!(row.tags.len(), 1);
+        assert_eq!(row.tags[0].name, "新话题");
+        assert!(!row.tag_locked);
+    }
+
+    // T1.4 ③：锁定行重复跑两次结果相同（幂等）
+    #[test]
+    fn locked_row_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let fid = db::insert_test_file(&conn, root.id, "幂等.docx", db::Status::Labeled).unwrap();
+        db::add_tag(&mut conn, fid, "人写的").unwrap();
+        for _ in 0..2 {
+            db::apply_deep_tag(&mut conn, fid, &["轮次话题".into()], Some("固定结论。")).unwrap();
+        }
+        let row = db::file_row(&conn, fid).unwrap().unwrap();
+        assert_eq!(row.tags.len(), 1, "两轮都只许有人写的那个标签");
+        assert_eq!(row.summary.as_deref(), Some("固定结论。"));
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE name='轮次话题'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "连 tags 表都不该被写进模型词");
+    }
+
+    // T1.5 ①：delete_tag 级联清 file_tags
+    #[test]
+    fn delete_tag_cascades_file_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f1 = db::insert_test_file(&conn, root.id, "文件一.docx", db::Status::Labeled).unwrap();
+        let f2 = db::insert_test_file(&conn, root.id, "文件二.docx", db::Status::Labeled).unwrap();
+        db::apply_deep_tag(&mut conn, f1, &["共享话题".into()], None).unwrap();
+        db::apply_deep_tag(&mut conn, f2, &["共享话题".into(), "另一个".into()], None).unwrap();
+
+        let tags = db::list_tags(&conn).unwrap();
+        let target = tags.iter().find(|t| t.name == "共享话题").expect("词表里要有共享话题");
+        assert_eq!(target.file_count, 2, "词表要数出挂了几份文件");
+
+        let removed = db::delete_tag(&mut conn, target.id).unwrap();
+        assert_eq!(removed, 2, "删词要报告清掉的份数");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_tags WHERE tag_id=?1", [target.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "file_tags 必须级联清空");
+        let n2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE id=?1", [target.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 0, "tags 行本身也要删");
+    }
+
+    // T1.5 ②：rename_tag 撞名则合并（UNIQUE(name,kind) 不冲突）
+    #[test]
+    fn rename_tag_to_existing_name_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f1 = db::insert_test_file(&conn, root.id, "文件一.docx", db::Status::Labeled).unwrap();
+        let f2 = db::insert_test_file(&conn, root.id, "文件二.docx", db::Status::Labeled).unwrap();
+        db::apply_deep_tag(&mut conn, f1, &["数字化转型".into()], None).unwrap();
+        db::apply_deep_tag(&mut conn, f2, &["数智化转型".into()], None).unwrap();
+
+        let tags = db::list_tags(&conn).unwrap();
+        let src = tags.iter().find(|t| t.name == "数智化转型").unwrap();
+        let merged_id = db::rename_tag(&mut conn, src.id, "数字化转型").unwrap();
+        let dst = tags.iter().find(|t| t.name == "数字化转型").unwrap();
+        assert_eq!(merged_id, dst.id, "撞名要归并到已有行");
+
+        // 两个文件现在都挂在目标标签上，源标签消失
+        let both: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT file_id) FROM file_tags ft JOIN tags t ON t.id=ft.tag_id WHERE t.name='数字化转型'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(both, 2, "合并后两个文件都要在");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE name='数智化转型'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "源标签行要消失");
+        let dup: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT name FROM tags WHERE kind='topic' GROUP BY name, kind HAVING COUNT(*)>1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dup, 0, "UNIQUE(name,kind) 不许出现重复");
+    }
+}

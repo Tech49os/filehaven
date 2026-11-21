@@ -10,7 +10,7 @@ import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
 import { onDeepTagProgress, onScanProgress } from '../../core/events'
 import { humanize, toCmdError } from '../../core/cmdError'
-import type { DeepTagStats, ScanProgress, ScanReport } from '../../core/types'
+import type { DeepTagStats, ScanProgress, ScanReport, TagCount } from '../../core/types'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const app = useAppStore()
@@ -73,6 +73,62 @@ const deepTotal = computed(() => {
   return st ? st.done + st.remaining : 0
 })
 
+// ---------------------------------------------------------------- 标签词表（P3 T1.5）
+
+/** user / topic 标签 + 使用份数；null = 还没拉回来 */
+const tagList = ref<TagCount[] | null>(null)
+const tagBusy = ref(false)
+/** 正在改名的标签 id；null = 没有 */
+const renamingTag = ref<number | null>(null)
+const renameDraft = ref('')
+
+async function loadTags() {
+  try {
+    tagList.value = await ipc.listTags()
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  }
+}
+
+/** 从词表删标签：级联清掉所有文件上的挂载，返回清了几份 */
+async function onDeleteTag(t: TagCount) {
+  if (tagBusy.value) return
+  tagBusy.value = true
+  try {
+    const n = await ipc.deleteTag(t.id)
+    tagList.value = (tagList.value ?? []).filter((x) => x.id !== t.id)
+    if (n > 0) err.value = null
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  } finally {
+    tagBusy.value = false
+  }
+}
+
+function startRenameTag(t: TagCount) {
+  renamingTag.value = t.id
+  renameDraft.value = t.name
+}
+
+/** 改名；撞名则后端自动合并到已有标签 */
+async function commitRenameTag() {
+  const id = renamingTag.value
+  renamingTag.value = null
+  if (id == null) return
+  const v = renameDraft.value.trim()
+  if (!v) return
+  tagBusy.value = true
+  try {
+    const mergedId = await ipc.renameTag(id, v)
+    await loadTags()
+    if (mergedId !== id) err.value = null
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  } finally {
+    tagBusy.value = false
+  }
+}
+
 async function refreshDeep() {
   try {
     deep.value = await ipc.deepTagStatus()
@@ -122,6 +178,7 @@ onMounted(async () => {
   if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
+  await loadTags()
   unlisten = await onScanProgress((p) => {
     progress.value = p
   })
@@ -291,6 +348,44 @@ async function removeRoot(id: number) {
         推荐靠标签判断「同类」，待定区靠它让你第二次看得懂。
         扫描件（没有文字层）会标「未解读」，不硬猜。
       </p>
+    </Card>
+
+    <Card title="标签词表">
+      <template #action>
+        <button class="btn ghost" :disabled="tagBusy" @click="loadTags">
+          刷新
+        </button>
+      </template>
+      <p class="hint">
+        AI 深读给的主题标签和你自己加的标签都在这里。删掉一个标签，所有文件上的它一起摘掉；
+        改名撞上已有标签时两边合并 —— 用来收拾「同一件事被写成不同词」的情况。
+      </p>
+      <p v-if="Array.isArray(tagList) && tagList.length === 0" class="hint dim">
+        还没有标签：开一次深度解读，或直接在文件的卡片上加一个。
+      </p>
+      <p v-else-if="tagList === null" class="hint dim">正在读词表…</p>
+      <ul v-else class="taglist">
+        <li v-for="t in tagList ?? []" :key="t.id" class="tagrow">
+          <template v-if="renamingTag === t.id">
+            <input
+              v-model="renameDraft"
+              class="tag-rename"
+              type="text"
+              spellcheck="false"
+              @keydown.enter.stop.prevent="commitRenameTag"
+              @keydown.esc.stop.prevent="renamingTag = null"
+              @blur="commitRenameTag"
+            />
+          </template>
+          <template v-else>
+            <span class="tname" :title="t.name">{{ t.name }}</span>
+            <span class="tkind" :class="t.kind">{{ t.kind === 'user' ? '自己加的' : 'AI 给的' }}</span>
+            <span class="tcount">{{ t.fileCount }} 份</span>
+            <button class="tbtn" :disabled="tagBusy" @click="startRenameTag(t)">改名</button>
+            <button class="tbtn bad" :disabled="tagBusy" @click="onDeleteTag(t)">删除</button>
+          </template>
+        </li>
+      </ul>
     </Card>
 
     <Card title="新文件监听">
@@ -468,5 +563,85 @@ async function removeRoot(id: number) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- 标签词表（P3 T1.5） ---- */
+.taglist {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+.tagrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  border-bottom: 0.5px solid var(--c-border);
+}
+.tagrow:last-child {
+  border-bottom: 0;
+}
+.tname {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tkind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  background: var(--c-field);
+  color: var(--c-text-2);
+}
+.tkind.user {
+  border: 1px dashed var(--c-border-strong);
+  background: transparent;
+}
+.tkind.topic {
+  background: var(--c-indigo-bg);
+  color: var(--c-indigo);
+}
+.tcount {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tbtn {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--c-text-2);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.tbtn:hover {
+  color: var(--c-primary);
+  background: var(--c-primary-bg);
+}
+.tbtn.bad:hover {
+  color: var(--c-danger);
+  background: var(--c-danger-bg);
+}
+.tag-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--c-primary);
+  background: var(--c-surface);
+  font-size: 12.5px;
+  font-family: var(--font);
+  color: var(--c-text);
+  outline: none;
 }
 </style>
