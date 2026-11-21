@@ -186,7 +186,8 @@ fn strip_trailing_commas(s: &str) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    Send,
+    /// `vision=true` 走视觉通道（图片），false 走文本
+    Send { vision: bool },
     Skip(&'static str),
 }
 
@@ -195,21 +196,36 @@ pub enum Decision {
 /// * 图片走视觉分支（P3 才做），`code` / `other` 读不出有意义正文
 /// * **老版二进制 Office**（.doc/.xls/.ppt/.wps）解不出 XML，别浪费时间
 /// * 正文 < 30 字 = 没有可解读的内容，硬送模型只会得到编造
-pub fn should_deep_tag(kind: &str, ext: &str, text_len: usize) -> Decision {
+pub const VISION_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp"];
+/// 原图 ≤8MB（超了不做缩放 —— 没有图像库，硬加一个只为缩图不值）
+pub const VISION_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+pub fn should_deep_tag(kind: &str, ext: &str, text_len: usize, size: u64) -> Decision {
     let ext = ext.trim_start_matches('.').to_lowercase();
     if kind == "code" || kind == "other" {
         return Decision::Skip("非文本可解读类型");
     }
     if kind == "image" {
-        return Decision::Skip("图片走视觉分支（P3）");
+        // 视觉分支（P3 T4.1）：只送 Ollama 吃得住的四类；bmp/gif 送进去只会得到胡编
+        if !VISION_EXTS.contains(&ext.as_str()) {
+            return Decision::Skip("图片格式不支持");
+        }
+        if size > VISION_MAX_BYTES {
+            return Decision::Skip("图片过大");
+        }
+        return Decision::Send { vision: true };
     }
     if matches!(ext.as_str(), "doc" | "xls" | "ppt" | "wps" | "et" | "dps") {
         return Decision::Skip("老版二进制 Office，读不出正文");
     }
     if text_len < MIN_TEXT {
+        if ext == "pdf" {
+            // P3 T4.4：明确「不解析」，不装读。栅格化要引 pdfium（+8MB 原生依赖），留 P4
+            return Decision::Skip("扫描件：本机不解析图像页");
+        }
         return Decision::Skip("无正文");
     }
-    Decision::Send
+    Decision::Send { vision: false }
 }
 
 /// 取正文（给队列用）。抽不出就是空串，不 panic、不冒泡
@@ -254,6 +270,20 @@ pub struct Job {
 ///
 /// 抽出来是为了能单测：真正落库在 `index::apply_deep_tag`，
 /// 这里只负责「把这份文件读成一段结构化结论」。
+/// 视觉提示词（P3 T4.2）：三段式，明写「看不清就给空数组，不要猜」。
+/// 图片不产 `type`/`time` 标签 —— parse 出来的 tags 落库时一律进 `kind='topic'`，天然满足。
+pub fn build_vision_prompt(name: &str) -> String {
+    format!(
+        "看这张图片（文件名：{name}），回答：\n\
+         1. 这是一张什么图（照片/截图/图表/扫描件）；\n\
+         2. 与什么项目或事项相关；\n\
+         3. 给 3~5 个主题标签（2~6 字的通用名词短语，如「现场照片」「设备验收」），\n\
+         并用一句话说明这张图是什么（20~40 字）。\n\
+         **看不清或没有依据就不要猜：返回空数组 []，summary 填空字符串。**\n\
+         只输出 JSON：{{\"tags\":[\"…\"],\"summary\":\"…\"}}"
+    )
+}
+
 pub fn process_one(
     job: &Job,
     base: &str,
@@ -261,13 +291,60 @@ pub fn process_one(
     timeout: std::time::Duration,
 ) -> Result<DeepTag, CmdError> {
     let text = text_of(&job.abs_path, &job.ext, &job.kind, job.size);
-    match should_deep_tag(&job.kind, &job.ext, text.chars().count()) {
+    match should_deep_tag(&job.kind, &job.ext, text.chars().count(), job.size) {
         Decision::Skip(_) => Ok(DeepTag::default()),
-        Decision::Send => {
-            let prompt = build_prompt(&job.name, &job.kind, &text);
-            let raw = crate::llm::generate(base, model, &prompt, timeout)?;
+        Decision::Send { vision } => {
+            let raw = if vision {
+                // 视觉：读原图 → base64 直送（§3.4）。没有图像库，不做任何缩放
+                let bytes = std::fs::read(&job.abs_path)?;
+                use std::io::Write as _;
+                let mut b64 = String::with_capacity((bytes.len() + 2) / 3 * 4 + 4);
+                let mut enc = Base64Writer { out: &mut b64 };
+                // 标准库没有 base64；手写一个小编码器（只在测试与真机用，性能足够）
+                let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let b = &bytes;
+                let mut i = 0;
+                while i + 2 < b.len() {
+                    let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | b[i + 2] as u32;
+                    let _ = enc.write_all(&[
+                        table[(n >> 18) as usize & 63],
+                        table[(n >> 12) as usize & 63],
+                        table[(n >> 6) as usize & 63],
+                        table[n as usize & 63],
+                    ]);
+                    i += 3;
+                }
+                let rem = b.len() - i;
+                if rem == 1 {
+                    let n = (b[i] as u32) << 16;
+                    let _ = enc.write_all(&[table[(n >> 18) as usize & 63], table[(n >> 12) as usize & 63], b'=', b'=']);
+                } else if rem == 2 {
+                    let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
+                    let _ = enc.write_all(&[table[(n >> 18) as usize & 63], table[(n >> 12) as usize & 63], table[(n >> 6) as usize & 63], b'=']);
+                }
+                drop(enc);
+                let prompt = build_vision_prompt(&job.name);
+                crate::llm::generate_vision(base, model, &prompt, &b64, timeout)?
+            } else {
+                let prompt = build_prompt(&job.name, &job.kind, &text);
+                crate::llm::generate(base, model, &prompt, timeout)?
+            };
             parse(&raw)
         }
+    }
+}
+
+/// 极简 base64 写出器（std::io::Write 适配，只为上面的手写编码器收口）
+struct Base64Writer<'a> {
+    out: &'a mut String,
+}
+impl<'a> std::io::Write for Base64Writer<'a> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.out.push_str(std::str::from_utf8(buf).map_err(|_| std::io::ErrorKind::InvalidData)?);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -472,14 +549,25 @@ mod tests {
 
     #[test]
     fn whitelist_decisions() {
-        assert_eq!(should_deep_tag("word", "docx", 500), Decision::Send);
-        assert_eq!(should_deep_tag("excel", "xlsx", 500), Decision::Send);
-        assert_eq!(should_deep_tag("pdf", "pdf", 500), Decision::Send);
-        assert_eq!(should_deep_tag("other", "js", 500), Decision::Skip("非文本可解读类型"));
-        assert_eq!(should_deep_tag("other", "zip", 500), Decision::Skip("非文本可解读类型"));
-        assert_eq!(should_deep_tag("word", "doc", 500), Decision::Skip("老版二进制 Office，读不出正文"));
-        assert_eq!(should_deep_tag("word", "docx", 5), Decision::Skip("无正文"));
-        assert_eq!(should_deep_tag("image", "png", 0), Decision::Skip("图片走视觉分支（P3）"));
+        assert_eq!(should_deep_tag("word", "docx", 500, 100), Decision::Send { vision: false });
+        assert_eq!(should_deep_tag("excel", "xlsx", 500, 100), Decision::Send { vision: false });
+        assert_eq!(should_deep_tag("pdf", "pdf", 500, 100), Decision::Send { vision: false });
+        assert_eq!(should_deep_tag("other", "js", 500, 100), Decision::Skip("非文本可解读类型"));
+        assert_eq!(should_deep_tag("other", "zip", 500, 100), Decision::Skip("非文本可解读类型"));
+        assert_eq!(should_deep_tag("word", "doc", 500, 100), Decision::Skip("老版二进制 Office，读不出正文"));
+        assert_eq!(should_deep_tag("word", "docx", 5, 100), Decision::Skip("无正文"));
+        // P3 T4.4：扫描件明确「不解析」，不许有人顺手改成「识别中」
+        assert_eq!(should_deep_tag("pdf", "pdf", 5, 100), Decision::Skip("扫描件：本机不解析图像页"));
+        // P3 T4.1：图片走视觉分支（白名单 + 8MB 闸）
+        assert_eq!(should_deep_tag("image", "png", 0, 100), Decision::Send { vision: true });
+        assert_eq!(should_deep_tag("image", "jpg", 0, 100), Decision::Send { vision: true });
+        assert_eq!(should_deep_tag("image", "webp", 0, 100), Decision::Send { vision: true });
+        assert_eq!(should_deep_tag("image", "bmp", 0, 100), Decision::Skip("图片格式不支持"));
+        assert_eq!(should_deep_tag("image", "gif", 0, 100), Decision::Skip("图片格式不支持"));
+        assert_eq!(
+            should_deep_tag("image", "png", 0, 9 * 1024 * 1024),
+            Decision::Skip("图片过大")
+        );
     }
 
     /// 起一个假 Ollama：返回固定响应体。

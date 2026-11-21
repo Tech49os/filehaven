@@ -141,3 +141,43 @@ pub fn unload_others(base: &str, keep: &str, timeout: Duration) {
             .send_string(&body.to_string());
     }
 }
+
+// ---------------------------------------------------------------- 视觉通道（P3 T4.1）
+
+/// 视觉请求：与 `generate` 同一路数，但带 `images`（base64，§3.4 的请求形状）
+pub fn generate_vision(
+    base: &str,
+    model: &str,
+    prompt: &str,
+    image_b64: &str,
+    timeout: Duration,
+) -> Result<String, CmdError> {
+    let url = format!("{}/api/generate", base.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "images": [image_b64],
+        "stream": false,
+        "format": "json",
+        "options": { "num_ctx": 4096, "temperature": 0.2 },
+        "think": false,
+    });
+    let res = agent(timeout)
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string());
+    match res {
+        Ok(r) => {
+            let text = r
+                .into_string()
+                .map_err(|e| CmdError::new(MODEL_BAD_OUTPUT, format!("读取模型响应失败：{e}")))?;
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| CmdError::new(MODEL_BAD_OUTPUT, format!("响应不是 JSON：{e}")))?;
+            v["response"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| CmdError::new(MODEL_BAD_OUTPUT, "响应里没有 response 字段"))
+        }
+        Err(e) => Err(classify_transport_error(&e)),
+    }
+}
