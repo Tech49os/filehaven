@@ -4426,3 +4426,249 @@ mod p3_m4 {
         assert!(db::job_by_id(&conn, 999_999).unwrap().is_none());
     }
 }
+
+// ================================================================ P4 M1：重新归类（归档区内二次迁移）
+
+mod p4_m1 {
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::{NewAssignment, ScannedFile};
+    use crate::plan::mtime_ms;
+    use crate::tests::index::fresh_db;
+    use std::path::Path;
+
+    struct Seeded {
+        _src: tempfile::TempDir,
+        _arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        dir1: i64,
+        dir2: i64,
+        ids: Vec<i64>,
+        arc_path: std::path::PathBuf,
+        src_path: std::path::PathBuf,
+    }
+
+    /// 真实两目录 + 2 份文件，先走完一次普通迁移（都进了 dir1）
+    fn seed() -> Seeded {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+
+        let names: Vec<(String, Vec<u8>)> = vec![
+            ("安全检查通知.docx".into(), b"aaa".to_vec()),
+            ("检查表.xlsx".into(), b"bbbb".to_vec()),
+        ];
+        let mut scanned = Vec::new();
+        for (name, bytes) in &names {
+            let p = src.path().join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let m = std::fs::metadata(&p).unwrap();
+            scanned.push(ScannedFile {
+                name: name.clone(),
+                path: p.to_string_lossy().to_string(),
+                ext: name.rsplit('.').next().unwrap_or("").to_string(),
+                kind: "word".into(),
+                size: m.len(),
+                mtime: mtime_ms(&m),
+            });
+        }
+        db::upsert_files(&mut conn, root.id, &scanned).unwrap();
+
+        let d1 = db::insert_dir(&conn, None, "安全检查", "user").unwrap();
+        let d2 = db::insert_dir(&conn, None, "整改台账", "user").unwrap();
+        let ids: Vec<i64> = db::list_queued(&conn, Some(root.id))
+            .unwrap()
+            .into_iter()
+            .map(|(id, ..)| id)
+            .collect();
+        for id in &ids {
+            db::force_status(&conn, *id, db::Status::Confirmed).unwrap();
+            db::insert_assignment(
+                &conn,
+                &NewAssignment {
+                    file_id: *id,
+                    batch_id: None,
+                    target_dir_id: Some(d1.id),
+                    origin: "user_picked".into(),
+                    confidence: None,
+                    reason: None,
+                    decision: "accepted".into(),
+                    decided_at: db::now_ms(),
+                },
+            )
+            .unwrap();
+        }
+        let res = mig::apply(&mut conn, arc.path(), &[], &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(res.copied, 2, "前提不成立：迁移要先成功");
+        let arc_path = arc.path().to_path_buf();
+        let src_path = src.path().to_path_buf();
+        Seeded {
+            _src: src,
+            _arc: arc,
+            conn,
+            dir1: d1.id,
+            dir2: d2.id,
+            ids,
+            arc_path,
+            src_path,
+        }
+    }
+
+    fn files_in(root: &Path) -> usize {
+        walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .count()
+    }
+
+    /// T1.2 主路径：挪文件、旧副本进隔离区、archived_path/archive_dir_id 更新、状态与标签不动
+    #[test]
+    fn recat_moves_file_updates_paths_and_keeps_tags() {
+        let mut s = seed();
+        let id = s.ids[0];
+        // 预置标签：重新归类绝不能动标签
+        s.conn
+            .execute("INSERT INTO tags(name, kind) VALUES('安全检查','topic')", [])
+            .unwrap();
+        let tag_id = s.conn.last_insert_rowid();
+        s.conn
+            .execute(
+                "INSERT INTO file_tags(file_id, tag_id) VALUES(?1, ?2)",
+                [id, tag_id],
+            )
+            .unwrap();
+
+        let old_path = s.arc_path.join("安全检查").join("安全检查通知.docx");
+        assert!(old_path.is_file(), "前提不成立：文件应已在归档区");
+
+        let out = mig::recategorize(&mut s.conn, &s.arc_path, id, s.dir2).unwrap();
+        let new_path = s.arc_path.join("整改台账").join("安全检查通知.docx");
+        assert!(new_path.is_file(), "新位置必须有文件");
+        assert!(!old_path.exists(), "旧位置必须空出来");
+        assert_eq!(out.new_path, new_path.to_string_lossy().to_string());
+        assert!(!out.renamed);
+
+        // 旧归档副本进了隔离区（永不直删）
+        let q = s.arc_path.join(".filebutler/quarantine");
+        assert!(files_in(&q) >= 1, "旧副本必须躺在隔离区，不许直删");
+        // 内容一致
+        assert_eq!(std::fs::read(&new_path).unwrap(), b"aaa");
+
+        // 库：路径与目录更新、状态保持 migrated、台账 kind
+        let (ap, adir, status): (String, i64, String) = s
+            .conn
+            .query_row(
+                "SELECT archived_path, archive_dir_id, status FROM files WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(ap, new_path.to_string_lossy().to_string());
+        assert_eq!(adir, s.dir2);
+        assert_eq!(status, "migrated");
+        let mig_row = db::latest_migration(&s.conn).unwrap().unwrap();
+        assert_eq!(mig_row.kind, "recategorize");
+
+        // 标签还在
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_tags WHERE file_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "重新归类不许动标签");
+    }
+
+    /// T1.2 目标目录有同名 → 自动错开 `_2`，绝不覆盖
+    #[test]
+    fn recat_renames_on_conflict_never_overwrites() {
+        let mut s = seed();
+        let id = s.ids[0];
+        // 目标目录先躺一份同名但内容不同的文件
+        let d2path = s.arc_path.join("整改台账");
+        std::fs::create_dir_all(&d2path).unwrap();
+        std::fs::write(d2path.join("安全检查通知.docx"), "别人的文件".as_bytes()).unwrap();
+
+        let out = mig::recategorize(&mut s.conn, &s.arc_path, id, s.dir2).unwrap();
+        assert!(out.renamed, "撞名必须错开并如实回报");
+        let moved = std::path::PathBuf::from(&out.new_path);
+        assert!(moved.is_file());
+        assert_eq!(std::fs::read(&moved).unwrap(), b"aaa", "错开的是新来的那份");
+        assert_eq!(
+            std::fs::read(d2path.join("安全检查通知.docx")).unwrap(),
+            "别人的文件".as_bytes(),
+            "原来那份一个字节都不许动"
+        );
+    }
+
+    /// T1.2 非 migrated 状态拒绝（池内/待定区/已撤销的都不许走这条路）
+    #[test]
+    fn recat_rejects_non_migrated() {
+        let mut s = seed();
+        // 撤销第一次迁移 → 状态回 confirmed
+        let m = db::latest_migration(&s.conn).unwrap().unwrap();
+        mig::undo(&mut s.conn, &s.arc_path, m.id, &mut |_, _, _, _| {}).unwrap();
+        let e = mig::recategorize(&mut s.conn, &s.arc_path, s.ids[0], s.dir2).unwrap_err();
+        assert_ne!(e.code, "OK");
+    }
+
+    /// T1.2 同目录 / 目录不存在拒绝
+    #[test]
+    fn recat_rejects_same_dir_and_missing_dir() {
+        let mut s = seed();
+        let id = s.ids[0];
+        let e1 = mig::recategorize(&mut s.conn, &s.arc_path, id, s.dir1).unwrap_err();
+        assert!(e1.message.contains("当前目录") || e1.code == "BAD_INPUT");
+        let e2 = mig::recategorize(&mut s.conn, &s.arc_path, id, 999_999).unwrap_err();
+        assert!(e2.message.contains("目录") || e2.code == "BAD_INPUT");
+    }
+
+    /// T1.3 撤销重新归类：旧位置回来、新副本清除、库字段复原、状态保持 migrated
+    #[test]
+    fn undo_recategorize_restores_old_location() {
+        let mut s = seed();
+        let id = s.ids[0];
+        let old_path = s.arc_path.join("安全检查").join("安全检查通知.docx");
+        let out = mig::recategorize(&mut s.conn, &s.arc_path, id, s.dir2).unwrap();
+        let new_path = std::path::PathBuf::from(&out.new_path);
+
+        let m = db::latest_migration(&s.conn).unwrap().unwrap();
+        let report =
+            mig::undo(&mut s.conn, &s.arc_path, m.id, &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(report.restored, 1, "撤销要把文件还回旧目录");
+
+        assert!(old_path.is_file(), "旧位置必须有文件");
+        assert!(!new_path.exists(), "新位置的副本要清掉（内容已在旧位置）");
+        assert_eq!(std::fs::read(&old_path).unwrap(), b"aaa");
+        let (ap, adir, status): (String, i64, String) = s
+            .conn
+            .query_row(
+                "SELECT archived_path, archive_dir_id, status FROM files WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(ap, old_path.to_string_lossy().to_string());
+        assert_eq!(adir, s.dir1, "要还原到旧目录");
+        assert_eq!(status, "migrated", "撤销重新归类不回池，文件仍在归档区");
+        let mig_row = db::latest_migration(&s.conn).unwrap().unwrap();
+        assert_eq!(mig_row.status, "undone");
+    }
+
+    /// 撤销前如果有人动了归档文件（新位置被改）→ sha 不符，撤销拒绝，不制造数据丢失
+    #[test]
+    fn undo_recategorize_refuses_when_new_copy_was_modified() {
+        let mut s = seed();
+        let id = s.ids[0];
+        let out = mig::recategorize(&mut s.conn, &s.arc_path, id, s.dir2).unwrap();
+        std::fs::write(&out.new_path, "被用户改过".as_bytes()).unwrap();
+        let m = db::latest_migration(&s.conn).unwrap().unwrap();
+        let report = mig::undo(&mut s.conn, &s.arc_path, m.id, &mut |_, _, _, _| {}).unwrap();
+        assert_eq!(report.restored, 0, "内容对不上就不许撤");
+        assert_eq!(report.failed.len(), 1);
+    }
+}

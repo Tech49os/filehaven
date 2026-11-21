@@ -37,7 +37,7 @@ mod tests;
 use error::CmdError;
 use model::{
     ArchiveDir, BatchView, BootState, Counts, DirNode, MigrationResult, MigrationSummary,
-    ModelStatus, ScanReport, SourceRoot, UndoReport,
+    ModelStatus, RecatOutcome, ScanReport, SourceRoot, UndoReport,
 };
 use state::AppState;
 
@@ -924,6 +924,24 @@ async fn undo_migration(app: AppHandle, migration_id: i64) -> Result<UndoReport,
     .map_err(|e| CmdError::new(error::DB, format!("撤销线程异常：{e}")))?
 }
 
+/// P4：重新归类——归档区内二次迁移（浏览页右键）
+#[tauri::command]
+async fn recategorize_file(
+    app: AppHandle,
+    file_id: i64,
+    dir_id: i64,
+) -> Result<RecatOutcome, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        migration::recategorize(&mut conn, &root, file_id, dir_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("重新归类线程异常：{e}")))?
+}
+
 /// 最近一次迁移 —— 撤销入口（重启后也还撤得回来）
 #[tauri::command]
 async fn latest_migration(app: AppHandle) -> Result<Option<MigrationSummary>, CmdError> {
@@ -932,6 +950,7 @@ async fn latest_migration(app: AppHandle) -> Result<Option<MigrationSummary>, Cm
     Ok(index::latest_migration(&conn)?.map(|m| MigrationSummary {
         id: m.id,
         status: m.status,
+        kind: m.kind,
         file_count: m.file_count,
         bytes: m.bytes,
         finished_at: m.finished_at,
@@ -2429,6 +2448,7 @@ fn main() {
             rescore_files,
             deep_tag_status,
             set_deep_tag,
+            recategorize_file,
             explain_file,
             set_watch_enabled,
             add_tag,

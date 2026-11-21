@@ -136,6 +136,9 @@ pub fn open(path: &Path) -> Result<Connection, CmdError> {
     ensure_column(&conn, "files", "tag_locked", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "files", "archived_path", "TEXT")?;
     ensure_column(&conn, "files", "archive_dir_id", "INTEGER")?;
+    // P4：重新归类台账——kind 区分普通迁移与归档区内二次迁移；old_dir_id 记撤销要还原的旧目录
+    ensure_column(&conn, "migrations", "kind", "TEXT NOT NULL DEFAULT 'migrate'")?;
+    ensure_column(&conn, "migration_items", "old_dir_id", "INTEGER")?;
     Ok(conn)
 }
 
@@ -1842,28 +1845,40 @@ pub struct MigrationRow {
     pub id: i64,
     /// running|done|partial|failed|undone
     pub status: String,
+    /// migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4）
+    pub kind: String,
     pub file_count: i64,
     pub bytes: i64,
     pub finished_at: Option<i64>,
 }
 
-const MIG_COLS: &str = "id, status, file_count, bytes, finished_at";
+const MIG_COLS: &str = "id, COALESCE(kind,'migrate'), status, file_count, bytes, finished_at";
 
 fn row_to_migration(r: &rusqlite::Row<'_>) -> rusqlite::Result<MigrationRow> {
     Ok(MigrationRow {
         id: r.get(0)?,
-        status: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        file_count: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-        bytes: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-        finished_at: r.get(4)?,
+        kind: r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "migrate".into()),
+        status: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        file_count: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+        bytes: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+        finished_at: r.get(5)?,
     })
 }
 
 pub fn insert_migration(conn: &Connection, file_count: i64) -> Result<i64, CmdError> {
+    insert_migration_with_kind(conn, file_count, "migrate")
+}
+
+/// P4：重新归类批次用 `kind='recategorize'`，撤销时要按 kind 分流
+pub fn insert_migration_with_kind(
+    conn: &Connection,
+    file_count: i64,
+    kind: &str,
+) -> Result<i64, CmdError> {
     conn.execute(
-        "INSERT INTO migrations(batch_id, started_at, status, file_count, bytes)
-         VALUES(NULL, ?1, 'running', ?2, 0)",
-        params![now_ms(), file_count],
+        "INSERT INTO migrations(batch_id, started_at, status, file_count, bytes, kind)
+         VALUES(NULL, ?1, 'running', ?2, 0, ?3)",
+        params![now_ms(), file_count, kind],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1910,6 +1925,8 @@ pub struct MigrationItemRow {
     pub src_path: String,
     pub dst_path: String,
     pub sha256: Option<String>,
+    /// recategorize 条目记录撤销要还原的旧目录；普通迁移为 NULL（P4）
+    pub old_dir_id: Option<i64>,
 }
 
 pub fn insert_migration_item(
@@ -1922,10 +1939,26 @@ pub fn insert_migration_item(
     result: &str,
     error: Option<&str>,
 ) -> Result<(), CmdError> {
+    insert_migration_item_ext(conn, migration_id, file_id, src_path, dst_path, sha256, result, error, None)
+}
+
+/// P4：带 old_dir_id 的完整版（重新归类走这里）
+#[allow(clippy::too_many_arguments)]
+pub fn insert_migration_item_ext(
+    conn: &Connection,
+    migration_id: i64,
+    file_id: i64,
+    src_path: &str,
+    dst_path: &str,
+    sha256: Option<&str>,
+    result: &str,
+    error: Option<&str>,
+    old_dir_id: Option<i64>,
+) -> Result<(), CmdError> {
     conn.execute(
-        "INSERT INTO migration_items(migration_id, file_id, src_path, dst_path, sha256, result, error)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![migration_id, file_id, src_path, dst_path, sha256, result, error],
+        "INSERT INTO migration_items(migration_id, file_id, src_path, dst_path, sha256, result, error, old_dir_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![migration_id, file_id, src_path, dst_path, sha256, result, error, old_dir_id],
     )?;
     Ok(())
 }
@@ -1936,7 +1969,7 @@ pub fn migration_items(
     migration_id: i64,
 ) -> Result<Vec<(MigrationItemRow, String)>, CmdError> {
     let mut stmt = conn.prepare(
-        "SELECT file_id, src_path, dst_path, sha256, COALESCE(result,'')
+        "SELECT file_id, src_path, dst_path, sha256, COALESCE(result,''), old_dir_id
          FROM migration_items WHERE migration_id=?1 ORDER BY id",
     )?;
     let rows = stmt.query_map([migration_id], |r| {
@@ -1946,6 +1979,7 @@ pub fn migration_items(
                 src_path: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 dst_path: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 sha256: r.get(3)?,
+                old_dir_id: r.get(5)?,
             },
             r.get::<_, String>(4)?,
         ))

@@ -279,6 +279,14 @@ export interface MigrationSummary {
   fileCount: number
   bytes: number
   finishedAt: number | null
+  /** migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4） */
+  kind: 'migrate' | 'recategorize'
+}
+
+/** 重新归类结果（P4）：renamed=true 表示目标撞名自动错开成了 `_2` */
+export interface RecatOutcome {
+  newPath: string
+  renamed: boolean
 }
 
 export interface MigrationResult {

@@ -253,7 +253,9 @@ mod tests {
         };
         let _ = &dir;
         let (tx, rx) = channel::<Vec<PathBuf>>();
-        let mut guard = start(cfg, Duration::from_millis(400), move |paths| {
+        // 1200ms：OS 事件投递偶发延迟（实测这台机器上能 >400ms），窗口太小
+        // 会在「合并」断言上误报 —— 这里测的是合并语义，不是投递延迟
+        let mut guard = start(cfg, Duration::from_millis(1200), move |paths| {
             let _ = tx.send(paths);
         })
         .unwrap();
@@ -261,7 +263,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         for n in ["a.docx", "b.docx", "c.docx"] {
             std::fs::write(root.join(n), b"x").unwrap();
-            std::thread::sleep(Duration::from_millis(30));
+            std::thread::sleep(Duration::from_millis(60));
         }
 
         let batch = rx.recv_timeout(Duration::from_secs(5)).expect("应该收到一批");

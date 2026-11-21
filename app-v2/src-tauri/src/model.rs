@@ -387,6 +387,14 @@ pub struct UndoReport {
     pub failed: Vec<MigrationFailure>,
 }
 
+/// 重新归类结果（P4）：`renamed=true` 表示目标撞名自动错开成了 `_2`
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecatOutcome {
+    pub new_path: String,
+    pub renamed: bool,
+}
+
 /// 最近一次迁移（撤销入口）
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -394,6 +402,8 @@ pub struct MigrationSummary {
     pub id: i64,
     /// running|done|partial|failed|undone
     pub status: String,
+    /// migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4）
+    pub kind: String,
     pub file_count: i64,
     pub bytes: i64,
     pub finished_at: Option<i64>,

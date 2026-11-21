@@ -62,7 +62,7 @@ pub fn sha256_of(path: &Path) -> std::io::Result<String> {
 }
 
 /// 复制并保留 mtime（撤销/浏览都按时间排序，丢了时间戳等于丢信息）
-fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -78,7 +78,7 @@ fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// 移动文件：先试 rename（同盘瞬间完成），跨盘再退化成「复制 + 校验 + 删源」
-fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -225,7 +225,7 @@ pub enum UndoOutcome {
 }
 
 /// 隔离区里找不到按相对路径算出来的那一份时，按文件名再找一次（R8：用户手工挪过）
-fn find_in_quarantine(root: &Path, name: &str, sha: Option<&str>) -> Option<PathBuf> {
+pub(crate) fn find_in_quarantine(root: &Path, name: &str, sha: Option<&str>) -> Option<PathBuf> {
     let mut by_name: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {

@@ -8,6 +8,7 @@ const poolRows = vi.fn()
 const listParked = vi.fn()
 const openPath = vi.fn()
 const revealPath = vi.fn()
+const recategorizeFile = vi.fn()
 const searchFilesSpy = vi.fn()
 const push = vi.fn()
 
@@ -18,6 +19,7 @@ vi.mock('../../core/ipc', () => ({
   listParked,
   openPath,
   revealPath,
+  recategorizeFile,
   searchFiles: searchFilesSpy,
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
@@ -78,7 +80,7 @@ function node(over: Partial<DirNode> = {}): DirNode {
 }
 
 beforeEach(() => {
-  browseTree.mockReset().mockResolvedValue([node()])
+  browseTree.mockReset().mockResolvedValue([node(), node({ id: 8, name: '整改台账', relPath: '整改台账' })])
   browseDirFiles.mockReset().mockResolvedValue([file()])
   poolRows.mockReset().mockResolvedValue([file({ id: 2, status: 'queued', archivedPath: null, archiveDirId: null })])
   listParked.mockReset().mockResolvedValue([file({ id: 3, status: 'parked' })])
@@ -135,13 +137,57 @@ describe('浏览页 · 目录树与列表（T2.4）', () => {
     expect(push).toHaveBeenCalledWith('/')
   })
 
-  it('右键菜单只有三项 —— 锁死「不出现重新归类」', async () => {
+  it('已归档文件右键菜单四项，含「重新归类…」；未归档文件没有这一项', async () => {
+    const w = await mountBrowser()
+    // 列表行是 migrated
+    await w.find('.list .row').trigger('contextmenu', { clientX: 10, clientY: 10 })
+    await flushPromises()
+    const items = w.findAll('.menu .mi').map((b) => b.text())
+    expect(items).toEqual([
+      '打开',
+      '在资源管理器中定位',
+      '复制路径',
+      '重新归类…',
+    ])
+
+    // 池内文件（queued）不许出现重新归类 —— P3 的锁改成条件断言
+    await w.findAll('.vrow').find((r) => r.text().includes('待整理'))!.trigger('click')
+    await flushPromises()
+    await w.find('.list .row').trigger('contextmenu', { clientX: 10, clientY: 10 })
+    await flushPromises()
+    const poolItems = w.findAll('.menu .mi').map((b) => b.text())
+    expect(poolItems).toEqual(['打开', '在资源管理器中定位', '复制路径'])
+    expect(poolItems).not.toContain('重新归类…')
+  })
+
+  it('重新归类：点开后选目标目录 → 调后端 → 提示 + 刷新；当前目录不在候选里', async () => {
+    recategorizeFile.mockResolvedValue({ newPath: 'D:/文档归档/整改台账/安全检查通知.docx', renamed: false })
     const w = await mountBrowser()
     await w.find('.list .row').trigger('contextmenu', { clientX: 10, clientY: 10 })
     await flushPromises()
-    const items = w.findAll('.menu .mi')
-    expect(items.map((b) => b.text())).toEqual(['打开', '在资源管理器中定位', '复制路径'])
-    expect(w.text()).not.toContain('重新归类')
+    await w.findAll('.menu .mi').find((b) => b.text() === '重新归类…')!.trigger('click')
+    await flushPromises()
+
+    // 候选不含当前目录（archiveDirId=7），只剩「整改台账」
+    const targets = w.findAll('.menu .mi').map((b) => b.text())
+    expect(targets).toContain('挪到哪个目录？')
+    expect(targets).toContain('整改台账')
+    expect(targets).not.toContain('安全检查')
+
+    await w.findAll('.menu .mi').find((b) => b.text() === '整改台账')!.trigger('click')
+    await flushPromises()
+    expect(recategorizeFile).toHaveBeenCalledWith(1, 8)
+    expect(w.text()).toContain('已挪到「整改台账」')
+  })
+
+  it('重新归类失败时把后端原因亮出来，不静默', async () => {
+    recategorizeFile.mockRejectedValue({ code: 'MIGRATE_FAILED', message: '归档文件已不在磁盘上' })
+    const w = await mountBrowser()
+    await w.find('.list .row').trigger('contextmenu', { clientX: 10, clientY: 10 })
+    await w.findAll('.menu .mi').find((b) => b.text() === '重新归类…')!.trigger('click')
+    await w.findAll('.menu .mi').find((b) => b.text() === '整改台账')!.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('归档文件已不在磁盘上')
   })
 
   it('「复制路径」写的是 livePath', async () => {

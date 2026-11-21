@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS migrations (            -- P1
   finished_at INTEGER,
   status      TEXT,                                -- running|done|partial|failed
   file_count  INTEGER,
-  bytes       INTEGER
+  bytes       INTEGER,
+  kind        TEXT NOT NULL DEFAULT 'migrate'      -- P4: migrate|recategorize
 );
 
 CREATE TABLE IF NOT EXISTS migration_items (       -- P1
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS migration_items (       -- P1
   dst_path     TEXT,
   sha256       TEXT,
   result       TEXT,                               -- ok|failed|skipped
-  error        TEXT
+  error        TEXT,
+  old_dir_id   INTEGER                             -- P4: recategorize 撤销要还原的旧目录
 );
 CREATE INDEX IF NOT EXISTS idx_mitems_mig ON migration_items(migration_id);

@@ -6,8 +6,8 @@
  * 不占 archive_dirs 的 id 空间）+ 归档目录树（带直属份数）。
  * 右列表：名称 / 类型 / 大小 / 时间 / 标签 / 状态 六格（标签进自己的格，
  * 不另加第七格 —— alpha.5 的「4 格变 5 格」教训）。
- * 交互：单击选行出详情条；双击打开；右键菜单**只有三项**
- * （打开 / 定位 / 复制路径）——「重新归类」留 P4，界面上不出现假按钮。
+ * 交互：单击选行出详情条；双击打开；右键菜单三项基础操作；
+ * 已归档文件多一项「重新归类」（P4 M1：菜单内选目标目录，旧副本进隔离区）。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -16,6 +16,7 @@ import DirTree from '../../components/DirTree.vue'
 import FileList from '../../components/FileList.vue'
 import { useNarrow } from '../../core/useNarrow'
 import { iconOf } from '../../core/format'
+import { toCmdError } from '../../core/cmdError'
 import { livePath } from '../../core/types'
 import type { DirNode, FileRow } from '../../core/types'
 import * as ipc from '../../core/ipc'
@@ -40,8 +41,16 @@ const includeSub = ref(false)
 const selected = ref<Sel>({ kind: 'dir', id: null })
 /** 当前选中行（详情条） */
 const activeId = ref<number | null>(null)
-/** 右键菜单 */
-const menu = ref<{ x: number; y: number; row: FileRow } | null>(null)
+/** 右键菜单（P4 加 recat 模式：已归档文件的「重新归类」选目标目录） */
+const menu = ref<{
+  x: number
+  y: number
+  row: FileRow
+  mode: 'main' | 'recat'
+} | null>(null)
+/** 重新归类的一次性结果提示（4s 自动消） */
+const flash = ref<string | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | undefined
 
 const active = computed(() => rows.value.find((r) => r.id === activeId.value) ?? null)
 
@@ -116,10 +125,44 @@ async function copyPath(r: FileRow) {
 
 function rowMenu(e: MouseEvent, r: FileRow) {
   e.preventDefault()
-  menu.value = { x: e.clientX, y: e.clientY, row: r }
+  menu.value = { x: e.clientX, y: e.clientY, row: r, mode: 'main' }
 }
 function closeMenu() {
   menu.value = null
+}
+
+/* ---- 重新归类（P4 M1）：归档区内二次迁移 ---- */
+
+/** 目录树拍平成可选目标（不含文件当前所在目录） */
+const recatTargets = computed(() => {
+  const out: { id: number; relPath: string }[] = []
+  const walk = (nodes: DirNode[]) => {
+    for (const n of nodes) {
+      out.push({ id: n.id, relPath: n.relPath })
+      walk(n.children)
+    }
+  }
+  walk(tree.value)
+  const cur = menu.value?.row.archiveDirId
+  return cur == null ? out : out.filter((d) => d.id !== cur)
+})
+
+function showFlash(msg: string) {
+  flash.value = msg
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => (flash.value = null), 4000)
+}
+
+async function doRecat(r: FileRow, d: { id: number; relPath: string }) {
+  menu.value = null
+  try {
+    const out = await ipc.recategorizeFile(r.id, d.id)
+    const suffix = out.renamed ? '（目标有同名，已自动改名）' : ''
+    showFlash(`已挪到「${d.relPath}」${suffix}`)
+    await refreshAll()
+  } catch (e) {
+    showFlash(toCmdError(e).message)
+  }
 }
 
 function goWorkspace() {
@@ -239,6 +282,7 @@ async function onSubToggle() {
         <button v-if="narrow" class="btn ghost drawer-toggle" @click.stop="drawer = !drawer">
           {{ drawer ? '收起' : '目录' }}
         </button>
+        <span v-if="flash" class="flash" role="status">{{ flash }}</span>
         <span class="where">
           {{
             selected.kind === 'pool'
@@ -303,16 +347,35 @@ async function onSubToggle() {
       </aside>
     </section>
 
-    <!-- 右键菜单：只有三项，锁死「不出现重新归类」（验收 7） -->
+    <!-- 右键菜单：基础三项 + 已归档文件的「重新归类」（P4）。
+         recat 模式直接在菜单里选目标目录，点完即走。 -->
     <div
       v-if="menu"
       class="menu"
       :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
       @click.stop
     >
-      <button class="mi" @click="openRow(menu.row)">打开</button>
-      <button class="mi" @click="revealRow(menu.row)">在资源管理器中定位</button>
-      <button class="mi" @click="copyPath(menu.row)">复制路径</button>
+      <template v-if="menu.mode === 'main'">
+        <button class="mi" @click="openRow(menu.row)">打开</button>
+        <button class="mi" @click="revealRow(menu.row)">在资源管理器中定位</button>
+        <button class="mi" @click="copyPath(menu.row)">复制路径</button>
+        <button
+          v-if="menu.row.status === 'migrated'"
+          class="mi"
+          @click="menu.mode = 'recat'"
+        >重新归类…</button>
+      </template>
+      <template v-else>
+        <p class="mi head">挪到哪个目录？</p>
+        <button
+          v-for="d in recatTargets"
+          :key="d.id"
+          class="mi"
+          @click="doRecat(menu.row, d)"
+        >{{ d.relPath }}</button>
+        <p v-if="recatTargets.length === 0" class="mi head dim">没有其他目录可去</p>
+        <button class="mi" @click="menu.mode = 'main'">返回</button>
+      </template>
     </div>
   </div>
 </template>
@@ -695,6 +758,27 @@ async function onSubToggle() {
 }
 .mi:hover {
   background: var(--c-hover);
+}
+/* 菜单里的小节标题（重新归类模式） */
+.mi.head {
+  font-size: 11.5px;
+  color: var(--c-text-3);
+  cursor: default;
+}
+.mi.head:hover {
+  background: transparent;
+}
+/* 一次性结果提示（重新归类完成 / 失败原因） */
+.flash {
+  font-size: 12px;
+  color: var(--c-text-2);
+  background: var(--c-hover);
+  border-radius: 7px;
+  padding: 3px 10px;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ellipsis {

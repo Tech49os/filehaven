@@ -25,6 +25,7 @@ import type {
   MigrationPreview,
   MigrationResult,
   MigrationSummary,
+  RecatOutcome,
   ParkedItem,
   ScanReport,
   SourceRoot,
@@ -234,6 +235,11 @@ export function undoMigration(migrationId: number) {
 /** 最近一次迁移：撤销入口要靠它，重启后也还撤得回来 */
 export function latestMigration() {
   return invoke<MigrationSummary | null>('latest_migration')
+}
+
+/** 重新归类（P4）：把已归档文件挪到另一目录，旧副本进隔离区，可按批次撤销 */
+export function recategorizeFile(fileId: number, dirId: number) {
+  return invoke<RecatOutcome>('recategorize_file', { fileId, dirId })
 }
 
 /** 标注后被改过的文件：退回整理台，并按磁盘现状刷新 size/mtime */
