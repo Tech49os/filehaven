@@ -63,6 +63,17 @@ describe('高级筛选页（T3.4）', () => {
     expect(lastReq().tagMode).toBe('or')
   })
 
+  // 回归锁（e2e-p3 抓到的真 bug）：只点标签 chip 也必须重搜。
+  // 之前 watch 漏了 tagIds，「组合条件」那条是靠后续类型点击的请求侥幸带上 tags 才绿的。
+  it('只点标签 chip 就立刻重搜（tagIds 在监听列表里）', async () => {
+    const w = await mountSearch()
+    const callsBefore = searchFiles.mock.calls.length
+    await w.findAll('.fchip').find((c) => c.text().includes('安全检查'))!.trigger('click')
+    await flushPromises()
+    expect(searchFiles.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(lastReq().tags).toEqual([11])
+  })
+
   it('清空恢复默认并发一次空条件请求', async () => {
     const w = await mountSearch()
     await w.findAll('.fchip').find((c) => c.text().includes('安全检查'))!.trigger('click')

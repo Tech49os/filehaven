@@ -40,6 +40,7 @@ def pick_exe() -> str:
 STAGES = {
     'p1': ('test/e2e-p1fix.py', 9222),
     'p2': ('test/e2e-p2.py', 9223),
+    'p3': ('test/e2e-p3.py', 9224),
 }
 # 需要启两次应用的阶段（启动增量 + 节流），脚本自己管进程
 RESTART_STAGES = {
@@ -105,7 +106,7 @@ def main() -> int:
     stage = sys.argv[1] if len(sys.argv) > 1 else 'all'
     exe = pick_exe()
     print(f'exe={exe}')
-    todo = ['p1', 'p2', 'p2r'] if stage == 'all' else [stage]
+    todo = ['p1', 'p2', 'p2r', 'p3'] if stage == 'all' else [stage]
     for s in todo:
         if s not in STAGES and s not in RESTART_STAGES:
             raise SystemExit(f'未知阶段：{s}')

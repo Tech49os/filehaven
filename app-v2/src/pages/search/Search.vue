@@ -131,8 +131,9 @@ watch(
   },
 )
 
-/** 切了条件就重搜（复选、模式、范围都监听） */
-watch([tagMode, kinds, scope], () => void run(), { deep: true })
+/** 切了条件就重搜（复选、模式、范围都监听）
+ *  tagIds 必须在列：e2e-p3 抓到过「点 chip 只亮不重搜」——真 bug，不是测试问题 */
+watch([tagMode, kinds, scope, tagIds], () => void run(), { deep: true })
 </script>
 
 <template>
