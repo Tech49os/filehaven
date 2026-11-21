@@ -733,6 +733,86 @@ async fn pool_rows(app: AppHandle) -> Result<Vec<model::FileRow>, CmdError> {
     .map_err(|e| CmdError::new("JOIN_ERROR", e.to_string()))?
 }
 
+/// 检索请求入参（camelCase，§3.1 的 SearchReq）
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchReqIn {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    tags: Vec<i64>,
+    /// and | or（默认 and）
+    #[serde(default = "default_tag_mode")]
+    tag_mode: String,
+    #[serde(default)]
+    kinds: Vec<String>,
+    #[serde(default)]
+    from: Option<i64>,
+    #[serde(default)]
+    to: Option<i64>,
+    /// archive | pool | parked | all（默认 all）
+    #[serde(default = "default_scope")]
+    scope: String,
+    #[serde(default)]
+    dir_id: Option<i64>,
+    #[serde(default)]
+    include_subdirs: bool,
+    /// mtime | name | size（默认 mtime）
+    #[serde(default = "default_sort")]
+    sort: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+fn default_tag_mode() -> String {
+    "and".into()
+}
+fn default_scope() -> String {
+    "all".into()
+}
+fn default_sort() -> String {
+    "mtime".into()
+}
+fn default_limit() -> i64 {
+    50
+}
+
+/// 检索结果：`total` 与 `items` 同源（服务端算，前端不许重算）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResult {
+    items: Vec<model::FileRow>,
+    total: i64,
+}
+
+/// 检索（P3 T3.1）：三个入口共用这一条查询层
+#[tauri::command]
+async fn search_files(app: AppHandle, req: SearchReqIn) -> Result<SearchResult, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let conn = lock_db(&state)?;
+        let r = index::SearchReq {
+            q: req.q,
+            tags: req.tags,
+            tag_and: req.tag_mode != "or",
+            kinds: req.kinds,
+            from: req.from,
+            to: req.to,
+            scope: index::Scope::parse(&req.scope),
+            dir_id: req.dir_id,
+            include_subdirs: req.include_subdirs,
+            sort: index::Sort::parse(&req.sort),
+            limit: req.limit,
+            offset: req.offset,
+        };
+        let (items, total) = index::search_files(&conn, &r)?;
+        Ok(SearchResult { items, total })
+    })
+    .await
+    .map_err(|e| CmdError::new("JOIN_ERROR", e.to_string()))?
+}
+
 // ---------------------------------------------------------------- 迁移
 
 /// 归档根（没有就 NOT_CONFIGURED —— 迁移类命令一律靠它）
@@ -2136,6 +2216,9 @@ fn main() {
         let no_tags = args.iter().skip(2).any(|a| a == "--no-tags");
         std::process::exit(run_eval_cli(&args[2], &args[3], no_tags));
     }
+    if args.len() >= 3 && args[1] == "--perf-search" {
+        std::process::exit(run_perf_search_cli(&args[2]));
+    }
     if args.len() >= 4 && args[1] == "--scan" {
         std::process::exit(run_scan_cli(&args[2], &args[3]));
     }
@@ -2259,8 +2342,110 @@ fn main() {
             rename_tag,
             browse_tree,
             browse_dir,
-            pool_rows
+            pool_rows,
+            search_files
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
+}
+
+// ---------------------------------------------------------------- 检索性能基准（P3 T3.7）
+
+/// 临时库造 N 份（默认 5000），量三类查询的 p95。不开 GUI、不碰真实库。
+fn run_perf_search_cli(count_arg: &str) -> i32 {
+    let n: usize = count_arg.parse().unwrap_or(5000);
+    let dir = std::env::temp_dir().join(format!("fb-perf-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let started = std::time::Instant::now();
+    let conn = match index::open(&dir.join("perf.db")) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("open: {e}");
+            return 1;
+        }
+    };
+    {
+        index::add_source_root(&conn, "C:/perf").ok();
+        let root: i64 =
+            conn.query_row("SELECT id FROM source_roots LIMIT 1", [], |r| r.get(0)).unwrap();
+        let mut stmt = conn
+            .prepare("INSERT INTO files(source_root_id, abs_path, rel_path, name, ext, kind, size, mtime, status, discovered_at, last_seen_at) VALUES(?1,?2,?2,?3,?4,?5,100,1700000000000,'labeled',0,0)")
+            .unwrap();
+        let kinds = ["word", "excel", "ppt", "pdf", "image"];
+        let exts = ["docx", "xlsx", "pptx", "pdf", "png"];
+        for i in 0..n {
+            let k = i % 5;
+            let ext = exts[k];
+            let kind = kinds[k];
+            let _ = stmt.execute(rusqlite::params![
+                root,
+                format!("C:/perf/材料{i:05}.{ext}"),
+                format!("材料{i:05}"),
+                ext,
+                kind
+            ]);
+        }
+        let mut t = conn
+            .prepare("INSERT OR IGNORE INTO tags(name, kind) VALUES(?1,'topic')")
+            .unwrap();
+        for g in 0..(n / 20).max(1) {
+            let _ = t.execute(rusqlite::params![format!("话题{g}")]);
+        }
+        let _ = conn.execute(
+            "INSERT INTO file_tags(file_id, tag_id)
+             SELECT f.id, t.id FROM files f JOIN tags t ON (t.id % 20) = (f.id % 20) WHERE f.id % 5 = 0",
+            [],
+        );
+    }
+    let insert_ms = started.elapsed().as_millis();
+
+    let run = |req: index::SearchReq| -> Vec<u128> {
+        let mut ms = Vec::new();
+        for _ in 0..30 {
+            let t0 = std::time::Instant::now();
+            let _ = index::search_files(&conn, &req).unwrap();
+            ms.push(t0.elapsed().as_millis());
+        }
+        ms.sort();
+        ms
+    };
+    let p95 = |v: &[u128]| -> u128 { v[v.len() * 95 / 100] };
+
+    let q_kw = run(index::SearchReq {
+        q: "材料000".into(),
+        scope: index::Scope::All,
+        limit: 200,
+        ..Default::default()
+    });
+    let tag_ids: i64 = conn
+        .query_row("SELECT id FROM tags LIMIT 1", [], |r| r.get(0))
+        .unwrap_or(0);
+    let q_tag = run(index::SearchReq {
+        tags: vec![tag_ids],
+        scope: index::Scope::All,
+        limit: 200,
+        ..Default::default()
+    });
+    let q_mix = run(index::SearchReq {
+        q: "材料00".into(),
+        tags: vec![tag_ids],
+        tag_and: false,
+        kinds: vec!["docx".into()],
+        from: Some(0),
+        to: Some(1_800_000_000_000),
+        scope: index::Scope::All,
+        limit: 200,
+        ..Default::default()
+    });
+
+    let out = serde_json::json!({
+        "count": n,
+        "insertMs": insert_ms,
+        "keywordP95Ms": p95(&q_kw),
+        "tagP95Ms": p95(&q_tag),
+        "mixedP95Ms": p95(&q_mix),
+    });
+    println!("{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+    0
 }

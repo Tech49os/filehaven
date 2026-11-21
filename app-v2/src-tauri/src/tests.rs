@@ -4108,3 +4108,251 @@ mod p3_m2 {
         assert_eq!(child.file_count, 1);
     }
 }
+
+// ================================================================ P3 M3 检索查询层
+
+mod p3_m3 {
+    use crate::index as db;
+    use crate::model::ScannedFile;
+    use crate::tests::index::fresh_db;
+
+    /// 造一批文件 + 标签，覆盖中英、不同类型、不同时间、多标签
+    fn seeded() -> (tempfile::TempDir, rusqlite::Connection) {
+        let (dir, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let mut scanned = Vec::new();
+        let spec: Vec<(&str, &str, i64)> = vec![
+            ("安全检查通知.docx", "word", 1_700_000_000_000),
+            ("2026_报表.xlsx", "excel", 1_700_000_500_000),
+            ("meeting-notes.pdf", "pdf", 1_700_001_000_000),
+            ("照片1.png", "image", 1_700_001_500_000),
+            ("整改报告.pdf", "pdf", 1_699_999_000_000),
+        ];
+        for (name, kind, mtime) in &spec {
+            scanned.push(ScannedFile {
+                name: name.to_string(),
+                path: format!("C:/t/{name}"),
+                ext: name.rsplit('.').next().unwrap_or("").to_string(),
+                kind: kind.to_string(),
+                size: 100,
+                mtime: *mtime,
+            });
+        }
+        db::upsert_files(&mut conn, root.id, &scanned).unwrap();
+        // upsert 借用，重取 ids
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM files ORDER BY id").unwrap();
+            let it = stmt.query_map([], |r| r.get(0)).unwrap();
+            it.collect::<Result<Vec<i64>, _>>().unwrap()
+        };
+        // 标签：文件1 = 安全+检查；文件2 = 安全；文件3 = 会议；其余无
+        let ft = |fid: i64, tag: &str| {
+            conn.execute(
+                "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'topic')",
+                rusqlite::params![tag],
+            )
+            .unwrap();
+            let tid: i64 = conn
+                .query_row("SELECT id FROM tags WHERE name=?1 AND kind='topic'", rusqlite::params![tag], |r| r.get(0))
+                .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO file_tags(file_id, tag_id, confidence) VALUES(?1,?2,0.8)",
+                rusqlite::params![fid, tid],
+            )
+            .unwrap();
+        };
+        ft(ids[0], "安全");
+        ft(ids[0], "检查");
+        ft(ids[1], "安全");
+        ft(ids[2], "会议");
+        (dir, conn)
+    }
+
+    fn req() -> db::SearchReq {
+        db::SearchReq {
+            q: String::new(),
+            tags: vec![],
+            tag_and: true,
+            kinds: vec![],
+            from: None,
+            to: None,
+            scope: db::Scope::All,
+            dir_id: None,
+            include_subdirs: false,
+            sort: db::Sort::MtimeDesc,
+            limit: 50,
+            offset: 0,
+        }
+    }
+
+    // T3.1 ①：纯关键词（中英混）
+    #[test]
+    fn keyword_matches_name_and_relpath() {
+        let (_keep, conn) = seeded();
+        let mut r = req();
+        r.q = "安全检查".into();
+        let (items, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].name, "安全检查通知.docx");
+
+        r.q = "meeting".into();
+        let (_, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 1, "英文关键词也要命中");
+    }
+
+    // T3.1 ②：标签 AND 两个 = 同时具备
+    #[test]
+    fn tags_and_requires_all() {
+        let (_keep, conn) = seeded();
+        let tids: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM tags WHERE name IN ('安全','检查') ORDER BY name").unwrap();
+            let it = stmt.query_map([], |r| r.get(0)).unwrap();
+            it.collect::<Result<Vec<i64>, _>>().unwrap()
+        };
+        let mut r = req();
+        r.tags = tids;
+        r.tag_and = true;
+        let (items, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 1, "同时带「安全+检查」的只有文件1");
+        assert_eq!(items[0].name, "安全检查通知.docx");
+    }
+
+    // T3.1 ③：标签 OR 两个 = 任一（结果并集）
+    #[test]
+    fn tags_or_is_union() {
+        let (_keep, conn) = seeded();
+        let tids: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM tags WHERE name IN ('安全','会议') ORDER BY name").unwrap();
+            let it = stmt.query_map([], |r| r.get(0)).unwrap();
+            it.collect::<Result<Vec<i64>, _>>().unwrap()
+        };
+        let mut r = req();
+        r.tags = tids;
+        r.tag_and = false;
+        let (_, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 3, "安全(2份) + 会议(1份) = 3");
+    }
+
+    // T3.1 ④：类型 + 时间组合
+    #[test]
+    fn kinds_and_time_window() {
+        let (_keep, conn) = seeded();
+        let mut r = req();
+        r.kinds = vec!["pdf".into()];
+        r.from = Some(1_700_000_000_000);
+        r.to = Some(1_700_002_000_000);
+        let (items, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 1, "两份 pdf 里只有 meeting-notes 在时间窗内");
+        assert_eq!(items[0].name, "meeting-notes.pdf");
+    }
+
+    // T3.1 ⑤：三种 scope 各自正确
+    #[test]
+    fn scopes_partition() {
+        let (_keep, conn) = seeded();
+        // 全部置为池内
+        conn.execute("UPDATE files SET status='labeled'", []).unwrap();
+        // 一份归档、一份搁置
+        conn.execute("UPDATE files SET status='migrated' WHERE name='安全检查通知.docx'", []).unwrap();
+        conn.execute("UPDATE files SET status='parked' WHERE name='照片1.png'", []).unwrap();
+
+        for (scope, want) in [
+            ("archive", 1usize),
+            ("pool", 3usize),
+            ("parked", 1usize),
+            ("all", 5usize),
+        ] {
+            let mut r = req();
+            r.scope = db::Scope::parse(scope);
+            let (_, total) = db::search_files(&conn, &r).unwrap();
+            assert_eq!(total, want as i64, "scope={scope}");
+        }
+        // skipped / missing 永不出现
+        conn.execute("UPDATE files SET status='skipped' WHERE name='整改报告.pdf'", []).unwrap();
+        let mut r = req();
+        let (_, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 4, "skipped 不出现在任何 scope");
+    }
+
+    // T3.1 ⑥：limit/offset 翻页不重不漏
+    #[test]
+    fn pagination_no_overlap_no_gap() {
+        let (_keep, conn) = seeded();
+        let mut r = req();
+        r.limit = 2;
+        let mut names = Vec::new();
+        let mut total_all = 0i64;
+        let mut offset = 0i64;
+        loop {
+            r.offset = offset;
+            let (items, total) = db::search_files(&conn, &r).unwrap();
+            total_all = total;
+            if items.is_empty() {
+                break;
+            }
+            names.extend(items.iter().map(|i| i.id));
+            offset += items.len() as i64;
+            if offset >= total {
+                break;
+            }
+        }
+        assert_eq!(total_all, 5);
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "翻页不许重复");
+        assert_eq!(names.len() as i64, total_all, "翻页不许漏");
+    }
+
+    // T3.1 ⑦：`_` 与 `%` 被转义（搜 `_` 不该匹配所有文件）
+    #[test]
+    fn like_wildcards_are_escaped() {
+        let (_keep, conn) = seeded();
+        let mut r = req();
+        r.q = "_".into();
+        let (_, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 1, "只有「2026_报表」字面含下划线");
+
+        r.q = "%".into();
+        let (_, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(total, 0, "字面 % 不命中任何文件");
+    }
+
+    // T3.1 ⑧：total 与 items 同源 + 结果带标签（attach_tags 出口）
+    #[test]
+    fn items_carry_tags_and_total_matches() {
+        let (_keep, conn) = seeded();
+        let mut r = req();
+        r.q = "安全".into();
+        let (items, total) = db::search_files(&conn, &r).unwrap();
+        assert_eq!(items.len() as i64, total);
+        let row = items.iter().find(|i| i.name == "安全检查通知.docx").unwrap();
+        assert_eq!(row.tags.len(), 2, "检索结果也要带标签");
+    }
+
+    // T3.7 同款性能预检（正式闸门在 test/perf-search.py）：1000 份 + 关键词 ≤ 100ms
+    #[test]
+    fn search_1000_files_fast() {
+        let (_keep, mut conn) = seeded();
+        let root = db::list_source_roots(&conn).unwrap().remove(0);
+        let mut scanned = Vec::new();
+        for i in 0..1000 {
+            scanned.push(ScannedFile {
+                name: format!("批量材料{i:04}.docx"),
+                path: format!("C:/t/批量材料{i:04}.docx"),
+                ext: "docx".into(),
+                kind: "word".into(),
+                size: 100,
+                mtime: 1_700_002_000_000 + i,
+            });
+        }
+        db::upsert_files(&mut conn, root.id, &scanned).unwrap();
+        let mut r = req();
+        r.q = "批量材料00".into();
+        let t0 = std::time::Instant::now();
+        let (items, _) = db::search_files(&conn, &r).unwrap();
+        let ms = t0.elapsed().as_millis();
+        assert!(!items.is_empty());
+        assert!(ms <= 100, "1000 份关键词检索要 ≤100ms，实测 {ms}ms");
+    }
+}

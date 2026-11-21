@@ -49,3 +49,29 @@ describe('ipc 参数键必须是 camelCase（对齐 Rust serde rename_all）', (
     expect(invoke.mock.calls[0]).toEqual(['save_note', { fileId: 5, note: '等财务确认' }])
   })
 })
+
+describe('检索 ipc（P3 T3.2）', () => {
+  beforeEach(() => invoke.mockClear())
+
+  it('search_files 传 { req } 且全 camelCase，tagMode/includeSubdirs/dirId 不出现 undefined', () => {
+    void ipc.searchFiles({ q: '报表', tags: [3, 7], tagMode: 'and', includeSubdirs: true, dirId: 5 })
+    const [cmd, args] = invoke.mock.calls[0]
+    expect(cmd).toBe('search_files')
+    expect(Object.keys(args)).toEqual(['req'])
+    const req = args.req
+    expect(req).toMatchObject({ q: '报表', tags: [3, 7], tagMode: 'and', includeSubdirs: true, dirId: 5 })
+    // 喂线上形状也不许有蛇形键漏出去
+    const raw = JSON.stringify(req)
+    expect(raw).not.toContain('tag_mode')
+    expect(raw).not.toContain('include_subdirs')
+    expect(raw).not.toContain('dir_id')
+    // 缺省字段也不该被序列化成 undefined
+    expect(raw).not.toContain('undefined')
+  })
+
+  it('tagMode 不传时前端不填 or（默认语义由后端定）', () => {
+    void ipc.searchFiles({ q: 'x' })
+    const req = invoke.mock.calls[0][1].req
+    expect(req.tagMode).toBeUndefined()
+  })
+})

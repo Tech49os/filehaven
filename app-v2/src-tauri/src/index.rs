@@ -2209,3 +2209,234 @@ pub fn browse_tree(conn: &Connection) -> Result<Vec<DirNode>, CmdError> {
     }
     Ok(roots)
 }
+
+// ================================================================ 检索查询层（P3 M3 / §3.1）
+
+/// 检索范围（§3.1 不变量 3：skipped / missing 永不出现）
+#[derive(Clone, Debug, PartialEq)]
+pub enum Scope {
+    Archive,
+    Pool,
+    Parked,
+    All,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Scope::All
+    }
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Scope {
+        match s {
+            "archive" => Scope::Archive,
+            "pool" => Scope::Pool,
+            "parked" => Scope::Parked,
+            _ => Scope::All,
+        }
+    }
+    fn sql(&self) -> &'static str {
+        match self {
+            Scope::Archive => "f.status = 'migrated'",
+            // Pool 与 Parked 都是列表，占位防自引用
+            Scope::Pool => "f.status IN ('queued','labeled','pending_confirm')",
+            Scope::All => "f.status IN ('queued','labeled','pending_confirm','migrated','parked')",
+            Scope::Parked => "f.status = 'parked'",
+        }
+    }
+}
+/// 排序白名单（绝不拼用户字符串进 ORDER BY）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sort {
+    MtimeDesc,
+    Name,
+    SizeDesc,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort::MtimeDesc
+    }
+}
+
+impl Sort {
+    pub fn parse(s: &str) -> Sort {
+        match s {
+            "name" => Sort::Name,
+            "size" => Sort::SizeDesc,
+            _ => Sort::MtimeDesc,
+        }
+    }
+    fn sql(&self) -> &'static str {
+        match self {
+            Sort::MtimeDesc => "f.mtime DESC, f.id DESC",
+            Sort::Name => "f.name COLLATE NOCASE ASC, f.id",
+            Sort::SizeDesc => "f.size DESC, f.id DESC",
+        }
+    }
+}
+
+/// LIKE 转义：`%` / `_` / `\` 都当字面量（§3.1 不变量 1）。
+/// 用户搜 `2026_报表` 时 `_` 不许变成「任意一个字符」。
+pub fn escape_like(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// 检索请求（camelCase 由命令层转换）
+#[derive(Clone, Debug, Default)]
+pub struct SearchReq {
+    pub q: String,
+    /// tag_id 列表
+    pub tags: Vec<i64>,
+    /// true = AND（HAVING COUNT = N），false = OR（IN）
+    pub tag_and: bool,
+    pub kinds: Vec<String>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub scope: Scope,
+    pub dir_id: Option<i64>,
+    pub include_subdirs: bool,
+    pub sort: Sort,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// WHERE 拼装（§3.1 不变量 4：items 与 total 共用，禁止各写一遍）。
+/// 返回 (where 片段，绑定参数)。参数一律按位置 1 起编号。
+fn build_where(req: &SearchReq, conn: &Connection) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), CmdError> {
+    let mut conds: Vec<String> = vec![req.scope.sql().to_string()];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    // 关键词：只查 name 与 rel_path，不查正文
+    let q = req.q.trim();
+    if !q.is_empty() {
+        params.push(Box::new(format!("%{}%", escape_like(q))));
+        conds.push("(f.name LIKE ? ESCAPE '\\' OR f.rel_path LIKE ? ESCAPE '\\')".to_string());
+        // LIKE 用同一个参数占两次，所以再推一次
+        params.push(Box::new(format!("%{}%", escape_like(q))));
+    }
+
+    // 类型白名单：只接受已知的 kind
+    let known = ["word", "excel", "ppt", "pdf", "image", "diagram", "other"];
+    let kinds: Vec<&String> = req.kinds.iter().filter(|k| known.contains(&k.as_str())).collect();
+    if !kinds.is_empty() {
+        let marks = vec!["?"; kinds.len()].join(",");
+        conds.push(format!("f.kind IN ({marks})"));
+        for k in kinds {
+            params.push(Box::new(k.clone()));
+        }
+    }
+
+    // 时间闭区间
+    if let Some(f) = req.from {
+        conds.push("f.mtime >= ?".to_string());
+        params.push(Box::new(f));
+    }
+    if let Some(t) = req.to {
+        conds.push("f.mtime <= ?".to_string());
+        params.push(Box::new(t));
+    }
+
+    // 目录内筛选：只对 Archive 有意义；含子目录时按 rel_path 前缀取 id 集合再 IN
+    if let Some(id) = req.dir_id {
+        if req.scope == Scope::Archive {
+            let rel: Option<String> = conn
+                .query_row("SELECT rel_path FROM archive_dirs WHERE id=?1", [id], |r| r.get(0))
+                .optional()?;
+            let Some(rel) = rel else {
+                return Err(CmdError::new("NOT_FOUND", format!("目录不存在：{id}")));
+            };
+            let ids: Vec<i64> = if req.include_subdirs {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM archive_dirs WHERE rel_path=?1 OR rel_path LIKE ?2",
+                )?;
+                let pattern = format!("{rel}/%");
+                let it = stmt.query_map(rusqlite::params![rel, pattern], |r| r.get(0))?;
+                it.collect::<Result<Vec<i64>, _>>()?
+            } else {
+                vec![id]
+            };
+            if ids.is_empty() {
+                // 目录树里没有可归的目录 → 直接给空集
+                conds.push("0 = 1".to_string());
+            } else {
+                let marks = vec!["?"; ids.len()].join(",");
+                conds.push(format!("f.archive_dir_id IN ({marks})"));
+                for i in ids {
+                    params.push(Box::new(i));
+                }
+            }
+        }
+    }
+
+    Ok((conds.join(" AND "), params))
+}
+
+/// 标签过滤的子查询（§3.1 不变量 2：AND 用 HAVING，OR 用 IN；一律走 `f.id IN (子查询)`）
+fn tag_subquery(tags: &[i64], and_mode: bool) -> Option<String> {
+    if tags.is_empty() {
+        return None;
+    }
+    let marks = vec!["?"; tags.len()].join(",");
+    if and_mode {
+        Some(format!(
+            "f.id IN (
+                 SELECT ft.file_id FROM file_tags ft
+                 WHERE ft.tag_id IN ({marks})
+                 GROUP BY ft.file_id
+                 HAVING COUNT(DISTINCT ft.tag_id) = {n}
+             )",
+            marks = marks,
+            n = tags.len()
+        ))
+    } else {
+        Some(format!(
+            "f.id IN (SELECT ft.file_id FROM file_tags ft WHERE ft.tag_id IN ({marks}))",
+            marks = marks
+        ))
+    }
+}
+
+/// 检索入口：`items` 与 `total` 同源（同一个 WHERE）
+pub fn search_files(
+    conn: &Connection,
+    req: &SearchReq,
+) -> Result<(Vec<crate::model::FileRow>, i64), CmdError> {
+    let (mut where_sql, mut params) = build_where(req, conn)?;
+
+    if let Some(sub) = tag_subquery(&req.tags, req.tag_and) {
+        // 子查询的参数排在主 WHERE 之前？不 —— 我们把子查询追加到 where 末尾，
+        // 但 SQL 参数绑定是按 `?` 出现顺序的。所以标签参数必须推在最后。
+        where_sql = format!("{where_sql} AND {sub}");
+        for t in &req.tags {
+            params.push(Box::new(*t));
+        }
+    }
+
+    let limit = req.limit.clamp(1, 500);
+    let offset = req.offset.max(0);
+
+    let total: i64 = {
+        let sql = format!("SELECT COUNT(*) FROM files f WHERE {where_sql}");
+        let mut stmt = conn.prepare(&sql)?;
+        let prefs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        stmt.query_row(prefss(&prefs), |r| r.get(0))?
+    };
+
+    let sql = format!(
+        "SELECT {FILE_COLS} FROM files f WHERE {where_sql} ORDER BY {} LIMIT {limit} OFFSET {offset}",
+        req.sort.sql()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let prefs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let it = stmt.query_map(prefss(&prefs), row_to_file)?;
+    let mut rows: Vec<crate::model::FileRow> = it.collect::<Result<Vec<_>, _>>()?;
+    attach_tags(conn, &mut rows)?;
+    Ok((rows, total))
+}
+
+/// `Vec<Box<dyn ToSql>>` 的借用转切片（避免每次手写类型转换）
+fn prefss<'a>(v: &'a [&'a dyn rusqlite::ToSql]) -> &'a [&'a dyn rusqlite::ToSql] {
+    v
+}

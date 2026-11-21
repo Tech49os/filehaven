@@ -13,7 +13,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
-import { formatSize, iconOf, kindLabel, relativeTime, statusLabel } from '../../core/format'
+import FileList from '../../components/FileList.vue'
+import { iconOf } from '../../core/format'
 import { livePath } from '../../core/types'
 import type { DirNode, FileRow } from '../../core/types'
 import * as ipc from '../../core/ipc'
@@ -67,6 +68,9 @@ async function loadList() {
 async function select(sel: Sel) {
   selected.value = sel
   activeId.value = null
+  filterQ.value = ''
+  filtering.value = false
+  clearTimeout(filterTimer)
   await loadList()
 }
 
@@ -115,6 +119,67 @@ function closeMenu() {
 
 function goWorkspace() {
   router.push('/')
+}
+
+/** 标签 chip → 高级筛选预置该标签（T3.6） */
+function goTag(tagId: number) {
+  router.push({ path: '/search', query: { tag: String(tagId) } })
+}
+
+/* ---- 目录内筛选（T3.5）：不跳页，走共用查询层 ---- */
+const filterQ = ref('')
+const totalShown = computed(() =>
+  filterQ.value.trim() ? filteredTotal.value : rows.value.length,
+)
+const filteredTotal = ref(0)
+let filterTimer: ReturnType<typeof setTimeout> | undefined
+const filtering = ref(false)
+
+/** 目录只在 archive 语义下可筛；虚拟视图直接走 all 范围的关键词 */
+function filterReq() {
+  return {
+    q: filterQ.value.trim(),
+    scope: selected.value.kind === 'dir' || selected.value.kind === 'uncat'
+      ? ('archive' as const)
+      : ('all' as const),
+    dirId: selected.value.kind === 'dir' ? selected.value.id : null,
+    includeSubdirs: includeSub.value,
+    limit: 200,
+  }
+}
+
+async function runFilter() {
+  const q = filterQ.value.trim()
+  if (!q) {
+    filtering.value = false
+    await loadList()
+    return
+  }
+  filtering.value = true
+  const res = await ipc.searchFiles(filterReq())
+  rows.value = res.items
+  filteredTotal.value = res.total
+  loading.value = false
+}
+
+function filterDebounced() {
+  clearTimeout(filterTimer)
+  filterTimer = setTimeout(runFilter, 150)
+}
+
+function clearFilter() {
+  filterQ.value = ''
+  clearTimeout(filterTimer)
+  void runFilter()
+}
+
+async function onSubToggle() {
+  if (filtering.value && filterQ.value.trim()) {
+    clearTimeout(filterTimer)
+    await runFilter()
+  } else {
+    await loadList()
+  }
 }
 </script>
 
@@ -177,39 +242,36 @@ function goWorkspace() {
                   : (tree.find((n) => n.id === selected.id)?.relPath ?? '')
           }}
         </span>
-        <label class="sub"><input v-model="includeSub" type="checkbox" @change="loadList" />含子目录</label>
-        <span class="total">{{ rows.length }} 份</span>
+        <!-- 目录内筛选（T3.5）：请求带 dirId + includeSubdirs，不跳页；清空恢复全量 -->
+        <input
+          v-model="filterQ"
+          class="filter"
+          type="text"
+          placeholder="在这个目录里找…"
+          spellcheck="false"
+          @input="filterDebounced"
+          @keydown.esc="clearFilter"
+        />
+        <button v-if="filterQ" class="clearbtn" title="清空筛选" @click="clearFilter">清空</button>
+        <label class="sub"><input v-model="includeSub" type="checkbox" @change="onSubToggle" />含子目录</label>
+        <span class="total">{{ totalShown }} 份</span>
       </header>
 
-      <p v-if="loading" class="hint">正在读列表…</p>
-
-      <p v-else-if="rows.length === 0" class="empty">
-        <AppIcon name="folder" :size="26" />
-        <span class="et">这个目录还没有文件</span>
-        <button class="link" @click="goWorkspace">去整理台看看</button>
-      </p>
-
-      <ul v-else class="list">
-        <li
-          v-for="r in rows"
-          :key="r.id"
-          class="row"
-          :class="{ on: activeId === r.id }"
-          @click="activeId = r.id"
-          @dblclick="openRow(r)"
-          @contextmenu="rowMenu($event, r)"
-        >
-          <span class="cell name"><AppIcon :name="iconOf(r.kind)" :size="14" /><span class="nm ellipsis" :title="r.name">{{ r.name }}</span></span>
-          <span class="cell kind">{{ kindLabel(r.kind) }}</span>
-          <span class="cell size">{{ formatSize(r.size) }}</span>
-          <span class="cell time">{{ relativeTime(r.mtime) }}</span>
-          <span class="cell tags" :title="(r.tags ?? []).map((t) => t.name).join('、')">
-            <span v-for="t in (r.tags ?? []).slice(0, 3)" :key="t.id" class="tchip" :class="t.kind">{{ t.name }}</span>
-            <span v-if="(r.tags ?? []).length > 3" class="tchip more">+{{ r.tags!.length - 3 }}</span>
-          </span>
-          <span class="cell st">{{ statusLabel(r.status) }}</span>
-        </li>
-      </ul>
+      <FileList
+        :rows="rows"
+        :active-id="activeId"
+        :loading="loading"
+        @activate="activeId = $event"
+        @open="openRow"
+        @menu="rowMenu($event.event, $event.row)"
+        @tag-click="goTag($event.tagId)"
+      >
+        <template #empty>
+          <AppIcon name="folder" :size="26" />
+          <span class="et">这个目录还没有文件</span>
+          <button class="link" @click="goWorkspace">去整理台看看</button>
+        </template>
+      </FileList>
 
       <!-- 详情条：单击选行后出现 -->
       <aside v-if="active" class="detail">
@@ -345,6 +407,33 @@ function goWorkspace() {
   font-size: 12px;
   color: var(--c-text-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* 目录内筛选（T3.5） */
+.filter {
+  flex: 0 1 220px;
+  min-width: 120px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--c-border);
+  background: var(--c-field);
+  font-size: 12px;
+  font-family: var(--font);
+  color: var(--c-text);
+  outline: none;
+}
+.filter:focus {
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 2px var(--c-primary-glow);
+}
+.clearbtn {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--c-primary);
+  font-size: 11px;
+  padding: 0 2px;
 }
 
 .hint {

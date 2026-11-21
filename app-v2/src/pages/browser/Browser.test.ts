@@ -8,6 +8,7 @@ const poolRows = vi.fn()
 const listParked = vi.fn()
 const openPath = vi.fn()
 const revealPath = vi.fn()
+const searchFilesSpy = vi.fn()
 const push = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
@@ -17,6 +18,7 @@ vi.mock('../../core/ipc', () => ({
   listParked,
   openPath,
   revealPath,
+  searchFiles: searchFilesSpy,
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
 
@@ -68,6 +70,7 @@ beforeEach(() => {
   listParked.mockReset().mockResolvedValue([file({ id: 3, status: 'parked' })])
   openPath.mockReset().mockResolvedValue(undefined)
   revealPath.mockReset().mockResolvedValue(undefined)
+  searchFilesSpy.mockReset().mockResolvedValue({ items: [], total: 0 })
   push.mockReset()
 })
 
@@ -179,5 +182,36 @@ describe('浏览页 · 虚拟视图与详情条（T2.5）', () => {
     expect(d.exists()).toBe(true)
     expect(d.find('.dsummary').text()).toBe('未解读')
     expect(d.find('.dtags').exists()).toBe(false)
+  })
+})
+
+describe('目录内筛选（T3.5）', () => {
+  it('输入后请求带 dirId（与树选择联动），150ms 防抖后走 searchFiles', async () => {
+    vi.useFakeTimers()
+    const w = await mountBrowser()
+    await w.find('.tree .row').trigger('click') // 先选中一个真实目录（id=7）
+    await flushPromises()
+    searchFilesSpy.mockClear()
+    await w.find('.filter').setValue('报表')
+    expect(searchFilesSpy).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(searchFilesSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ q: '报表', dirId: 7, scope: 'archive' }),
+    )
+    vi.useRealTimers()
+  })
+
+  it('清空后请求不带 q，列表恢复全量', async () => {
+    vi.useFakeTimers()
+    const w = await mountBrowser()
+    await w.find('.filter').setValue('报表')
+    await vi.advanceTimersByTimeAsync(200)
+    expect(searchFilesSpy).toHaveBeenCalledWith(expect.objectContaining({ q: '报表' }))
+    browseDirFiles.mockClear()
+    await w.find('.clearbtn').trigger('click')
+    await flushPromises()
+    // 清空后恢复走全量列表（browse_dir），不再带检索条件
+    expect(browseDirFiles).toHaveBeenCalled()
+    vi.useRealTimers()
   })
 })

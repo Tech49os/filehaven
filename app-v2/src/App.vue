@@ -3,6 +3,7 @@ import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppWindow from './components/AppWindow.vue'
 import Sidebar from './components/Sidebar.vue'
+import SearchPanel from './components/SearchPanel.vue'
 import { useAppStore } from './stores/app'
 
 const app = useAppStore()
@@ -51,6 +52,8 @@ watch(
         </RouterView>
       </div>
     </div>
+    <!-- Ctrl+K 命令面板：全局一个，挂在这里（T3.3） -->
+    <SearchPanel />
   </AppWindow>
 </template>
 

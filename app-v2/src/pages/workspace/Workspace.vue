@@ -253,6 +253,11 @@ async function onRemoveTag(tagId: number) {
   }
 }
 
+/** Ctrl+点卡片标签 → 高级筛选预置该标签（T3.6；普通点击不跳，防整理台误触） */
+function onTagClick(tagId: number) {
+  router.push({ path: '/search', query: { tag: String(tagId) } })
+}
+
 async function onNewDirConfirm(input: string) {
   store.closeInput()
   await run(() => store.newDirConfirm(input))
@@ -405,6 +410,7 @@ function goSuggest() {
           @rename="onRename"
           @add-tag="onAddTag"
           @remove-tag="onRemoveTag"
+          @tag-click="onTagClick"
         />
 
         <div v-if="store.inputOpen" class="newdir">

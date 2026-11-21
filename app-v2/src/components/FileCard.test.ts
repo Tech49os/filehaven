@@ -337,3 +337,24 @@ describe('卡片标签行：看得见、可删、超 6 折叠', () => {
     expect(w.emitted('removeTag')![0]).toEqual([2])
   })
 })
+
+describe('标签 → 检索的跳转（T3.6）', () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+  })
+
+  it('Ctrl+点标签发 tagClick；普通点击不发（整理台不能误触）', async () => {
+    const tags = [
+      { id: 3, name: '安全检查', kind: 'topic' as const },
+      { id: 5, name: '重点', kind: 'user' as const },
+    ]
+    const w = mount(FileCard, {
+      props: { item: item({ tags }), dirCount: 2, position: { index: 0, total: 1 }, preview: null },
+    })
+    const chip = w.findAll('.tagsrow .chip')[0]
+    await chip.trigger('click') // 普通点击
+    expect(w.emitted('tagClick')).toBeUndefined()
+    await chip.trigger('click', { ctrlKey: true })
+    expect(w.emitted('tagClick')![0]).toEqual([3])
+  })
+})

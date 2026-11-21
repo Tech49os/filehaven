@@ -21,6 +21,7 @@ import type {
   DirSuggestion,
   FilePreview,
   FileRow,
+  FileKind,
   MigrationPreview,
   MigrationResult,
   MigrationSummary,
@@ -268,4 +269,38 @@ export function browseTree() {
 /** 整理池全量（浏览页「待整理」虚拟视图） */
 export function poolRows() {
   return invoke<FileRow[]>('pool_rows')
+}
+
+// ---------------------------------------------------------------- 检索（P3 M3）
+
+/** 检索请求（§3.1）。字段与后端 `SearchReqIn` 一一对应，全部 camelCase */
+export interface SearchReq {
+  q?: string
+  /** tag id 列表 */
+  tags?: number[]
+  /** and | or，默认 and */
+  tagMode?: 'and' | 'or'
+  kinds?: FileKind[]
+  from?: number
+  to?: number
+  /** archive | pool | parked | all，默认 all */
+  scope?: 'archive' | 'pool' | 'parked' | 'all'
+  dirId?: number | null
+  includeSubdirs?: boolean
+  /** mtime | name | size，默认 mtime */
+  sort?: 'mtime' | 'name' | 'size'
+  /** 默认 50，上限 500 */
+  limit?: number
+  offset?: number
+}
+
+export interface SearchResult {
+  items: FileRow[]
+  /** 服务端算的总数；前端不许用 items.length 顶替 */
+  total: number
+}
+
+/** 检索（三个入口共用同一查询层） */
+export function searchFiles(req: SearchReq) {
+  return invoke<SearchResult>('search_files', { req })
 }

@@ -46,6 +46,8 @@ const emit = defineEmits<{
   (e: 'addTag', name: string): void
   /** 删一个标签（type/time 会被后端 TAG_LOCKED 拒掉） */
   (e: 'removeTag', tagId: number): void
+  /** Ctrl+点标签 → 去检索（T3.6）；普通点击不跳，避免整理台误触 */
+  (e: 'tagClick', tagId: number): void
 }>()
 
 const f = computed(() => props.item.file)
@@ -232,7 +234,8 @@ function cancelRename() {
         :key="t.id"
         class="chip"
         :class="t.kind"
-        :title="t.kind === 'user' ? '你自己加的' : t.kind === 'topic' ? 'AI 深读给的' : t.kind === 'type' || t.kind === 'time' ? '基础标签（不可删）' : '扫描时按词匹配的'"
+        :title="(t.kind === 'user' ? '你自己加的（Ctrl+点去检索）' : t.kind === 'topic' ? 'AI 深读给的（Ctrl+点去检索）' : t.kind === 'type' || t.kind === 'time' ? '基础标签（不可删）' : '扫描时按词匹配的（Ctrl+点去检索）')"
+        @click="(e) => e.ctrlKey && emit('tagClick', t.id)"
       >
         {{ t.name }}
         <button
