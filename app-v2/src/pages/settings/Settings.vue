@@ -10,6 +10,7 @@ import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
 import { onDeepTagProgress, onScanProgress } from '../../core/events'
 import { humanize, toCmdError } from '../../core/cmdError'
+import { collapsedBeyondDepth } from '../../core/dir-tree'
 import type { DeepTagStats, ScanProgress, ScanReport, TagCount } from '../../core/types'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
@@ -17,6 +18,7 @@ const app = useAppStore()
 const dirs = useDirsStore()
 const router = useRouter()
 
+/** 折叠的目录 id（与浏览页共用默认策略：只展开前两层，BUG-002） */
 const collapsed = ref<Set<number>>(new Set())
 const adding = ref(false)
 
@@ -188,6 +190,8 @@ onMounted(async () => {
   if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
+  // 目录树加载后套用默认折叠策略（BUG-002，与浏览页共用同一 helper）
+  collapsed.value = collapsedBeyondDepth(dirs.tree)
   await loadTags()
   unlisten = await onScanProgress((p) => {
     progress.value = p

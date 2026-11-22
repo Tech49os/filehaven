@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import type { DirNode } from '../../core/types'
 
 const bootState = vi.fn()
 const listDirs = vi.fn()
@@ -152,6 +153,30 @@ describe('设置页 · 目录结构', () => {
     expect(entry).toBeTruthy()
     await entry!.trigger('click')
     expect(push).toHaveBeenCalledWith('/onboarding/dirs')
+  })
+
+  // BUG-002：设置页与浏览页共用同一默认折叠策略（helper），第 3 层默认折叠
+  it('目录树默认折到第 2 层：第 3 层带子节点的目录 aria-expanded=false', async () => {
+    const node = (id: number, depth: number, children: DirNode[] = []): DirNode => ({
+      id, name: `目录${id}`, relPath: `目录${id}`, depth,
+      origin: 'user', fileCount: 0, children,
+    })
+    listDirs.mockResolvedValue([
+      node(1, 1, [node(2, 2, [node(3, 3, [node(4, 4)])])]),
+    ])
+    const w = mount(Settings)
+    await flushPromises()
+
+    const treeitems = w.findAll('[role="treeitem"][aria-expanded]')
+    const expanded1 = treeitems.filter((n) => n.attributes('aria-expanded') === 'true')
+    const collapsed3 = treeitems.find(
+      (n) => n.text().includes('目录3') && n.attributes('aria-expanded') === 'false',
+    )
+    expect(expanded1.some((n) => n.text().includes('目录1'))).toBe(true)
+    expect(expanded1.some((n) => n.text().includes('目录2'))).toBe(true)
+    expect(collapsed3, '第 3 层应默认折叠').toBeTruthy()
+    // 第 4 层整行不渲染
+    expect(w.text()).not.toContain('目录4')
   })
 })
 
