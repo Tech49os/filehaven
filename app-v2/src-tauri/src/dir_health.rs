@@ -4,7 +4,8 @@
 //! 先按确定性规则筛出候选，模型复核（若有）只是二次确认，绝不静默执行。
 //! 设计依据：`spec/BUG-003-dir-health-scan.md`、`spec/PLAN_BUG-003-dir-health-scan.md`。
 
-use crate::model::DirHealthIssue;
+use crate::model::{DirHealthIssue, DirHealthReport};
+use std::time::Instant;
 use crate::suggest_dirs::{
     is_filler_composed, strip_version_suffix, FAN_WORDS, FILLER_WORDS,
 };
@@ -205,4 +206,136 @@ pub fn analyze(facts: &[DirFact]) -> Vec<DirHealthIssue> {
     });
     issues.truncate(MAX_ISSUES);
     issues
+}
+
+/// 模型复核回调：吃规则候选，吐经模型确认/筛过的候选；失败返回原因（触发降级）。
+pub type Reviewer<'a> = dyn Fn(&[DirHealthIssue]) -> Result<Vec<DirHealthIssue>, String> + 'a;
+
+/// 体检编排（纯逻辑，不碰 DB / 事件总线 / 模型客户端）。
+///
+/// 阶段序列固定 `scan → rule → model → done`：即使模型不可用，`model` 阶段也会发，
+/// 只是 note 里写明跳过原因，前端不必为「没发第三个事件」写特例。
+///
+/// 降级纪律（spec §3.2）：模型不可用 / 闸被占用 / 复核失败，一律返回规则候选 +
+/// `model_reviewed=false` + note 含「未经模型复核」，**绝不返回 Err、绝不阻塞**。
+pub fn scan_report(
+    facts: &[DirFact],
+    reviewer: &Reviewer,
+    can_review: bool,
+    skip_reason: &str,
+    on_stage: &mut dyn FnMut(&str, u64, &str),
+) -> DirHealthReport {
+    let t0 = Instant::now();
+    let mut report = DirHealthReport::default();
+
+    on_stage("scan", 0, &format!("扫描到 {} 个归档目录", facts.len()));
+
+    let mut issues = analyze(facts);
+    on_stage("rule", t0.elapsed().as_millis() as u64, &format!("规则初筛 {} 条候选", issues.len()));
+
+    if !can_review {
+        report.note = if skip_reason.is_empty() {
+            "模型不可用，仅规则初筛（未经模型复核）".to_string()
+        } else {
+            format!("{skip_reason}，仅规则初筛（未经模型复核）")
+        };
+        on_stage("model", t0.elapsed().as_millis() as u64, "跳过模型复核");
+    } else {
+        on_stage("model", t0.elapsed().as_millis() as u64, "模型复核中");
+        match reviewer(&issues) {
+            Ok(reviewed) => {
+                issues = reviewed;
+                report.model_reviewed = true;
+                report.note = "规则初筛 + 模型复核".to_string();
+            }
+            Err(reason) => {
+                report.note = format!("模型复核失败（{reason}），保留规则初筛（未经模型复核）");
+            }
+        }
+    }
+
+    report.issues = issues;
+    report.elapsed_ms = t0.elapsed().as_millis() as u64;
+    on_stage("done", report.elapsed_ms, &report.note);
+    report
+}
+
+/// 从 DB 一次性投影目录事实（锁内调用）。两个 COUNT 用子查询，避免 N+1。
+pub fn facts_from_db(conn: &rusqlite::Connection) -> Result<Vec<DirFact>, crate::error::CmdError> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id, d.parent_id, d.name, d.rel_path, d.depth,
+                (SELECT COUNT(*) FROM files f
+                  WHERE f.status='migrated' AND f.archive_dir_id=d.id) AS file_count,
+                (SELECT COUNT(*) FROM archive_dirs c WHERE c.parent_id=d.id) AS child_count
+         FROM archive_dirs d ORDER BY d.rel_path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(DirFact {
+            id: r.get(0)?,
+            parent_id: r.get(1)?,
+            name: r.get(2)?,
+            rel_path: r.get(3)?,
+            depth: r.get(4)?,
+            file_count: r.get::<_, i64>(5)? as usize,
+            child_count: r.get::<_, i64>(6)? as usize,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(crate::error::CmdError::from)
+}
+
+/// 模型复核 prompt：只让模型判「哪几条候选是真问题」，不让它自由发挥改目录名。
+/// 复用项目既有教训：绝不采信模型给出的新归口/新路径，只用它做「确认/否决」。
+fn review_prompt(issues: &[DirHealthIssue]) -> String {
+    let mut lines = String::new();
+    for x in issues {
+        lines.push_str(&format!(
+            "- id={} 类型={} 目录={} 依据={}\n",
+            x.id, x.kind, x.rel_path, x.reason
+        ));
+    }
+    format!(
+        "你是归档目录质检员。下面是规则初筛出的可疑目录，请判断每条是否确实是问题。\
+仅返回 JSON：{{\"keep\":[\"id1\",\"id2\"]}}，keep 里放你认可的 id。\
+不确定的不要放进去。不要新增条目，不要修改任何目录名。\n\n候选：\n{lines}"
+    )
+}
+
+/// 从模型响应里容错提取 keep 列表（兼容 ```json 围栏、前后废话）。
+fn parse_keep(raw: &str) -> Option<Vec<String>> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&raw[start..=end]).ok()?;
+    let arr = json.get("keep")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+/// 真实模型复核闭包工厂：捕获 base/model/timeout，返回一个可供 `scan_report` 用的 Reviewer。
+///
+/// 语义：模型只做「确认」——它 keep 的才保留；拒绝的候选直接丢弃（模型说不是问题）。
+/// 这样即使模型把项目背景当归口，最坏也只是少报，不会静默改动任何目录。
+pub fn make_reviewer<'a>(
+    base: &'a str,
+    model: &'a str,
+    timeout: std::time::Duration,
+) -> impl Fn(&[DirHealthIssue]) -> Result<Vec<DirHealthIssue>, String> + 'a {
+    move |issues| {
+        let prompt = review_prompt(issues);
+        let raw = crate::llm::generate(base, model, &prompt, timeout)
+            .map_err(|e| e.message)?;
+        let keep = parse_keep(&raw).ok_or_else(|| "返回不是合法 JSON".to_string())?;
+        let kept: Vec<DirHealthIssue> = issues
+            .iter()
+            .filter(|x| keep.contains(&x.id))
+            .cloned()
+            .collect();
+        Ok(kept)
+    }
 }

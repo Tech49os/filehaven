@@ -4766,3 +4766,110 @@ mod dir_health {
         }
     }
 }
+
+#[cfg(test)]
+mod dir_health_degrade {
+    use crate::dir_health::{scan_report, DirFact, Reviewer};
+    use crate::model::DirHealthIssue;
+
+    fn f(id: i64, name: &str) -> DirFact {
+        DirFact {
+            id,
+            parent_id: None,
+            name: name.to_string(),
+            rel_path: name.to_string(),
+            depth: 1,
+            file_count: 0,
+            child_count: 0,
+        }
+    }
+
+    #[test]
+    fn model_unavailable_degrades_to_rule_only_without_error() {
+        let facts = vec![f(1, "空目录")];
+        let deny: &Reviewer = &|_| -> Result<Vec<DirHealthIssue>, String> {
+            panic!("模型不可用时不该调用 reviewer")
+        };
+        let mut stages: Vec<String> = Vec::new();
+        let mut on_stage = |s: &str, _: u64, _: &str| stages.push(s.to_string());
+
+        let report = scan_report(
+            &facts,
+            deny,
+            false,
+            "本地模型未启动",
+            &mut on_stage,
+        );
+
+        assert!(!report.model_reviewed, "必须标注未经模型复核");
+        assert!(report.note.contains("未经模型复核"));
+        assert_eq!(report.issues.len(), 1, "降级也要给规则候选");
+        assert_eq!(report.issues[0].source, "rule");
+        assert_eq!(
+            stages,
+            vec!["scan", "rule", "model", "done"],
+            "四个阶段都要发事件（model 阶段标跳过）"
+        );
+    }
+
+    #[test]
+    fn gate_busy_degrades_instead_of_deadlock_or_error() {
+        let mut dir = f(1, "报告_草稿");
+        dir.file_count = 3; // 非空，避免先命中 empty 规则
+        let facts = vec![dir];
+        let deny: &Reviewer = &|_| -> Result<Vec<DirHealthIssue>, String> {
+            panic!("闸占用时不该调模型")
+        };
+        let report = scan_report(
+            &facts,
+            deny,
+            false,
+            "模型正忙",
+            &mut |_: &str, _: u64, _: &str| {},
+        );
+        assert!(!report.model_reviewed);
+        assert!(report.note.contains("模型正忙"));
+        assert!(report.note.contains("未经模型复核"));
+        assert!(report.issues.iter().any(|x| x.kind == "rename"));
+    }
+
+    #[test]
+    fn model_review_success_marks_source_and_reviewed() {
+        let facts = vec![f(1, "空目录")];
+        let ok: &Reviewer = &|issues| -> Result<Vec<DirHealthIssue>, String> {
+            let mut v = issues.to_vec();
+            for x in &mut v {
+                x.source = "model".to_string();
+            }
+            Ok(v)
+        };
+        let report = scan_report(
+            &facts,
+            ok,
+            true,
+            "",
+            &mut |_: &str, _: u64, _: &str| {},
+        );
+        assert!(report.model_reviewed);
+        assert!(report.issues.iter().all(|x| x.source == "model"));
+    }
+
+    #[test]
+    fn model_review_failure_also_degrades_without_error() {
+        let facts = vec![f(1, "空目录")];
+        let fail: &Reviewer = &|_| -> Result<Vec<DirHealthIssue>, String> {
+            Err("模型返回乱码".to_string())
+        };
+        let report = scan_report(
+            &facts,
+            fail,
+            true,
+            "",
+            &mut |_: &str, _: u64, _: &str| {},
+        );
+        assert!(!report.model_reviewed, "模型返回坏数据 → 降级");
+        assert!(report.note.contains("未经模型复核"));
+        assert_eq!(report.issues.len(), 1, "仍保留规则候选");
+        assert!(report.issues[0].source == "rule");
+    }
+}

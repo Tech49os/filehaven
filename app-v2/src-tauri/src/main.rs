@@ -1164,6 +1164,83 @@ async fn suggest_dirs(
     req.map_err(|e| CmdError::new(error::DB, format!("目录建议线程异常：{e}")))?
 }
 
+// ---------------------------------------------------------------- BUG-003 目录体检
+
+/// 手动触发的目录体检：规则预筛 → （可选）模型复核 → 可解释建议清单。
+///
+/// 与 suggest_dirs 的关键差别：模型不可用 / 闸被占用时**降级而非报错**，
+/// 因为这是用户主动点开的质量检查，不该因为 Ollama 没开就白屏。
+/// 绝不挂进 refreshBoot（铁律）——只有前端按钮显式调用。
+#[tauri::command]
+async fn dir_health_scan(app: AppHandle) -> Result<model::DirHealthReport, CmdError> {
+    let state = app.state::<AppState>();
+    // ① 锁内取事实快照 + 模型配置，立刻放锁（锁内不做 IO）
+    let (facts, base, model_name) = {
+        let conn = lock_db(&state)?;
+        let (b, m) = llm_cfg(&conn);
+        (dir_health::facts_from_db(&conn)?, b, m)
+    };
+    // ② 判断模型能否用：探活（3s）→ 抢闸（0ms 非阻塞，绝不等待）
+    // 任何一步不成就降级，绝不返回 Err、绝不阻塞用户
+    let gate = app.state::<Arc<deep_tag::Queue>>().inner().clone();
+    let model_ok = llm::reachable(&base, Duration::from_secs(3));
+    let got_gate = if model_ok {
+        gate.gate.acquire(model_gate::Owner::Suggest, 0)
+    } else {
+        false
+    };
+
+    let skip_reason = if !model_ok {
+        "本地模型未启动"
+    } else if !got_gate {
+        "模型正忙"
+    } else {
+        ""
+    };
+    let can_review = model_ok && got_gate;
+
+    // ③ 阶段事件闭包工厂：每次 clone AppHandle，可安全 move 进 blocking 线程
+    fn emitter(app: &AppHandle) -> impl FnMut(&str, u64, &str) {
+        let a = app.clone();
+        move |stage: &str, ms: u64, note: &str| {
+            let _ = a.emit(
+                "dir-health-stage",
+                model::SuggestStage {
+                    stage: stage.to_string(),
+                    elapsed_ms: ms,
+                    note: note.to_string(),
+                },
+            );
+        }
+    }
+
+    // ④ 模型请求是同步 HTTP，扔 blocking 池，别冻住界面；降级路径无需线程
+    let report = if can_review {
+        let facts2 = facts.clone();
+        let base2 = base.clone();
+        let model2 = model_name.clone();
+        let mut emit2 = emitter(&app);
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            let reviewer = dir_health::make_reviewer(&base2, &model2, Duration::from_secs(SUGGEST_TIMEOUT_SECS));
+            dir_health::scan_report(&facts2, &reviewer, true, "", &mut emit2)
+        })
+        .await;
+        gate.gate.release(model_gate::Owner::Suggest);
+        match res {
+            Ok(r) => r,
+            Err(_) => {
+                let noop: &dir_health::Reviewer = &|_| Err("模型线程异常".to_string());
+                dir_health::scan_report(&facts, noop, false, "模型线程异常", &mut emitter(&app))
+            }
+        }
+    } else {
+        let noop: &dir_health::Reviewer = &|_| Err("模型不可用".to_string());
+        dir_health::scan_report(&facts, noop, false, skip_reason, &mut emitter(&app))
+    };
+
+    Ok(report)
+}
+
 // ---------------------------------------------------------------- 正文预览
 
 /// 整理台「看一眼内容」：返回正文摘要（长文截断）/ 图片标记 / 读不出的原因
@@ -2465,7 +2542,8 @@ fn main() {
             browse_tree,
             browse_dir,
             pool_rows,
-            search_files
+            search_files,
+            dir_health_scan
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
