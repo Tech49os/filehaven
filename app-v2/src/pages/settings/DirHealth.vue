@@ -123,7 +123,7 @@ async function undo() {
 <template>
   <div class="dir-health">
     <div class="bar">
-      <button class="btn" :disabled="busy" @click="scan">目录体检</button>
+      <button class="btn primary" :disabled="busy" @click="scan">目录体检</button>
       <button class="btn ghost" :disabled="busy || lastMigrationId === null" @click="undo">
         撤销上次修正
       </button>
@@ -155,7 +155,7 @@ async function undo() {
           </div>
           <div class="acts">
             <template v-if="canAct(it)">
-              <button class="btn mini" :disabled="busy" @click="adopt(it)">采纳</button>
+              <button class="btn mini primary" :disabled="busy" @click="adopt(it)">采纳</button>
               <button class="btn mini ghost" :disabled="busy" @click="ignore(it)">忽略</button>
             </template>
             <span v-else-if="adopted.has(it.id)" class="adopted">已采纳</span>
@@ -171,11 +171,7 @@ async function undo() {
 <style scoped>
 .dir-health { display: flex; flex-direction: column; gap: 8px; }
 .bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.btn {
-  font: inherit; font-size: 12px; padding: 5px 12px; border-radius: var(--r-btn);
-  border: 0; background: var(--c-primary); color: #fff; cursor: pointer;
-  box-shadow: var(--sh-primary);
-}
+/* 基线在全局 shared.css；体检页按钮默认是主色，故模板显式标 primary */
 .btn.ghost { background: var(--c-field); color: var(--c-text); box-shadow: none; }
 .btn.mini { padding: 3px 9px; font-size: 11px; }
 .btn:disabled { opacity: 0.5; cursor: default; }

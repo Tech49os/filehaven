@@ -313,7 +313,7 @@ async function removeRoot(id: number) {
           <button class="btn ghost" :disabled="picking || scanning" @click="addRoot">
             <AppIcon name="plus" :size="12" /> 添加源区
           </button>
-          <button class="btn" :disabled="scanning || picking" @click="rescan">
+          <button class="btn primary" :disabled="scanning || picking" @click="rescan">
             {{ scanning ? '扫描中…' : '重新扫描' }}
           </button>
         </div>
@@ -343,7 +343,7 @@ async function removeRoot(id: number) {
           <button class="btn ghost" @click="router.push('/onboarding/dirs')">
             <AppIcon name="sparkle" :size="12" /> AI 建议目录
           </button>
-          <button class="btn" @click="adding = true">新建目录</button>
+          <button class="btn primary" @click="adding = true">新建目录</button>
         </div>
       </template>
       <DirTree
@@ -366,7 +366,7 @@ async function removeRoot(id: number) {
           <button class="btn ghost" @click="togglePauseDeep" :disabled="!deep?.enabled">
             {{ deep?.paused ? '继续' : '暂停' }}
           </button>
-          <button class="btn" :class="{ ghost: !deep?.enabled }" @click="toggleDeep">
+          <button class="btn primary" :class="{ ghost: !deep?.enabled }" @click="toggleDeep">
             {{ deep?.enabled ? '关闭' : '开启' }}
           </button>
         </div>
@@ -450,7 +450,7 @@ async function removeRoot(id: number) {
 
     <Card title="新文件监听">
       <template #action>
-        <button class="btn" :class="{ ghost: app.watchEnabled }" :disabled="watchBusy" @click="toggleWatch">
+        <button class="btn primary" :class="{ ghost: app.watchEnabled }" :disabled="watchBusy" @click="toggleWatch">
           {{ app.watchEnabled ? '暂停监听' : '开启监听' }}
         </button>
       </template>
@@ -563,23 +563,7 @@ async function removeRoot(id: number) {
   margin-left: auto;
 }
 
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 5px 12px;
-  font-size: 12px;
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease,
-    box-shadow var(--dur-fast) ease;
-}
-.btn:active:not(:disabled) {
-  transform: scale(0.96);
-}
+/* 基线在全局 shared.css；设置页的按钮默认是主色，故模板显式标 primary；ghost 为场景特化 */
 .btn.ghost {
   background: var(--c-field);
   color: var(--c-text);

@@ -347,15 +347,6 @@ defineExpose({ focus: () => inputEl.value?.focus() })
   color: var(--c-text-3);
 }
 
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 7px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  white-space: nowrap;
-}
 .btn.primary {
   background: var(--c-primary);
   color: #fff;

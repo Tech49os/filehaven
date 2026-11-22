@@ -198,7 +198,7 @@ function cancelRename() {
 </script>
 
 <template>
-  <article class="card" :class="{ done: confirmed, aside: handledElsewhere }">
+  <article class="card file-entry" :class="{ done: confirmed, aside: handledElsewhere }">
     <header class="hd">
       <div class="ico"><AppIcon :name="iconOf(f.kind)" :size="18" /></div>
       <div class="nm">
@@ -405,14 +405,8 @@ function cancelRename() {
 .card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  background: var(--c-surface);
-  border: 0.5px solid var(--c-border);
-  border-radius: var(--r-card);
+  /* 底色 / 边框 / 圆角 / 内边距 / 间距 / 字号统一由全局 .file-entry + tokens 提供（BUG-008） */
   box-shadow: var(--sh-card);
-  /* 2026-11-20 反馈：「文字和边框间的距离有问题」—— 20/22 让内容离开边框，
-     同时卡片按内容高度收（不再拉满），下面那一大片空就没有了 */
-  padding: 20px 22px;
   min-height: 0;
   /* 换一份文件 = 组件重挂（key 变了），这一下淡入就是「换张卡」的反馈 */
   animation: card-in var(--dur) var(--ease-out) both;
@@ -460,9 +454,7 @@ function cancelRename() {
 
 .name {
   margin: 0;
-  font-size: 15px;
   font-weight: 600;
-  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -561,7 +553,6 @@ function cancelRename() {
 
 .meta {
   margin: 3px 0 0;
-  font-size: 12px;
   color: var(--c-text-2);
   display: flex;
   align-items: center;
@@ -578,7 +569,7 @@ function cancelRename() {
 }
 
 .tag {
-  font-size: 11px;
+  font-size: var(--fs-chip);
   padding: 1px 7px;
   border-radius: var(--r-pill);
   min-width: 0;
@@ -696,8 +687,6 @@ function cancelRename() {
   display: flex;
   align-items: flex-start;
   gap: 5px;
-  font-size: 12.5px;
-  line-height: 1.7;
   color: var(--c-text-2);
   min-width: 0;
 }
@@ -719,8 +708,6 @@ function cancelRename() {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
-  line-height: 1.5;
   padding: 1px 8px;
   border-radius: var(--r-pill);
   background: var(--c-field);
@@ -902,27 +889,6 @@ function cancelRename() {
   margin-top: auto;
 }
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 7px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
-.btn.primary {
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-}
-.btn:disabled {
-  opacity: 0.55;
-}
-
 .kbd {
   font-size: 10px;
   padding: 1px 5px;
@@ -941,13 +907,5 @@ function cancelRename() {
   margin-left: auto;
   font-size: 11px;
   color: var(--c-text-3);
-}
-
-/* 窗口不高时，卡片自己先松一档内边距，把空间让给内容 */
-@media (max-height: 800px) {
-  .card {
-    padding: 16px 18px;
-    gap: 10px;
-  }
 }
 </style>

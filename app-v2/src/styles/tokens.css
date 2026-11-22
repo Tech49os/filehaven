@@ -62,6 +62,16 @@
   /* 字体 */
   --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI',
     'Microsoft YaHei', 'PingFang SC', sans-serif;
+  /* 文件条目统一尺度（BUG-008；BUG-009/005 复用这组 token）
+     可读性基线：文件名 ≥13、次要信息 ≥12、chip ≥11、行高 ≥1.6。
+     名字固定，数值可按窗口分档微调。 */
+  --fs-file-name: 14px;
+  --fs-meta: 12px;
+  --fs-chip: 11px;
+  --lh-file: 1.6;
+  --pad-row-x: 16px;
+  --pad-row-y: 12px;
+  --gap-row: 10px;
   /* 间距 */
   --pad-content: 22px 24px;
   --gap-grid: 16px;

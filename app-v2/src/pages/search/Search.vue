@@ -255,16 +255,10 @@ watch([tagMode, kinds, scope, tagIds], () => void run(), { deep: true })
   border-color: var(--c-primary);
   box-shadow: 0 0 0 3px var(--c-primary-glow);
 }
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
+/* 搜索框旁的按钮保持与输入框同高（场景特化覆盖） */
+.btn.primary {
   padding: 0 16px;
   font-size: 13px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
-.btn.primary {
   background: var(--c-primary);
   color: #fff;
 }

@@ -327,17 +327,6 @@ const progressText = computed(() => {
   max-width: 760px;
 }
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 7px 14px;
-  font-size: 13px;
-  background: var(--c-field);
-  color: var(--c-text);
-}
 .btn.primary {
   background: var(--c-primary);
   color: #fff;

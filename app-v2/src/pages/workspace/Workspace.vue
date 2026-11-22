@@ -783,30 +783,6 @@ kbd {
   color: var(--c-text-2);
 }
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 6px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
-.btn.primary {
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-}
-.btn.small {
-  padding: 4px 10px;
-}
-.btn:disabled {
-  opacity: 0.55;
-}
-
 .err {
   margin: 0;
   padding: 8px 12px;

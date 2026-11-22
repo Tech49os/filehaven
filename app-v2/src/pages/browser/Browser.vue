@@ -720,15 +720,6 @@ async function onSubToggle() {
   display: flex;
   gap: 8px;
 }
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 5px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
 .btn:hover {
   color: var(--c-primary);
 }
