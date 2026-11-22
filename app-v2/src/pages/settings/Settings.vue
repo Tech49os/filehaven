@@ -11,6 +11,7 @@ import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
 import { onDeepTagProgress, onScanProgress } from '../../core/events'
 import { humanize, toCmdError } from '../../core/cmdError'
+import { collapsedBeyondDepth } from '../../core/dir-tree'
 import type { DeepTagStats, ScanProgress, ScanReport, TagCount } from '../../core/types'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
@@ -18,6 +19,7 @@ const app = useAppStore()
 const dirs = useDirsStore()
 const router = useRouter()
 
+/** 折叠的目录 id（默认只展开前两层，避免目录变多时首帧全展开把卡片挤坏） */
 const collapsed = ref<Set<number>>(new Set())
 const adding = ref(false)
 
@@ -211,6 +213,8 @@ onMounted(async () => {
   if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
+  // BUG-010：目录树与默认折叠同批落位，避免首帧全展开把设置页卡片挤成嵌套滚动
+  collapsed.value = collapsedBeyondDepth(dirs.tree)
   await loadTags()
   unlisten = await onScanProgress((p) => {
     progress.value = p
@@ -288,14 +292,14 @@ async function removeRoot(id: number) {
   <div class="grid">
     <!-- 目录体检必须首屏可见：设置页多张卡会互相压缩，原先埋在「目录结构」卡底部，
          那张卡内部滚动 3000px，用户根本找不到入口（BUG-003 入口可见性） -->
-    <Card title="目录体检" class="health-card">
+    <Card class="health-card settings-card" title="目录体检">
       <p class="hint">
         扫描已有目录，逐条采纳「改名 / 调层级」建议；采纳后可按批次撤销。空目录与同义目录只报告，不会自动删。
       </p>
       <DirHealth @changed="onDirsChanged" />
     </Card>
 
-    <Card title="归档区">
+    <Card class="settings-card" title="归档区">
       <div class="row">
         <AppIcon name="drive" :size="16" />
         <span class="mono ellipsis">{{ app.archiveRoot ?? '未设置' }}</span>
@@ -307,7 +311,7 @@ async function removeRoot(id: number) {
       </p>
     </Card>
 
-    <Card title="源区">
+    <Card class="settings-card" title="源区">
       <template #action>
         <div class="acts">
           <button class="btn ghost" :disabled="picking || scanning" @click="addRoot">
@@ -335,7 +339,7 @@ async function removeRoot(id: number) {
       <p v-if="err" class="hint bad">{{ err }}</p>
     </Card>
 
-    <Card title="目录结构">
+    <Card class="settings-card" title="目录结构">
       <template #action>
         <div class="acts">
           <!-- 目录建议以前只在引导里出现一次，之后再也回不去：想换个分法只能手动一条条建。
@@ -346,21 +350,24 @@ async function removeRoot(id: number) {
           <button class="btn primary" @click="adding = true">新建目录</button>
         </div>
       </template>
-      <DirTree
-        v-if="dirs.tree.length > 0"
-        :nodes="dirs.tree"
-        :selected-id="dirs.selectedId"
-        :collapsed="collapsed"
-        @select="dirs.select($event)"
-        @toggle="toggleDir"
-      />
+      <!-- BUG-010：目录树自己滚动，不再让整张卡 / 整页跟着撑成嵌套滚动。
+           只有这个容器拿 max-height + overflow:auto + min-height:0；卡片本身保持内容高度。 -->
+      <div v-if="dirs.tree.length > 0" class="tree-scroll">
+        <DirTree
+          :nodes="dirs.tree"
+          :selected-id="dirs.selectedId"
+          :collapsed="collapsed"
+          @select="dirs.select($event)"
+          @toggle="toggleDir"
+        />
+      </div>
       <p v-else class="hint">还没有目录。整理台里按 N，或这里点「新建目录」。</p>
       <div v-if="adding" class="newdir">
         <NewDirInput @confirm="onCreateDir" @cancel="adding = false" />
       </div>
     </Card>
 
-    <Card title="深度解读">
+    <Card class="settings-card" title="深度解读">
       <template #action>
         <div class="acts">
           <button class="btn ghost" @click="togglePauseDeep" :disabled="!deep?.enabled">
@@ -404,7 +411,7 @@ async function removeRoot(id: number) {
       </p>
     </Card>
 
-    <Card title="标签词表">
+    <Card class="settings-card" title="标签词表">
       <template #action>
         <div class="acts">
           <button class="btn ghost" :disabled="tagBusy" @click="onCleanBadTags">
@@ -448,7 +455,7 @@ async function removeRoot(id: number) {
       </ul>
     </Card>
 
-    <Card title="新文件监听">
+    <Card class="settings-card" title="新文件监听">
       <template #action>
         <button class="btn primary" :class="{ ghost: app.watchEnabled }" :disabled="watchBusy" @click="toggleWatch">
           {{ app.watchEnabled ? '暂停监听' : '开启监听' }}
@@ -468,7 +475,7 @@ async function removeRoot(id: number) {
       </p>
     </Card>
 
-    <Card title="本地模型">
+    <Card class="settings-card" title="本地模型">
       <template #action>
         <button class="btn ghost" :disabled="probing" @click="probeModel">
           {{ probing ? '检测中…' : '重新检测' }}
@@ -495,9 +502,24 @@ async function removeRoot(id: number) {
   min-height: 0;
 }
 
-/* 首屏入口不许被其他卡片压扁，否则按钮又变成「看不见」 */
+/* BUG-010：设置页的卡片一律保持内容高度，不许被 flex 列压扁。
+   参考 PendingMigration.vue 的 .groups —— 只约束这里的直接子卡，
+   不在 Card.vue 全局强制，免得影响真正需要弹性伸缩的场景。 */
+.grid > .card {
+  flex: 0 0 auto;
+}
+
+/* 首屏入口不许被其他卡片压扁，否则按钮又变成「看不见」（BUG-003） */
 .health-card {
   flex: 0 0 auto;
+}
+
+/* BUG-010：目录树独立滚动容器。max-height 用 min() 兼顾矮窗口；
+   min-height:0 只给这个真正的滚动容器，卡片本身不给（给了内容会溢出画到别处）。 */
+.tree-scroll {
+  max-height: min(360px, 40vh);
+  overflow: auto;
+  min-height: 0;
 }
 
 .row {
