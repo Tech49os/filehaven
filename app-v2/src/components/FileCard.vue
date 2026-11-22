@@ -9,7 +9,7 @@
  * 1. 完整绝对路径单独一行 —— 之前它挤在「大小·类型·时间·路径」那行末尾，被省略成只剩文件名；
  * 2. 正文摘要 / 图片缩略图 + 「打开」「定位」。判定一份 `扫描件001.pdf` 靠文件名是不行的。
  */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
@@ -73,6 +73,54 @@ const targetPath = computed(() => {
 
 /** 摘要默认只显示 4 行，够判断「这是哪一单」，又不会把候选和按钮顶出屏幕 */
 const expanded = ref(false)
+/** 实测 .pv-text 是否被 CSS 裁掉：按钮出现与否只认这个，不认后端 truncated */
+const textOverflowed = ref(false)
+const textEl = ref<HTMLElement | null>(null)
+
+function measureOverflow() {
+  // 展开态的高度已不是「4 行裁切」语义，不能用它覆盖已测得的溢出标记，否则「收起」会消失
+  if (expanded.value) return
+  const el = textEl.value
+  textOverflowed.value = !!el && el.scrollHeight > el.clientHeight
+}
+
+let resizeObserver: ResizeObserver | null = null
+/** happy-dom 没有 ResizeObserver：只在真实环境挂，窗口 resize 兜底 */
+function syncObserver() {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (typeof ResizeObserver !== 'undefined' && textEl.value) {
+    resizeObserver = new ResizeObserver(() => measureOverflow())
+    resizeObserver.observe(textEl.value)
+  }
+}
+/** DOM 更新后再量一次并同步监听目标 */
+function remeasure() {
+  measureOverflow()
+  syncObserver()
+}
+const onWindowResize = () => measureOverflow()
+
+onMounted(() => {
+  void nextTick(remeasure)
+  window.addEventListener('resize', onWindowResize)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
+
+/** 换文件 / 换了正文：收起并重新测量，不残留上一份的展开态 */
+watch(
+  () => [props.item.file.id, props.preview?.kind, props.preview?.text] as const,
+  () => {
+    expanded.value = false
+    textOverflowed.value = false
+    void nextTick(remeasure)
+  },
+)
+
 const thumb = computed(() =>
   props.preview?.kind === 'image' ? imageSrc(livePath(f.value)) : '',
 )
@@ -279,13 +327,13 @@ function cancelRename() {
         </button>
         <p v-else class="pv-none">图片预览只在应用内可用，直接打开看</p>
       </template>
-      <p v-else-if="preview.kind === 'text'" class="pv-text" :class="{ full: expanded }">
+      <p v-else-if="preview.kind === 'text'" ref="textEl" class="pv-text" :class="{ full: expanded }">
         {{ preview.text }}
       </p>
       <p v-else class="pv-none">{{ preview.reason }}</p>
 
       <button
-        v-if="preview.kind === 'text' && preview.truncated"
+        v-if="preview.kind === 'text' && textOverflowed"
         class="pv-toggle"
         @click="expanded = !expanded"
       >
@@ -767,6 +815,8 @@ function cancelRename() {
   overflow: hidden;
 }
 .pv-text.full {
+  /* -webkit-box + overflow:auto 在 WebView2 里滚不动，展开态改成普通块级 */
+  display: block;
   -webkit-line-clamp: unset;
   overflow: auto;
   max-height: 220px;

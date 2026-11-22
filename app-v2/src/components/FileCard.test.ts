@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import type { BatchItem, FilePreview } from '../core/types'
 
@@ -53,6 +54,51 @@ function mountCard(preview: FilePreview | null = null) {
   })
 }
 
+/* ---- BUG-001：happy-dom 无真实布局，mock 高度描述符驱动「是否溢出」，用完即恢复 ---- */
+let mockScrollHeight: number | null = null
+let mockClientHeight: number | null = null
+let savedScroll: PropertyDescriptor | undefined
+let savedClient: PropertyDescriptor | undefined
+
+function installLayoutMock() {
+  savedScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+  savedClient = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get() {
+      return mockScrollHeight ?? savedScroll?.get?.call(this) ?? 0
+    },
+  })
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      return mockClientHeight ?? savedClient?.get?.call(this) ?? 0
+    },
+  })
+}
+
+function restoreLayoutMock() {
+  if (savedScroll) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', savedScroll)
+  else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight
+  if (savedClient) Object.defineProperty(HTMLElement.prototype, 'clientHeight', savedClient)
+  else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight
+  mockScrollHeight = null
+  mockClientHeight = null
+  savedScroll = undefined
+  savedClient = undefined
+}
+
+function setLayout(scrollHeight: number, clientHeight: number) {
+  mockScrollHeight = scrollHeight
+  mockClientHeight = clientHeight
+}
+
+/** onMounted/watch 里都有 nextTick 测量，连刷两拍确保 DOM 更新到位 */
+const flush = async () => {
+  await nextTick()
+  await nextTick()
+}
+
 describe('整理台卡片：路径 / 内容 / 打开（2026-11-20 反馈）', () => {
   beforeEach(() => {
     // 模拟应用内环境：有 Tauri 上下文才走 asset 协议
@@ -76,15 +122,17 @@ describe('整理台卡片：路径 / 内容 / 打开（2026-11-20 反馈）', ()
     expect(w.emitted('reveal')).toHaveLength(1)
   })
 
-  it('有正文时直接显示摘要，长得截断的给「展开」', async () => {
-    const w = mountCard(textPreview({ truncated: true }))
-    expect(w.text()).toContain('合同金额：十二万元')
-    const toggle = w.find('.pv-toggle')
-    expect(toggle.exists()).toBe(true)
-    expect(toggle.text()).toContain('展开')
-    await toggle.trigger('click')
-    expect(toggle.text()).toContain('收起')
-    expect(w.find('.pv-text').classes()).toContain('full')
+  it('有正文时直接显示摘要（是否给展开由实测溢出决定，不看 truncated）', async () => {
+    installLayoutMock()
+    try {
+      setLayout(120, 40) // 内容高于可见高度 → 真溢出
+      const w = mountCard(textPreview({ truncated: false }))
+      await flush()
+      expect(w.text()).toContain('合同金额：十二万元')
+      expect(w.find('.pv-toggle').exists()).toBe(true)
+    } finally {
+      restoreLayoutMock()
+    }
   })
 
   it('读不出正文时给一句人话，不留空白框', () => {
@@ -356,5 +404,85 @@ describe('标签 → 检索的跳转（T3.6）', () => {
     expect(w.emitted('tagClick')).toBeUndefined()
     await chip.trigger('click', { ctrlKey: true })
     expect(w.emitted('tagClick')![0]).toEqual([3])
+  })
+})
+
+// ------------------------------------- BUG-001：正文摘要「实际溢出」才给展开入口
+describe('BUG-001：摘要溢出与展开', () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    installLayoutMock()
+  })
+  afterEach(() => {
+    restoreLayoutMock()
+  })
+
+  it('溢出（scrollHeight>clientHeight）时显示展开按钮，即便 truncated=false', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    expect(w.find('.pv-toggle').exists()).toBe(true)
+    expect(w.find('.pv-toggle').text()).toContain('展开全文')
+  })
+
+  it('未溢出时不显示按钮，即便 truncated=true', async () => {
+    setLayout(50, 50)
+    const w = mountCard(textPreview({ truncated: true }))
+    await flush()
+    expect(w.find('.pv-toggle').exists()).toBe(false)
+  })
+
+  it('展开：class 含 full、文案变「收起」；再点恢复 4 行', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('收起')
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).not.toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('展开全文')
+  })
+
+  it('换 file.id 后展开态复位为收起', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).toContain('full')
+
+    await w.setProps({ item: item({ id: 2 }) })
+    await flush()
+    expect(w.find('.pv-text').classes()).not.toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('展开全文')
+  })
+
+  it('图片 / 读不出原因分支不渲染展开按钮', async () => {
+    setLayout(200, 50)
+    const none = mountCard({
+      text: '',
+      truncated: true,
+      reason: 'PDF 这一版不抽正文，直接打开看最快',
+      kind: 'none',
+    })
+    await flush()
+    expect(none.find('.pv-toggle').exists()).toBe(false)
+  })
+
+  it('展开态下 resize 重算不清除溢出标记，仍能收起', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('收起')
+
+    // 展开态正文高度 < 220px 时 scrollHeight == clientHeight，模拟 resize 触发重算
+    setLayout(100, 100)
+    window.dispatchEvent(new Event('resize'))
+    await flush()
+    expect(w.find('.pv-toggle').exists()).toBe(true)
+    expect(w.find('.pv-toggle').text()).toContain('收起')
+    expect(w.find('.pv-text').classes()).toContain('full')
   })
 })
