@@ -19,7 +19,7 @@ const app = useAppStore()
 const dirs = useDirsStore()
 const router = useRouter()
 
-/** 折叠的目录 id（默认只展开前两层，避免目录变多时首帧全展开把卡片挤坏） */
+/** 折叠的目录 id（与浏览页共用默认策略：只展开前两层，避免目录变多时首帧挤坏卡片） */
 const collapsed = ref<Set<number>>(new Set())
 const adding = ref(false)
 
@@ -213,7 +213,7 @@ onMounted(async () => {
   if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
-  // BUG-010：目录树与默认折叠同批落位，避免首帧全展开把设置页卡片挤成嵌套滚动
+  // 默认折叠与树数据同批落位（BUG-002/010）：避免首帧全展开把设置页卡片挤成嵌套滚动
   collapsed.value = collapsedBeyondDepth(dirs.tree)
   await loadTags()
   unlisten = await onScanProgress((p) => {
