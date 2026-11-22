@@ -52,3 +52,8 @@ export function onUndoProgress(cb: (p: MigrateProgress) => void) {
 export function onDirHealthStage(cb: (p: DirHealthStage) => void) {
   return safeListen<DirHealthStage>('dir-health-stage', cb)
 }
+
+/** BUG-006 同义目录合并阶段：扫描同上；采纳时按文件发 copy → verify → quarantine */
+export function onDirMergeStage(cb: (p: DirHealthStage) => void) {
+  return safeListen<DirHealthStage>('dir-merge-stage', cb)
+}

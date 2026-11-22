@@ -6,6 +6,7 @@ import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
 import NewDirInput from '../../components/NewDirInput.vue'
 import DirHealth from './DirHealth.vue'
+import DirMerge from './DirMerge.vue'
 import { useAppStore } from '../../stores/app'
 import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
@@ -297,6 +298,14 @@ async function removeRoot(id: number) {
         扫描已有目录，逐条采纳「改名 / 调层级」建议；采纳后可按批次撤销。空目录与同义目录只报告，不会自动删。
       </p>
       <DirHealth @changed="onDirsChanged" />
+    </Card>
+
+    <!-- BUG-006：独立可见入口，不与体检卡混在一起；只在用户点按钮时扫描 -->
+    <Card class="health-card settings-card" title="同义目录合并">
+      <p class="hint">
+        识别「2026年9月 / 2026年/9月」这类同义目录，逐组给出合并建议；可改选保留方，采纳后按批次撤销。
+      </p>
+      <DirMerge @changed="onDirsChanged" />
     </Card>
 
     <Card class="settings-card" title="归档区">

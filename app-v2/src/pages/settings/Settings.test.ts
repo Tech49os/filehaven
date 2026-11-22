@@ -40,12 +40,17 @@ vi.mock('../../core/ipc', () => ({
   dirHealthScan: vi.fn().mockResolvedValue({ issues: [], modelReviewed: true, note: '', elapsedMs: 0 }),
   applyDirHealth: vi.fn(),
   undoDirHealth: vi.fn(),
+  // BUG-006：设置页内新增「同义目录合并」卡片
+  dirMergeScan: vi.fn().mockResolvedValue({ candidates: [], modelReviewed: true, note: '', elapsedMs: 0 }),
+  applyDirMerge: vi.fn(),
+  undoDirMerge: vi.fn(),
 }))
 vi.mock('../../core/events', () => ({
   onScanProgress: vi.fn().mockResolvedValue(() => {}),
   onDeepTagProgress: vi.fn().mockResolvedValue(() => {}),
   onFilesFound: vi.fn().mockResolvedValue(() => {}),
   onDirHealthStage: vi.fn().mockResolvedValue(() => {}),
+  onDirMergeStage: vi.fn().mockResolvedValue(() => {}),
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push, replace: push }) }))
 

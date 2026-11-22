@@ -22,6 +22,9 @@ import type {
   DirHealthReport,
   DirHealthApplyReq,
   DirHealthApplyAck,
+  DirMergeReport,
+  DirMergeApplyReq,
+  DirMergeApplyAck,
   FilePreview,
   FileRow,
   FileKind,
@@ -348,4 +351,21 @@ export function applyDirHealth(req: DirHealthApplyReq) {
 /** 按批次撤销一次目录修正 */
 export function undoDirHealth(migrationId: number) {
   return invoke<UndoReport>('undo_dir_health', { migrationId })
+}
+
+// ---- BUG-006 同义目录合并 ----
+
+/** 手动触发同义目录扫描（规则预筛 + 可选模型复核，降级不报错） */
+export function dirMergeScan() {
+  return invoke<DirMergeReport>('dir_merge_scan')
+}
+
+/** 采纳一组同义目录合并 */
+export function applyDirMerge(req: DirMergeApplyReq) {
+  return invoke<DirMergeApplyAck>('apply_dir_merge', { req })
+}
+
+/** 按批次撤销一次同义目录合并 */
+export function undoDirMerge(migrationId: number) {
+  return invoke<UndoReport>('undo_dir_merge', { migrationId })
 }

@@ -172,6 +172,75 @@ pub struct DirHealthApplyReq {
     pub target_path: String,
 }
 
+// ---- BUG-006 同义目录合并 ----
+
+/// 一组同义目录的候选建议
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeCandidate {
+    /// 稳定 id：`dir_merge:{signature}`，前端逐组忽略/采纳的键
+    pub id: String,
+    /// 归一化签名（可解释）
+    pub signature: String,
+    /// 组内全部目录 id
+    pub dir_ids: Vec<i64>,
+    /// 组内全部目录 rel_path
+    pub dir_paths: Vec<String>,
+    /// 待搬空的源目录 id（默认除推荐目标外的全部）
+    pub source_dir_ids: Vec<i64>,
+    /// 待搬空的源目录 rel_path
+    pub source_dir_paths: Vec<String>,
+    /// 默认目标（规则推荐）
+    pub target_dir_id: i64,
+    /// 默认目标 rel_path
+    pub target_path: String,
+    /// 规则推荐的目标 id（用户可改选）
+    pub suggested_target_id: i64,
+    /// 归一化签名 + 差异点
+    pub reason: String,
+    /// 组内文件总数
+    pub file_count: usize,
+    /// 0..1
+    pub confidence: f64,
+    /// rule|model
+    pub source: String,
+}
+
+/// 一次同义合并扫描的报告
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeReport {
+    pub candidates: Vec<DirMergeCandidate>,
+    /// false = 模型不可用/被占用，只有规则初筛
+    pub model_reviewed: bool,
+    /// 降级说明 / 统计
+    pub note: String,
+    pub elapsed_ms: u64,
+}
+
+/// 前端请求采纳一组同义目录合并
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeApplyReq {
+    pub candidate_id: String,
+    pub source_dir_ids: Vec<i64>,
+    pub target_dir_id: i64,
+}
+
+/// 采纳合并后的回执
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeApplyAck {
+    pub migration_id: i64,
+    pub affected_files: usize,
+    /// 因目标同名而 `_2` 错开的文件数
+    pub renamed: usize,
+    /// 失败项（显式记录，不静默跳过）
+    pub failed: Vec<MigrationFailure>,
+    pub source_dir_ids: Vec<i64>,
+    pub target_dir_id: i64,
+}
+
 /// 一次扫描的汇总（前端用它显示「已跳过 N 份非资料型文件」，不许静默）
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

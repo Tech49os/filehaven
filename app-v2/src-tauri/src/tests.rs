@@ -5110,3 +5110,227 @@ mod dir_health_parent_file {
         assert!(paths.iter().all(|p| p.contains("旧名")), "DB 路径全还原：{paths:?}");
     }
 }
+
+// ================================================================ BUG-006 同语义目录合并
+#[cfg(test)]
+mod dir_merge {
+    use crate::dir_merge::{
+        analyze_groups, apply_merge, scan_report, undo_merge, MergeFact, MergeReviewer,
+    };
+    use crate::dir_norm::{difference_note, signature};
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::UndoReport;
+    use crate::tests::index::fresh_db;
+    use std::collections::HashMap;
+
+    const P_A: &str = "信科/生产智能化项目组/汇报/月度汇报/2026年9月";
+    const P_B: &str = "信科/生产智能化项目组/汇报/月度汇报/2026年/9月";
+    const P_OTHER: &str = "信科/生产智能化项目组/汇报/月度汇报/2026年10月";
+    const P_REVERSED: &str = "信科/生产智能化项目组/汇报/月度汇报/9月/2026年";
+
+    fn fact(id: i64, rel: &str, files: usize, created: i64) -> MergeFact {
+        MergeFact {
+            id,
+            rel_path: rel.to_string(),
+            depth: rel.split('/').filter(|s| !s.is_empty()).count() as i64,
+            file_count: files,
+            created_at: created,
+        }
+    }
+
+    struct Seed {
+        arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        src: i64,
+        dst: i64,
+        before: Vec<(i64, String, i64)>,
+        before_hash: HashMap<i64, String>,
+    }
+
+    /// 源目录 `2026年9月` 与规范目录 `2026年/9月` 各 2 份；`a.docx` 两边同名（内容不同）。
+    fn seed() -> Seed {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, conn) = fresh_db();
+        let src = db::insert_dir(&conn, None, "2026年9月", "user").unwrap();
+        let year = db::insert_dir(&conn, None, "2026年", "user").unwrap();
+        let dst = db::insert_dir(&conn, Some(year.id), "9月", "user").unwrap();
+        let src_d = arc.path().join("2026年9月");
+        let dst_d = arc.path().join("2026年/9月");
+        std::fs::create_dir_all(&src_d).unwrap();
+        std::fs::create_dir_all(&dst_d).unwrap();
+
+        let entries = [
+            (src.id, src_d.join("a.docx"), "src-a"),
+            (src.id, src_d.join("c.docx"), "src-c"),
+            (dst.id, dst_d.join("a.docx"), "dst-a"),
+            (dst.id, dst_d.join("d.docx"), "dst-d"),
+        ];
+        let mut before = Vec::new();
+        let mut before_hash = HashMap::new();
+        for (dir, path, content) in entries {
+            std::fs::write(&path, content).unwrap();
+            let ap = path.to_string_lossy().to_string();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            conn.execute(
+                "INSERT INTO files(abs_path,rel_path,name,ext,kind,size,mtime,status,archived_path,archive_dir_id,discovered_at,last_seen_at)
+                 VALUES(?1,?2,?3,'docx','word',?4,1,'migrated',?5,?6,1,1)",
+                rusqlite::params![ap, name, name, content.len() as i64, ap, dir],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            before.push((id, ap, dir));
+            before_hash.insert(id, crate::migrate::sha256_of(&path).unwrap());
+        }
+        Seed { arc, conn, src: src.id, dst: dst.id, before, before_hash }
+    }
+
+    fn archived_of(conn: &rusqlite::Connection, id: i64) -> (String, i64) {
+        conn.query_row(
+            "SELECT archived_path, archive_dir_id FROM files WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    // ---- 红测 1：归一化签名 ----
+
+    #[test]
+    fn signature_equal_for_equivalent_date_levels() {
+        assert_eq!(signature(P_A), signature(P_B), "2026年9月 ≡ 2026年/9月");
+    }
+
+    #[test]
+    fn signature_differs_for_other_month_and_reversed_hierarchy() {
+        assert_ne!(signature(P_A), signature(P_OTHER), "不同月份不得成组");
+        assert_ne!(signature(P_A), signature(P_REVERSED), "层级顺序颠倒不得成组");
+    }
+
+    #[test]
+    fn signature_normalizes_fullwidth_space_and_version_suffix() {
+        assert_eq!(
+            signature("项目_草稿／2026年 9月"),
+            signature("项目/2026年9月"),
+            "全角斜杠/空格/草稿后缀都要归一"
+        );
+        assert!(difference_note(P_A, P_B).contains("2026年9月"), "理由要写差异点");
+    }
+
+    #[test]
+    fn analyze_groups_only_groups_equivalent_dirs_and_recommends_clearer_hierarchy() {
+        let facts = vec![
+            fact(1, P_A, 2, 300),
+            fact(2, P_B, 3, 200),
+            fact(3, P_OTHER, 2, 100),
+            fact(4, P_REVERSED, 2, 100),
+        ];
+        let groups = analyze_groups(&facts);
+        assert_eq!(groups.len(), 1, "只有一组同义，实际：{:?}", groups.iter().map(|g| &g.signature).collect::<Vec<_>>());
+        let g = &groups[0];
+        assert_eq!(g.source_dir_ids, vec![1], "只搬不推荐的那一方");
+        assert_eq!(g.suggested_target_id, 2, "2026年/9月 层级更清晰，应推荐为目标");
+        assert!(g.reason.contains(&g.signature), "理由要写归一化签名");
+    }
+
+    // ---- 红测 2：批量三段式合并 + 撤销 ----
+
+    #[test]
+    fn apply_merge_moves_all_files_and_undo_restores_each_by_hash() {
+        let mut s = seed();
+        let ack = apply_merge(&mut s.conn, s.arc.path(), &[s.src], s.dst, &mut |_, _, _| {}).unwrap();
+        assert_eq!(ack.affected_files, 2, "只搬源目录的 2 份");
+        let mig = db::latest_migration(&s.conn).unwrap().unwrap();
+        assert_eq!(mig.kind, "dir_merge", "台账 kind 必须是 dir_merge");
+
+        // 四份文件全部指向目标目录
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM files WHERE archive_dir_id=?1", [s.dst], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4, "源与目标的文件都归到目标目录");
+        // 同名不覆盖
+        assert_eq!(std::fs::read(s.arc.path().join("2026年/9月/a.docx")).unwrap(), b"dst-a");
+        assert!(s.arc.path().join("2026年/9月/a_2.docx").is_file(), "撞名错开 _2");
+        assert_eq!(std::fs::read(s.arc.path().join("2026年/9月/a_2.docx")).unwrap(), b"src-a");
+        // 源文件进隔离区（永不直删）
+        let q = s.arc.path().join(".filebutler/quarantine").join(mig.id.to_string());
+        assert!(q.exists(), "隔离区批次目录必须存在");
+        // 源目录标记 empty 但记录保留
+        let empty: i64 = s
+            .conn
+            .query_row("SELECT is_empty FROM archive_dirs WHERE id=?1", [s.src], |r| r.get(0))
+            .unwrap();
+        assert_eq!(empty, 1, "合并后源目录标记 empty");
+        assert!(db::get_dir(&s.conn, s.src).unwrap().is_some(), "不删目录记录");
+
+        let report = undo_merge(&mut s.conn, s.arc.path(), mig.id).unwrap();
+        assert!(report.failed.is_empty(), "撤销不该失败：{:?}", report.failed);
+        assert_eq!(report.restored, 2);
+        for (id, ap, adir) in &s.before {
+            let (now_ap, now_adir) = archived_of(&s.conn, *id);
+            assert_eq!((&now_ap, now_adir), (ap, *adir), "逐份还原 archived_path/archive_dir_id");
+            assert_eq!(
+                crate::migrate::sha256_of(std::path::Path::new(&now_ap)).unwrap(),
+                s.before_hash[id],
+                "SHA-256 一致"
+            );
+        }
+        let empty_after: i64 = s
+            .conn
+            .query_row("SELECT is_empty FROM archive_dirs WHERE id=?1", [s.src], |r| r.get(0))
+            .unwrap();
+        assert_eq!(empty_after, 0, "撤销后取消 empty 标记");
+    }
+
+    #[test]
+    fn generic_undo_refuses_dir_merge_batch() {
+        let mut s = seed();
+        apply_merge(&mut s.conn, s.arc.path(), &[s.src], s.dst, &mut |_, _, _| {}).unwrap();
+        let mig = db::latest_migration(&s.conn).unwrap().unwrap();
+        let r: Result<UndoReport, _> =
+            mig::undo(&mut s.conn, s.arc.path(), mig.id, &mut |_, _, _, _| {});
+        assert!(r.is_err(), "通用 undo 必须拒绝 dir_merge 批次，不能误标 undone");
+        assert!(r.unwrap_err().message.contains("合并"));
+    }
+
+    // ---- 红测 3：模型不可用 / 闸占用降级 ----
+
+    #[test]
+    fn model_unavailable_still_returns_rule_candidates() {
+        let facts = vec![fact(1, P_A, 2, 300), fact(2, P_B, 3, 200)];
+        let deny: &MergeReviewer = &|_| -> Result<Vec<_>, String> {
+            panic!("模型不可用时不该调用 reviewer")
+        };
+        let mut stages = Vec::new();
+        let report = scan_report(
+            &facts,
+            deny,
+            false,
+            "本地模型未启动",
+            &mut |st, _, _| stages.push(st.to_string()),
+        );
+        assert!(!report.model_reviewed);
+        assert!(report.note.contains("未经模型复核"));
+        assert_eq!(report.candidates.len(), 1, "降级仍输出确定性规则候选");
+        assert_eq!(stages, vec!["scan", "rule", "model", "done"]);
+    }
+
+    #[test]
+    fn gate_busy_does_not_steal_and_degrades() {
+        use crate::model_gate::{ModelGate, Owner};
+        let gate = ModelGate::default();
+        assert!(gate.acquire(Owner::Text, 0));
+        assert!(
+            !gate.acquire(Owner::Suggest, 0),
+            "深读占闸时合并扫描必须避让，绝不抢闸"
+        );
+        let facts = vec![fact(1, P_A, 2, 300), fact(2, P_B, 3, 200)];
+        let deny: &MergeReviewer = &|_| -> Result<Vec<_>, String> {
+            panic!("闸被占用时不该调模型")
+        };
+        let report = scan_report(&facts, deny, false, "模型正忙", &mut |_, _, _| {});
+        assert!(report.note.contains("模型正忙"));
+        assert_eq!(report.candidates.len(), 1);
+    }
+}

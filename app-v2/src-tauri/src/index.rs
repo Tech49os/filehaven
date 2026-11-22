@@ -139,6 +139,8 @@ pub fn open(path: &Path) -> Result<Connection, CmdError> {
     // P4：重新归类台账——kind 区分普通迁移与归档区内二次迁移；old_dir_id 记撤销要还原的旧目录
     ensure_column(&conn, "migrations", "kind", "TEXT NOT NULL DEFAULT 'migrate'")?;
     ensure_column(&conn, "migration_items", "old_dir_id", "INTEGER")?;
+    // BUG-006：同义目录合并后源目录标记 empty（保留目录记录，不删磁盘空目录）
+    ensure_column(&conn, "archive_dirs", "is_empty", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(conn)
 }
 
@@ -371,6 +373,25 @@ pub fn accept_dirs(conn: &Connection, names: &[String]) -> Result<Vec<ArchiveDir
         }
     }
     Ok(out)
+}
+
+/// BUG-006：标记/取消源目录的「已搬空」状态。只改标记，绝不删目录记录或磁盘目录。
+pub fn set_dir_empty(conn: &Connection, id: i64, empty: bool) -> Result<(), CmdError> {
+    conn.execute(
+        "UPDATE archive_dirs SET is_empty=?1 WHERE id=?2",
+        params![if empty { 1 } else { 0 }, id],
+    )?;
+    Ok(())
+}
+
+/// BUG-006：该目录是否还有已归档文件（判断能否取消 empty 标记）
+pub fn dir_has_archived_files(conn: &Connection, id: i64) -> Result<bool, CmdError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE archive_dir_id=?1 AND status='migrated'",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 pub fn dir_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<ArchiveDir>, CmdError> {

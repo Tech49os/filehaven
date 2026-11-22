@@ -397,3 +397,46 @@ export interface DirHealthApplyAck {
   affectedDirs: number
   affectedFiles: number
 }
+
+// ---- BUG-006 同义目录合并 ----
+
+/** 阶段事件载荷沿用体检的形状（scan → rule → model → done / copy → verify → quarantine） */
+export type DirMergeStage = DirHealthStage
+
+export interface DirMergeCandidate {
+  id: string
+  signature: string
+  dirIds: number[]
+  dirPaths: string[]
+  sourceDirIds: number[]
+  sourceDirPaths: string[]
+  targetDirId: number
+  targetPath: string
+  suggestedTargetId: number
+  reason: string
+  fileCount: number
+  confidence: number
+  source: 'rule' | 'model'
+}
+
+export interface DirMergeReport {
+  candidates: DirMergeCandidate[]
+  modelReviewed: boolean
+  note: string
+  elapsedMs: number
+}
+
+export interface DirMergeApplyReq {
+  candidateId: string
+  sourceDirIds: number[]
+  targetDirId: number
+}
+
+export interface DirMergeApplyAck {
+  migrationId: number
+  affectedFiles: number
+  renamed: number
+  failed: { fileId: number; name: string; reason: string }[]
+  sourceDirIds: number[]
+  targetDirId: number
+}
