@@ -4987,3 +4987,57 @@ mod dir_health_review_fixes {
         assert!(result.unwrap_err().message.contains("目录体检"));
     }
 }
+
+#[cfg(test)]
+mod dir_health_parent_file {
+    use crate::dir_health::{apply_rename, undo_dir_health};
+    use crate::index as db;
+    use crate::tests::index::fresh_db;
+
+    /// 父目录直属文件 + 子目录文件都在：整树改名/还原后两份都要归位（评审覆盖缺口）
+    #[test]
+    fn undo_restores_files_directly_in_parent_dir() {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let parent = db::insert_dir(&conn, None, "旧名", "user").unwrap();
+        let child = db::insert_dir(&conn, Some(parent.id), "子目录", "user").unwrap();
+        let parent_disk = arc.path().join("旧名");
+        let child_disk = parent_disk.join("子目录");
+        std::fs::create_dir_all(&child_disk).unwrap();
+        let p_file = parent_disk.join("parent.docx");
+        let c_file = child_disk.join("child.docx");
+        std::fs::write(&p_file, b"p").unwrap();
+        std::fs::write(&c_file, b"c").unwrap();
+        let pa = p_file.to_string_lossy().to_string();
+        let ca = c_file.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO files(abs_path,rel_path,name,ext,kind,size,mtime,status,archived_path,archive_dir_id,discovered_at,last_seen_at)
+             VALUES(?1,'p.docx','p.docx','docx','word',1,1,'migrated',?1,?2,1,1)",
+            rusqlite::params![pa, parent.id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO files(abs_path,rel_path,name,ext,kind,size,mtime,status,archived_path,archive_dir_id,discovered_at,last_seen_at)
+             VALUES(?1,'c.docx','c.docx','docx','word',1,1,'migrated',?1,?2,1,1)",
+            rusqlite::params![ca, child.id],
+        ).unwrap();
+
+        let out = apply_rename(&mut conn, arc.path(), parent.id, "新名", "rule").unwrap();
+        // 采纳后两份都在新路径
+        assert!(arc.path().join("新名/parent.docx").is_file());
+        assert!(arc.path().join("新名/子目录/child.docx").is_file());
+
+        undo_dir_health(&mut conn, arc.path(), out.migration_id).unwrap();
+        // 撤销后两份都归位，新目录无残留
+        assert!(arc.path().join("旧名/parent.docx").is_file(), "父直属文件归位");
+        assert!(arc.path().join("旧名/子目录/child.docx").is_file(), "子目录文件归位");
+        assert!(!arc.path().join("新名").exists(), "新目录无残留");
+        let paths: Vec<String> = conn
+            .prepare("SELECT archived_path FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert!(paths.iter().all(|p| p.contains("旧名")), "DB 路径全还原：{paths:?}");
+    }
+}

@@ -87,6 +87,26 @@ describe('目录体检 · 建议列表', () => {
     expect(req.issueId).toBe('rename:1')
   })
 
+  it('点「忽略」后该行立即显示已忽略且不再可采纳', async () => {
+    dirHealthScan.mockResolvedValue(report([
+      issue({ id: 'rename:1', dirId: 1 }),
+      issue({ id: 'rename:2', dirId: 2, dirName: '报告_草稿' }),
+    ]))
+    const w = mount(DirHealth)
+    await btn(w, '目录体检')!.trigger('click')
+    await flushPromises()
+
+    const ignoreBtns = w.findAll('button').filter((b) => b.text().includes('忽略'))
+    await ignoreBtns[0].trigger('click')
+    await flushPromises()
+
+    // 响应式反馈：无需其他动作就能看到「已忽略」
+    expect(w.text()).toContain('已忽略')
+    const firstRow = w.findAll('.issue')[0]
+    expect(firstRow.text()).toContain('已忽略')
+    expect(firstRow.findAll('button').filter((b) => b.text().includes('采纳'))).toHaveLength(0)
+  })
+
   it('降级报告显示「未经模型复核」标注', async () => {
     dirHealthScan.mockResolvedValue(report([issue()], false))
     const w = mount(DirHealth)
