@@ -8,6 +8,7 @@ import NewDirInput from '../../components/NewDirInput.vue'
 import DirHealth from './DirHealth.vue'
 import DirMerge from './DirMerge.vue'
 import { useAppStore } from '../../stores/app'
+import { useUiStore } from '../../stores/ui'
 import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
 import { onDeepTagProgress, onScanProgress } from '../../core/events'
@@ -17,8 +18,14 @@ import type { DeepTagStats, ScanProgress, ScanReport, TagCount } from '../../cor
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const app = useAppStore()
+const ui = useUiStore()
 const dirs = useDirsStore()
 const router = useRouter()
+
+/** 材质效果（BUG-011）：默认开；关掉后整页回退实色，低性能设备用 */
+function toggleGlass() {
+  ui.setGlassEnabled(!ui.glassEnabled)
+}
 
 /** 折叠的目录 id（与浏览页共用默认策略：只展开前两层，避免目录变多时首帧挤坏卡片） */
 const collapsed = ref<Set<number>>(new Set())
@@ -481,6 +488,25 @@ async function removeRoot(id: number) {
       <p class="hint">
         关掉不影响启动扫描：每次启动仍会增量扫一遍（10 分钟内扫过就跳过）。
         大批量复制时建议先关，免得整理过程中池子一直在变。
+      </p>
+    </Card>
+
+    <Card class="settings-card" title="材质效果">
+      <template #action>
+        <button class="btn primary" :class="{ ghost: ui.glassEnabled }" @click="toggleGlass">
+          {{ ui.glassEnabled ? '关闭材质' : '开启材质' }}
+        </button>
+      </template>
+      <div class="row">
+        <i class="dot" :class="{ on: ui.glassEnabled }" />
+        <span>{{ ui.glassEnabled ? '毛玻璃已开启' : '已关闭，界面使用实色' }}</span>
+      </div>
+      <p class="hint">
+        标题栏、侧栏、主内容区与浮层使用半透明材质（苹果风），文字有底衬保证可读。
+        默认开启；若机器较老、窗口拖动掉帧，关掉即可完整回退实色，功能不变。
+      </p>
+      <p class="hint">
+        该偏好保存在本机，下次启动仍生效。列表每一行不使用毛玻璃，避免逐行模糊拖慢滚动。
       </p>
     </Card>
 

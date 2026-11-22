@@ -5,10 +5,20 @@ import AppWindow from './components/AppWindow.vue'
 import Sidebar from './components/Sidebar.vue'
 import SearchPanel from './components/SearchPanel.vue'
 import { useAppStore } from './stores/app'
+import { useUiStore } from './stores/ui'
 
 const app = useAppStore()
+const ui = useUiStore()
 const route = useRoute()
 const router = useRouter()
+
+// 材质开关：默认开（页面不带 no-glass 类），关闭时整页回退实色。
+// 挂在 html 上是因为命令面板 Teleport 到 body，不在 .win 子树内。
+watch(
+  () => ui.glassEnabled,
+  (on) => document.documentElement.classList.toggle('no-glass', !on),
+  { immediate: true },
+)
 
 const showSidebar = computed(() => route.meta.sidebar !== false)
 const title = computed(() => (route.meta.title as string | undefined) ?? '文件管家')
@@ -43,7 +53,7 @@ watch(
   <AppWindow :title="title">
     <div class="shell">
       <Sidebar v-if="showSidebar" />
-      <div class="main">
+      <div class="main glass-panel">
         <p v-if="app.error" class="err" role="alert">{{ app.error }}</p>
         <RouterView v-slot="{ Component }">
           <Transition name="page" mode="out-in">

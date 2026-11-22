@@ -23,23 +23,47 @@
   /* 中性色 */
   --c-bg: #f5f5f7;
   --c-surface: #ffffff;
-  /* 侧栏/标题栏用不透明色：底下就是窗口自己的 --c-bg，blur 一层纯色
-     视觉上什么都不会变，却要 WebView2 每帧做一次毛玻璃合成 —— 纯浪费帧 */
+  /* 以下实色是「材质关闭 / WebView2 不支持 backdrop-filter」时的回退色，
+     不再是窗口框架的常驻底色；默认态由下方的 --glass-* 材质 token 接管。
+     BUG-011 用户裁决：全局苹果风重做，接受 WebView2 每帧合成成本，
+     旧性能取舍决策已作废。 */
   --c-sidebar: #f2f2f7;
   --c-titlebar: #f6f6f8;
   --c-footerbar: #f6f6f8;
   --c-field: #f5f5f7;
+
+  /* ---- 材质 token（BUG-011，唯一调参入口）----
+     四层模糊半径刻意不同：标题栏最重、侧栏次之、主面板轻、浮层最重，
+     叠在同一张渐变底图上形成纵深；saturate 把底图的彩色提出来。
+     底色 alpha 都 < 1，但保持在 0.78 以上以守住正文 4.5:1 对比度。 */
+  --glass-blur-title: 30px;
+  --glass-blur-side: 22px;
+  --glass-blur-panel: 16px;
+  --glass-blur-float: 40px;
+  --glass-saturate: 170%;
+  --glass-bg-title: rgba(246, 246, 248, 0.8);
+  --glass-bg-side: rgba(242, 242, 247, 0.8);
+  --glass-bg-panel: rgba(255, 255, 255, 0.82);
+  --glass-bg-float: rgba(255, 255, 255, 0.94);
+  --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-text-bg: rgba(255, 255, 255, 0.84);
+  --glass-shadow: 0 10px 40px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+  /* 窗口底图：不引入图片资源，用多色渐变当「壁纸」给 backdrop-filter 采样 */
+  --glass-bg-win: radial-gradient(1200px 620px at 10% -12%, rgba(0, 122, 255, 0.3), transparent 62%),
+    radial-gradient(980px 520px at 96% 2%, rgba(175, 82, 222, 0.26), transparent 58%),
+    radial-gradient(860px 520px at 28% 112%, rgba(255, 149, 0, 0.2), transparent 60%),
+    linear-gradient(160deg, #eef2fb 0%, #f7f4fb 46%, #eef7f5 100%);
   --c-text: #1d1d1f;
   /* 文字三级：
      P1 的 #86868b / #aeaeb2 在 #f5f5f7 上只有 3.33:1 和 2.03:1，
      11~12px 的提示字（文件大小、路径、理由、状态）根本看不清（P1 M8 已记录）。
      P2 T5.1 按 WCAG AA 小字 4.5:1 达标重定，实测值见 test/contrast.py：
        --c-text-2 #5f5f64 → 5.83（bg） / 5.69（sidebar） / 6.35（white）
-       --c-text-3 #6e6e73 → 4.66（bg） / 4.54（sidebar） / 5.07（white）
-     两个都往上提，是为了保住「主要 > 次要 > 更次要」的层次 ——
-     只提 text-3 会让它比 text-2 还深，层次直接倒挂。 */
+       --c-text-3 #6a6a6f → 比原 #6e6e73 略深，为的是在玻璃态最坏底图
+       （侧栏 0.8 alpha 叠蓝色渐变止点）上仍有 4.56:1，满足 BUG-011 的
+       全局 4.5:1 要求；与 text-2 仍保持 11 级灰度差，层次不倒挂。 */
   --c-text-2: #5f5f64;
-  --c-text-3: #6e6e73;
+  --c-text-3: #6a6a6f;
   --c-border: rgba(0, 0, 0, 0.05);
   --c-border-strong: rgba(0, 0, 0, 0.08);
   --c-divider: rgba(0, 0, 0, 0.04);

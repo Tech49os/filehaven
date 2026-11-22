@@ -19,8 +19,8 @@ function onClose() {
 </script>
 
 <template>
-  <div class="win">
-    <header class="titlebar" data-tauri-drag-region>
+  <div class="win glass-frame">
+    <header class="titlebar glass-title" data-tauri-drag-region>
       <div class="lights" aria-hidden="true">
         <i class="r" /><i class="y" /><i class="g" />
       </div>
@@ -44,7 +44,7 @@ function onClose() {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--c-bg);
+  /* 背景由 glass.css 的 .glass-frame 提供（渐变底图供四层材质采样） */
   border-radius: var(--r-window);
   border: 0.5px solid var(--c-border-strong);
   overflow: hidden;
@@ -56,8 +56,7 @@ function onClose() {
   display: flex;
   align-items: center;
   padding: 0 8px 0 16px;
-  background: var(--c-titlebar);
-  border-bottom: 0.5px solid var(--c-border);
+  /* 背景与分隔线交给 glass.css 的 .glass-title（半透明 + blur + saturate） */
   position: relative;
   user-select: none;
 }

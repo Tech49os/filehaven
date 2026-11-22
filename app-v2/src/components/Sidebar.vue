@@ -78,7 +78,7 @@ function goNewFiles() {
 </script>
 
 <template>
-  <aside class="side">
+  <aside class="side glass-side">
     <div class="group-title">资料库</div>
     <nav>
       <button
@@ -128,8 +128,7 @@ function goNewFiles() {
 .side {
   width: 200px;
   flex: 0 0 200px;
-  background: var(--c-sidebar);
-  border-right: 0.5px solid var(--c-border);
+  /* 材质背景与右侧分隔线由 glass.css 的 .glass-side 提供 */
   display: flex;
   flex-direction: column;
   padding: 10px 10px 0;
