@@ -262,6 +262,14 @@ pub fn undo(
 ) -> Result<UndoReport, CmdError> {
     let mig = index::get_migration(conn, migration_id)?
         .ok_or_else(|| CmdError::new(MIGRATE_FAILED, format!("找不到迁移记录：{migration_id}")))?;
+    // BUG-003：目录体检修正走自己的撤销入口（migration_items.file_id=0，没有文件可退）。
+    // 若误从这里撤，会把台账错误地标成 undone，导致专用入口再也撤不了。
+    if mig.kind == "dir_health" {
+        return Err(CmdError::new(
+            MIGRATE_FAILED,
+            "这是目录体检修正，请在设置的「目录体检」里点「撤销上次修正」",
+        ));
+    }
     if mig.status == "undone" {
         return Err(CmdError::new(
             MIGRATE_FAILED,

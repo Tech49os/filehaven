@@ -54,14 +54,19 @@ fn issue(
     }
 }
 
-/// 上提一层：把 rel_path 去掉最后一段；顶层无父可提则返回 None。
+/// 上提一层：把目录从「父」移到「祖父」下，即去掉倒数第二段、保留自己的名字。
+/// `A/B/C/D/深层目录` → `A/B/C/深层目录`（层级 5→4）。
+/// 不能返回父路径 `A/B/C/D` —— 那里已存在同名目录，采纳必然撞名且层级不降。
 fn lift_one_level(rel_path: &str) -> Option<String> {
-    let mut segs: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
-    if segs.len() <= 1 {
-        return None;
+    let segs: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() <= 2 {
+        return None; // 顶层(1)或已在第二层(2)，没有祖父可提
     }
-    segs.pop();
-    Some(segs.join("/"))
+    let name = segs[segs.len() - 1];
+    let grandparent = &segs[..segs.len() - 2];
+    let mut out = grandparent.to_vec();
+    out.push(name);
+    Some(out.join("/"))
 }
 
 /// 剥掉括号包裹的版本词：`报告（最终版）` → `报告`。剥不动就原样返回。
@@ -106,7 +111,8 @@ fn is_filler_name(s: &str) -> bool {
 
 /// 确定性预筛。输入是目录事实快照，输出按置信度降序、截断到 20 条。
 ///
-/// 六条规则互不叠加（一个目录只取置信度最高的那条），避免同一目录重复刷屏。
+/// 四条规则互不叠加（一个目录只报一条），避免同一目录重复刷屏。
+/// 末尾的 best 去重是廉价安全网：即便将来某条规则漏写 continue，也不会刷屏。
 pub fn analyze(facts: &[DirFact]) -> Vec<DirHealthIssue> {
     let mut out: Vec<DirHealthIssue> = Vec::new();
 
@@ -244,6 +250,11 @@ pub fn scan_report(
         on_stage("model", t0.elapsed().as_millis() as u64, "模型复核中");
         match reviewer(&issues) {
             Ok(reviewed) => {
+                // 模型确认过就打 source=model（真假 reviewer 统一在此标记，测试不再造假）
+                let mut reviewed = reviewed;
+                for x in &mut reviewed {
+                    x.source = "model".to_string();
+                }
                 issues = reviewed;
                 report.model_reviewed = true;
                 report.note = "规则初筛 + 模型复核".to_string();
@@ -382,29 +393,32 @@ pub fn apply_rename(
     }
 
     // 一次性查出所有受影响目录（目标 + 后代），按 depth 升序（先改浅的）
-    let descendants: Vec<(i64, String)> = {
+    let descendants: Vec<(i64, String, i64)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, rel_path FROM archive_dirs
+            "SELECT id, rel_path, depth FROM archive_dirs
              WHERE id=?1 OR substr(rel_path,1,length(?2)+1)=?2||'/'
              ORDER BY depth, id",
         )?;
         let rows = stmt.query_map(rusqlite::params![dir_id, old_rel], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
     let prefix_len = old_rel.len();
-    let mapped: Vec<(i64, String, String)> = descendants
+    // 层级变化：新路径段数 - 旧路径段数。目标与所有后代同步平移 depth。
+    let seg_count = |s: &str| s.split('/').filter(|x| !x.is_empty()).count() as i64;
+    let depth_delta = seg_count(&actual) - seg_count(&old_rel);
+    let mapped: Vec<(i64, String, String, i64)> = descendants
         .iter()
-        .map(|(id, rel)| {
+        .map(|(id, rel, depth)| {
             let new = format!("{}{}", actual, &rel[prefix_len..]);
-            (*id, rel.clone(), new)
+            (*id, rel.clone(), new, *depth + depth_delta)
         })
         .collect();
 
     // 受影响文件数（按目录 id 集合）
     let affected_files: usize = {
-        let ids: Vec<i64> = mapped.iter().map(|(id, _, _)| *id).collect();
+        let ids: Vec<i64> = mapped.iter().map(|(id, _, _, _)| *id).collect();
         if ids.is_empty() {
             0
         } else {
@@ -430,16 +444,16 @@ pub fn apply_rename(
 
     let result = (|| -> Result<crate::model::DirHealthApplyAck, CmdError> {
         let tx = conn.transaction()?;
-        // 目录 rel_path：按映射逐个改（每个 rel_path 唯一，无中间碰撞）
-        for (id, _, new_rel) in &mapped {
+        // 目录 rel_path + depth：按映射逐个改（每个 rel_path 唯一，无中间碰撞）
+        for (id, _, new_rel, new_depth) in &mapped {
             tx.execute(
-                "UPDATE archive_dirs SET rel_path=?1 WHERE id=?2",
-                rusqlite::params![new_rel, id],
+                "UPDATE archive_dirs SET rel_path=?1, depth=?2 WHERE id=?3",
+                rusqlite::params![new_rel, new_depth, id],
             )?;
         }
         // 文件 archived_path 是「归档根 + rel_path」的绝对路径，前缀要用绝对目录路径替换，
         // 不能用相对 rel_path（会漏掉盘符/反斜杠）。substr 精确匹配开头，避免误替换路径中段的同名段。
-        for (id, old, new) in &mapped {
+        for (id, old, new, _) in &mapped {
             let old_prefix = archive_root.join(old).to_string_lossy().to_string();
             let new_prefix = archive_root.join(new).to_string_lossy().to_string();
             tx.execute(
@@ -450,7 +464,7 @@ pub fn apply_rename(
             )?;
         }
         let mig_id = crate::index::insert_migration_with_kind(&tx, affected_files as i64, "dir_health")?;
-        for (id, old, new) in &mapped {
+        for (id, old, new, _) in &mapped {
             crate::index::insert_migration_item_ext(
                 &tx, mig_id, 0, old, new, None, "ok", None, Some(*id),
             )?;
@@ -498,15 +512,25 @@ pub fn undo_dir_health(
     let mut restored = 0usize;
     let mut failed = Vec::new();
 
-    // 逆序：深层先还原，避免前缀碰撞
-    for (item, _) in items.into_iter().rev() {
-        let dir_id = item.old_dir_id.unwrap_or(0);
-        let old_rel = item.src_path.clone(); // 要还原成的路径
-        let cur_rel = item.dst_path.clone(); // 当前路径
+    let seg_count = |s: &str| s.split('/').filter(|x| !x.is_empty()).count() as i64;
+
+    // ① 磁盘还原：只需要对「最外层」（src_path 段数最少 = 目标目录本身）做一次 rename。
+    // 磁盘上子目录随父一起移动，父目录 rename 回去后所有后代自动归位。
+    // 逐项 rename 是错的：深层先还原会先建出旧父目录，导致父目录的「旧位置为空」检测失效。
+    if let Some(outer) = items.iter().min_by_key(|(it, _)| seg_count(&it.src_path)) {
+        let old_rel = outer.0.src_path.clone();
+        let cur_rel = outer.0.dst_path.clone();
         let cur_disk = archive_root.join(&cur_rel);
         let old_disk = archive_root.join(&old_rel);
-        // 磁盘：当前位置在、旧位置空，才能安全改回
-        if cur_disk.exists() && !old_disk.exists() {
+        if cur_disk.exists() {
+            if old_disk.exists() {
+                failed.push(MigrationFailure {
+                    file_id: 0,
+                    name: old_rel.clone(),
+                    reason: "旧位置已出现同名目录，未还原（避免覆盖）".to_string(),
+                });
+                return Ok(UndoReport { restored: 0, skipped: 0, failed });
+            }
             if let Some(p) = old_disk.parent() {
                 let _ = std::fs::create_dir_all(p);
             }
@@ -516,9 +540,18 @@ pub fn undo_dir_health(
                     name: old_rel.clone(),
                     reason: format!("磁盘还原失败：{e}"),
                 });
-                continue;
+                return Ok(UndoReport { restored: 0, skipped: 0, failed });
             }
         }
+    }
+
+    // ② DB 还原：逐项把 rel_path 改回 src_path、depth 按 src_path 段数重算、文件路径前缀回退。
+    // UPDATE 按目录 id 精确匹配，顺序不影响正确性。
+    for (item, _) in items.into_iter().rev() {
+        let dir_id = item.old_dir_id.unwrap_or(0);
+        let old_rel = item.src_path.clone(); // 要还原成的路径
+        let cur_rel = item.dst_path.clone(); // 当前路径
+        let old_depth = seg_count(&old_rel);
         let tx = match conn.transaction() {
             Ok(t) => t,
             Err(e) => {
@@ -527,7 +560,10 @@ pub fn undo_dir_health(
             }
         };
         let r = (|| -> Result<(), rusqlite::Error> {
-            tx.execute("UPDATE archive_dirs SET rel_path=?1 WHERE id=?2", rusqlite::params![old_rel, dir_id])?;
+            tx.execute(
+                "UPDATE archive_dirs SET rel_path=?1, depth=?2 WHERE id=?3",
+                rusqlite::params![old_rel, old_depth, dir_id],
+            )?;
             let cur_prefix = archive_root.join(&cur_rel).to_string_lossy().to_string();
             let old_prefix = archive_root.join(&old_rel).to_string_lossy().to_string();
             tx.execute(

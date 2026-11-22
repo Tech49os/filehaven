@@ -22,8 +22,8 @@ const busy = ref(false)
 const report = ref<DirHealthReport | null>(null)
 const stage = ref<DirHealthStage | null>(null)
 const err = ref<string | null>(null)
-/** 被忽略的建议 id 集合 —— 忽略项绝不进入执行批次 */
-const ignored = new Set<string>()
+/** 被忽略的建议 id 集合 —— 忽略项绝不进入执行批次（响应式，点了立刻有反馈） */
+const ignored = ref<Set<string>>(new Set())
 /** 被采纳的建议 id（只标记，不重复提交） */
 const adopted = ref<Set<string>>(new Set())
 const lastMigrationId = ref<number | null>(null)
@@ -51,7 +51,7 @@ const stageText = () => {
 
 /** 这类建议只能看，不能自动执行（非目标约束） */
 const canAct = (it: DirHealthIssue) =>
-  (it.kind === 'rename' || it.kind === 'move') && !!it.targetPath && !ignored.has(it.id)
+  (it.kind === 'rename' || it.kind === 'move') && !!it.targetPath && !ignored.value.has(it.id)
 
 const kindLabel = (kind: string) =>
   ({ rename: '改名', move: '调层级', merge: '同义', empty: '空目录' }[kind] ?? kind)
@@ -61,7 +61,7 @@ async function scan() {
   err.value = null
   report.value = null
   stage.value = null
-  ignored.clear()
+  ignored.value = new Set()
   adopted.value = new Set()
   try {
     report.value = await ipc.dirHealthScan()
@@ -73,7 +73,9 @@ async function scan() {
 }
 
 function ignore(it: DirHealthIssue) {
-  ignored.add(it.id)
+  const next = new Set(ignored.value)
+  next.add(it.id)
+  ignored.value = next
 }
 
 async function adopt(it: DirHealthIssue) {

@@ -4714,7 +4714,7 @@ mod dir_health {
         let issues = analyze(&facts);
         let deep = issues.iter().find(|x| x.kind == "move" && x.dir_id == 5);
         assert!(deep.is_some(), "depth=5 应报层级过深");
-        assert_eq!(deep.unwrap().target_path.as_deref(), Some("A/B/C/D"), "上提一层");
+        assert_eq!(deep.unwrap().target_path.as_deref(), Some("A/B/C/深层目录"), "上提一层=移到祖父下，保留目录名");
     }
 
     #[test]
@@ -4836,13 +4836,9 @@ mod dir_health_degrade {
     #[test]
     fn model_review_success_marks_source_and_reviewed() {
         let facts = vec![f(1, "空目录")];
-        let ok: &Reviewer = &|issues| -> Result<Vec<DirHealthIssue>, String> {
-            let mut v = issues.to_vec();
-            for x in &mut v {
-                x.source = "model".to_string();
-            }
-            Ok(v)
-        };
+        // 假 reviewer 原样返回（不打 source）——source=model 应由 scan_report 统一打，
+        // 这样真 reviewer 与测试走同一条标记逻辑，不会假绿
+        let ok: &Reviewer = &|issues| -> Result<Vec<DirHealthIssue>, String> { Ok(issues.to_vec()) };
         let report = scan_report(
             &facts,
             ok,
@@ -4936,6 +4932,8 @@ mod dir_health_apply {
         assert_eq!(c.rel_path, "旧名/子目录", "后代路径还原");
         assert_eq!(archived_of(&conn, 1), before, "文件路径完全还原");
         assert!(arc.path().join("旧名/子目录/a.docx").is_file(), "磁盘目录名还原");
+        assert!(arc.path().join("旧名").is_dir(), "旧目录整体回来");
+        assert!(!arc.path().join("新名").exists(), "新目录无残留（评审 Major1：嵌套撤销曾留下空壳）");
     }
 
     #[test]
@@ -4947,5 +4945,45 @@ mod dir_health_apply {
         let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
         assert_eq!(out.new_rel_path, "新名_2", "撞名应错开 _2");
         assert!(arc.path().join("新名/keep.txt").is_file(), "原目录内容未被覆盖");
+    }
+}
+
+#[cfg(test)]
+mod dir_health_review_fixes {
+    use crate::dir_health::apply_rename;
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::UndoReport;
+    use crate::tests::index::fresh_db;
+
+    /// 采纳 move 后目标及后代的 depth 必须随 rel_path 段数一起更新
+    #[test]
+    fn apply_move_updates_depth_along_with_rel_path() {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let a = db::insert_dir(&conn, None, "A", "user").unwrap();
+        let b = db::insert_dir(&conn, Some(a.id), "B", "user").unwrap();
+        let c = db::insert_dir(&conn, Some(b.id), "C", "user").unwrap();
+        let deep = db::insert_dir(&conn, Some(c.id), "深层目录", "user").unwrap();
+        // 把深层目录从 A/B/C/深层目录 移到 A/B/深层目录（少一层）
+        apply_rename(&mut conn, arc.path(), deep.id, "A/B/深层目录", "move").unwrap();
+        let d = db::get_dir(&conn, deep.id).unwrap().unwrap();
+        assert_eq!(d.rel_path, "A/B/深层目录");
+        assert_eq!(d.depth, 3, "depth 从 4 降到 3");
+    }
+
+    /// 通用迁移撤销入口必须拒绝 dir_health 批次（file_id=0，无文件可退），
+    /// 否则会错误地标成 undone，堵死专用撤销
+    #[test]
+    fn generic_undo_refuses_dir_health_batch() {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let parent = db::insert_dir(&conn, None, "旧名", "user").unwrap();
+        apply_rename(&mut conn, arc.path(), parent.id, "新名", "rule").unwrap();
+        let mig_row = db::latest_migration(&conn).unwrap().unwrap();
+        assert_eq!(mig_row.kind, "dir_health");
+        let result: Result<UndoReport, _> = mig::undo(&mut conn, arc.path(), mig_row.id, &mut |_, _, _, _| {});
+        assert!(result.is_err(), "通用撤销必须拒绝 dir_health 批次");
+        assert!(result.unwrap_err().message.contains("目录体检"));
     }
 }
