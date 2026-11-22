@@ -87,6 +87,8 @@ const tagBusy = ref(false)
 /** 正在改名的标签 id；null = 没有 */
 const renamingTag = ref<number | null>(null)
 const renameDraft = ref('')
+/** 一次性清理的结果提示 */
+const cleanNote = ref<string | null>(null)
 
 async function loadTags() {
   try {
@@ -128,6 +130,21 @@ async function commitRenameTag() {
     const mergedId = await ipc.renameTag(id, v)
     await loadTags()
     if (mergedId !== id) err.value = null
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  } finally {
+    tagBusy.value = false
+  }
+}
+
+/** BUG-004：清理已落库的伪词/体裁弱标签，再重拉词表让界面同步 */
+async function onCleanBadTags() {
+  if (tagBusy.value) return
+  tagBusy.value = true
+  try {
+    const n = await ipc.cleanBadTags()
+    cleanNote.value = n > 0 ? `已清理 ${n} 条弱标签` : '没有需要清理的弱标签'
+    await loadTags()
   } catch (e) {
     err.value = humanize(toCmdError(e))
   } finally {
@@ -389,14 +406,20 @@ async function removeRoot(id: number) {
 
     <Card title="标签词表">
       <template #action>
-        <button class="btn ghost" :disabled="tagBusy" @click="loadTags">
-          刷新
-        </button>
+        <div class="acts">
+          <button class="btn ghost" :disabled="tagBusy" @click="onCleanBadTags">
+            清理弱标签
+          </button>
+          <button class="btn ghost" :disabled="tagBusy" @click="loadTags">
+            刷新
+          </button>
+        </div>
       </template>
       <p class="hint">
         AI 深读给的主题标签和你自己加的标签都在这里。删掉一个标签，所有文件上的它一起摘掉；
         改名撞上已有标签时两边合并 —— 用来收拾「同一件事被写成不同词」的情况。
       </p>
+      <p v-if="cleanNote" class="hint ok">{{ cleanNote }}</p>
       <p v-if="Array.isArray(tagList) && tagList.length === 0" class="hint dim">
         还没有标签：开一次深度解读，或直接在文件的卡片上加一个。
       </p>

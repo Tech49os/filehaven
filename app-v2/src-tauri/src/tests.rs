@@ -284,27 +284,25 @@ mod tag {
     // T2.1 五条正向
     #[test]
     fn tokenize_basic_cases() {
-        // ① 2~3 字段直接保留整段；4 字段是整段 + 2-gram（§7.1 规则 4）
+        // ① 2~3 字段直接保留整段；BUG-004 后 4 字段也只保留整段（不再切 2-gram）
         let t = tk::tokenize("安全检查");
-        assert_eq!(t.first().map(|s| s.as_str()), Some("安全检查"), "{t:?}");
-        assert!(t.contains(&"安全".to_string()), "{t:?}");
+        assert_eq!(t, vec!["安全检查".to_string()], "{t:?}");
 
-        // ② 长段：整段 + 2-gram（详设 §7.1 规则 4）。
-        //    注意 `安全检查通知` 是 6 字段，产出里没有 3 字整词 `安全检查`，
-        //    但有 `安全`/`检查`；推荐是双向对称分词，匹配不受影响。
+        // ② 长段同样只留整段：不再有 2-gram 兜底，也不硬造 3 字整词。
+        //    推荐仍走双向对称分词（文件与目录名同一个函数），匹配不受影响。
         let t = tk::tokenize("安全检查通知");
-        for want in ["安全", "检查", "通知", "安全检查通知"] {
-            assert!(t.contains(&want.to_string()), "缺 {want}：{t:?}");
-        }
+        assert_eq!(t, vec!["安全检查通知".to_string()], "{t:?}");
 
         // ③ 相机默认名全丢（T2.1 要求的「空」）
         assert!(tk::tokenize("IMG_2034").is_empty(), "{:?}", tk::tokenize("IMG_2034"));
 
-        // ④ 停用词与纯数字段不进词元
+        // ④ 停用词与纯数字段不进词元；长汉字段只留整段
         let t = tk::tokenize("关于2026年度安全检查的通知");
-        for want in ["安全", "检查", "通知"] {
-            assert!(t.contains(&want.to_string()), "缺 {want}：{t:?}");
-        }
+        assert_eq!(
+            t,
+            vec!["关于".to_string(), "年度安全检查的通知".to_string()],
+            "{t:?}"
+        );
         assert!(!t.iter().any(|x| x == "的"), "{t:?}");
         assert!(!t.iter().any(|x| x.contains("2026")), "{t:?}");
 
@@ -312,6 +310,19 @@ mod tag {
         let t = tk::tokenize("AB测试_v2");
         assert!(t.contains(&"测试".to_string()), "{t:?}");
         assert!(!t.iter().any(|x| x == "ab" || x == "v2"), "{t:?}");
+    }
+
+    // BUG-004（红）：长汉字段只保留整段，不许再切出跨词 2-gram 伪词
+    #[test]
+    fn tokenize_no_2gram_pseudoword() {
+        let t = tk::tokenize("服务要求说明书");
+        assert!(t.contains(&"服务要求说明书".to_string()), "整段词元要保留：{t:?}");
+        assert!(!t.iter().any(|x| x == "务要"), "跨词伪词「务要」必须消失：{t:?}");
+        assert!(!t.iter().any(|x| x == "要求"), "2-gram「要求」也不该再产出：{t:?}");
+
+        // 2~3 字整段规则不变；纯数字与单汉字继续丢弃
+        let t = tk::tokenize("要求_2026_的");
+        assert_eq!(t, vec!["要求".to_string()], "2 字整段保留、数字/单汉字丢弃：{t:?}");
     }
 
     // T2.2 真实语料冒烟
@@ -333,15 +344,14 @@ mod tag {
         let avg = total as f64 / files.len() as f64;
         println!("平均词元数 {avg:.2}，空词元文件 {empty} 份");
 
-        // 详设写「平均 2~8」。2-gram 展开后长文件名必然超过 8，
-        // 实测见输出；这里的上限是「别爆炸」的护栏，不是原 8 的硬指标。
-        assert!(avg >= 2.0, "平均词元太少：{avg}");
+        // BUG-004：去掉 2-gram 后词元数整体下降，这里只守「别为空 / 别爆炸」的护栏
+        assert!(avg >= 1.0, "平均词元太少：{avg}");
         assert!(avg <= 15.0, "平均词元太多：{avg}");
 
-        // 人工核对样本：必须认出业务词，必须扔掉版本噪声
+        // 人工核对样本：长段整词与 2~3 字整段要留下，版本噪声要丢掉
         let sample = stem_of("04生产工艺设备服务器等硬件设备支撑（二期）_初版草稿_完.docx");
         let t = tk::tokenize(sample);
-        for want in ["生产", "工艺", "硬件", "设备", "二期"] {
+        for want in ["生产工艺设备服务器等硬件设备支撑", "二期"] {
             assert!(t.contains(&want.to_string()), "缺 {want}：{t:?}");
         }
         for bad in ["初版", "草稿", "完", "04"] {
@@ -402,7 +412,7 @@ mod tag {
             .map(|(n, _, _)| n.as_str())
             .collect();
         assert!(kw.len() <= 3, "{kw:?}");
-        assert!(kw.contains(&"安全"), "{kw:?}");
+        assert!(kw.contains(&"安全检查报告"), "整段关键词要保留：{kw:?}");
 
         let (y, q) = tk::year_quarter(1_768_435_200_000); // 2026-01-15
         assert_eq!((y, q), (2026, 1));
@@ -721,7 +731,7 @@ mod recommend {
     /// 按真实分词器造文件特征（名字 → 词元），避免手写字面量和分词逻辑漂移
     fn ft(stem: &str) -> rc::FileFeature {
         rc::FileFeature {
-            tokens: tag::tokenize(stem),
+            tokens: tag::tokenize_for_match(stem),
             stem: stem.into(),
             kind: "word".into(),
             ..Default::default()
@@ -740,7 +750,7 @@ mod recommend {
     fn seg(name: &str) -> rc::DirSeg {
         rc::DirSeg {
             name: name.into(),
-            tokens: tag::tokenize(name),
+            tokens: tag::tokenize_for_match(name),
         }
     }
 
@@ -774,8 +784,8 @@ mod recommend {
 
     fn with_confirmed(mut dd: rc::DirFeature, names: &[&str]) -> rc::DirFeature {
         for n in names {
-            dd.confirmed_files.push(tag::tokenize(stem_of(n)));
-            for t in tag::tokenize(stem_of(n)) {
+            dd.confirmed_files.push(tag::tokenize_for_match(stem_of(n)));
+            for t in tag::tokenize_for_match(stem_of(n)) {
                 if !dd.confirmed_tokens.contains(&t) {
                     dd.confirmed_tokens.push(t);
                 }
@@ -1130,7 +1140,7 @@ mod recommend {
                 _ => &raw.name,
             };
             let feat = rc::FileFeature {
-                tokens: tag::tokenize(stem),
+                tokens: tag::tokenize_for_match(stem),
                 stem: stem.to_string(),
                 kind: k.to_string(),
                 mtime: raw.mtime,
@@ -1191,7 +1201,7 @@ mod recommend {
                 _ => &raw.name,
             };
             let feat = rc::FileFeature {
-                tokens: tag::tokenize(stem),
+                tokens: tag::tokenize_for_match(stem),
                 stem: stem.to_string(),
                 ..Default::default()
             };
@@ -3690,6 +3700,65 @@ mod p3_m1 {
             .query_row("SELECT COUNT(*) FROM tags WHERE name='轮次话题'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "连 tags 表都不该被写进模型词");
+    }
+
+    // BUG-004（红）：一次性清理落库脏标签，幂等且尊重 tag_locked
+    #[test]
+    fn clean_bad_tags_removes_dirty_and_keeps_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f1 = db::insert_test_file(&conn, root.id, "服务要求说明书.docx", db::Status::Labeled).unwrap();
+        let f2 = db::insert_test_file(&conn, root.id, "安全检查.docx", db::Status::Labeled).unwrap();
+
+        // f1：keyword 伪词「务要」+ 合法整段；topic 体裁词「服务委托书」+ 合法主题词
+        db::apply_basic_labels(
+            &mut conn,
+            &[(
+                f1,
+                vec![
+                    ("服务要求说明书".into(), "keyword".into(), 0.9),
+                    ("务要".into(), "keyword".into(), 0.8),
+                ],
+            )],
+        )
+        .unwrap();
+        db::apply_deep_tag(&mut conn, f1, &["服务委托书".into(), "安全检查".into()], None).unwrap();
+
+        // f2：人工锁定，挂着同样的脏标签，一个都不许被清
+        db::apply_basic_labels(
+            &mut conn,
+            &[(f2, vec![("务要".into(), "keyword".into(), 0.8)])],
+        )
+        .unwrap();
+        db::apply_deep_tag(&mut conn, f2, &["通知书".into()], None).unwrap();
+        conn.execute("UPDATE files SET tag_locked=1 WHERE id=?1", [f2]).unwrap();
+
+        let changed = db::clean_bad_tags(&mut conn).unwrap();
+        assert_eq!(changed, 2, "只该清掉 f1 上的伪词与体裁词：{changed}");
+
+        fn names_of(conn: &rusqlite::Connection, id: i64) -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT t.name FROM file_tags ft JOIN tags t ON t.id=ft.tag_id WHERE ft.file_id=?1")
+                .unwrap();
+            stmt.query_map([id], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        }
+        let f1_names = names_of(&conn, f1);
+        assert!(f1_names.contains(&"服务要求说明书".to_string()), "整段词要留下：{f1_names:?}");
+        assert!(f1_names.contains(&"安全检查".to_string()), "真主题词要留下：{f1_names:?}");
+        assert!(!f1_names.iter().any(|x| x == "务要" || x == "服务委托书"), "脏标签要清掉：{f1_names:?}");
+
+        let f2_names = names_of(&conn, f2);
+        assert!(f2_names.iter().any(|x| x == "务要"), "锁定文件的伪词不许动：{f2_names:?}");
+        assert!(f2_names.iter().any(|x| x == "通知书"), "锁定文件的体裁词不许动：{f2_names:?}");
+
+        // 幂等：重复跑返回 0，锁定的标签原样还在
+        assert_eq!(db::clean_bad_tags(&mut conn).unwrap(), 0, "重复清理不该再动任何行");
+        assert!(names_of(&conn, f2).iter().any(|x| x == "务要"));
+
+        // 回归防护：重扫同一文件不再产出「务要」
+        let fresh = crate::tag::basic_tags("服务要求说明书.docx", "word", 1_789_207_200_000);
+        assert!(!fresh.iter().any(|(n, _, _)| n == "务要"), "重扫不得再生成伪词：{fresh:?}");
     }
 
     // T1.5 ①：delete_tag 级联清 file_tags

@@ -16,6 +16,7 @@ const setWatchEnabled = vi.fn()
 const listTags = vi.fn()
 const deleteTag = vi.fn()
 const renameTag = vi.fn()
+const cleanBadTags = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   bootState,
@@ -31,6 +32,7 @@ vi.mock('../../core/ipc', () => ({
   listTags,
   deleteTag,
   renameTag,
+  cleanBadTags,
   createDir: vi.fn(),
   previewDirName: vi.fn(),
   dirHealthScan: vi.fn().mockResolvedValue({ issues: [], modelReviewed: true, note: '', elapsedMs: 0 }),
@@ -293,6 +295,7 @@ describe('设置页 · 标签词表', () => {
     listTags.mockReset()
     deleteTag.mockReset()
     renameTag.mockReset()
+    cleanBadTags.mockReset()
   })
 
   it('渲染 user/topic 两类标签 + 使用份数', async () => {
@@ -329,6 +332,26 @@ describe('设置页 · 标签词表', () => {
     // 删掉的行要消失
     expect(names.some((t) => t.includes('安全检查'))).toBe(false)
     expect(w.findAll('.tagrow').length).toBe(1)
+  })
+
+  it('BUG-004：标签词表提供「清理弱标签」入口，调用后刷新列表', async () => {
+    listTags.mockResolvedValue([
+      { id: 11, name: '务要', kind: 'keyword', fileCount: 1 },
+      { id: 12, name: '服务委托书', kind: 'topic', fileCount: 1 },
+    ])
+    cleanBadTags.mockResolvedValue(2)
+    const w = mount(Settings)
+    await flushPromises()
+
+    const btnClean = btn(w, '清理弱标签')
+    expect(btnClean).toBeTruthy()
+    await btnClean!.trigger('click')
+    await flushPromises()
+
+    expect(cleanBadTags).toHaveBeenCalledTimes(1)
+    // 清理命令跑完必须重拉词表，脏标签才会从界面消失
+    expect(listTags).toHaveBeenCalledTimes(2)
+    expect(w.text()).toContain('已清理 2')
   })
 })
 

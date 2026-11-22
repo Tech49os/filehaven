@@ -284,6 +284,11 @@ export function renameTag(tagId: number, name: string) {
   return invoke<number>('rename_tag', { tagId, name })
 }
 
+/** BUG-004：一次性清理 2-gram 伪词与 AI 体裁弱标签（幂等），返回清掉的挂载行数 */
+export function cleanBadTags() {
+  return invoke<number>('clean_bad_tags')
+}
+
 /** 浏览页目录树：归档目录 + 直属已迁移份数 */
 export function browseTree() {
   return invoke<DirNode[]>('browse_tree')

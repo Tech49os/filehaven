@@ -696,6 +696,15 @@ async fn rename_tag(app: AppHandle, tag_id: i64, name: String) -> Result<i64, Cm
     index::rename_tag(&mut conn, tag_id, &name)
 }
 
+/// BUG-004：一次性清理已落库的 2-gram 伪词与 AI 体裁弱标签。
+/// 幂等、尊重 tag_locked；返回清掉的标签挂载行数。
+#[tauri::command]
+async fn clean_bad_tags(app: AppHandle) -> Result<usize, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::clean_bad_tags(&mut conn)
+}
+
 /// 浏览页目录树（P3 T2.4）：归档目录 + 直属已迁移份数
 #[tauri::command]
 async fn browse_tree(app: AppHandle) -> Result<Vec<model::DirNode>, CmdError> {
@@ -1331,14 +1340,14 @@ fn dir_feature_of(
         .iter()
         .map(|s| recommend::DirSeg {
             name: (*s).to_string(),
-            tokens: tag::tokenize(s),
+            tokens: tag::tokenize_for_match(s),
         })
         .collect();
 
     let mut confirmed_tokens: Vec<String> = Vec::new();
     let mut confirmed_files: Vec<Vec<String>> = Vec::new();
     for n in confirmed_names {
-        let toks = tag::tokenize(stem_of(n));
+        let toks = tag::tokenize_for_match(stem_of(n));
         for t in &toks {
             if !confirmed_tokens.contains(t) {
                 confirmed_tokens.push(t.clone());
@@ -1361,7 +1370,7 @@ fn dir_feature_of(
 fn file_feature_of(name: &str, kind: &str, mtime: i64, topic_tags: Vec<String>) -> recommend::FileFeature {
     let stem = stem_of(name).to_string();
     recommend::FileFeature {
-        tokens: tag::tokenize(&stem),
+        tokens: tag::tokenize_for_match(&stem),
         stem,
         kind: kind.to_string(),
         mtime,
@@ -2576,6 +2585,7 @@ fn main() {
             list_tags,
             delete_tag,
             rename_tag,
+            clean_bad_tags,
             browse_tree,
             browse_dir,
             pool_rows,

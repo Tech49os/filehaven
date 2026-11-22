@@ -1641,6 +1641,84 @@ pub fn rename_tag(conn: &mut Connection, tag_id: i64, raw: &str) -> Result<i64, 
     Ok(final_id)
 }
 
+/// 一次性清理已落库的脏标签：keyword 2-gram 伪词 + AI 体裁弱 topic。
+///
+/// 幂等：重复运行返回 0；尊重 `tag_locked=1`，锁定文件的标签一个都不碰。
+/// 判定与生成侧共用：`tag::tokenize` 重算合法 keyword 整段词，
+/// `deep_tag::is_weak_topic` 判 topic 体裁词。返回清掉的 `file_tags` 行数。
+pub fn clean_bad_tags(conn: &mut Connection) -> Result<usize, CmdError> {
+    let tx = conn.transaction()?;
+    let mut removed = 0usize;
+
+    // ① keyword：按文件名重算合法整段词，删掉不在其中的（含跨词 2-gram）
+    let files: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare("SELECT id, name FROM files WHERE COALESCE(tag_locked, 0)=0")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
+        }
+        v
+    };
+    for (file_id, name) in files {
+        let stem = match name.rfind('.') {
+            Some(i) if i > 0 => &name[..i],
+            _ => name.as_str(),
+        };
+        let valid = crate::tag::tokenize(stem);
+        let tagged: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT t.id, t.name FROM file_tags ft JOIN tags t ON t.id=ft.tag_id
+                 WHERE ft.file_id=?1 AND t.kind='keyword'",
+            )?;
+            let rows = stmt.query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r?);
+            }
+            v
+        };
+        for (tag_id, tag_name) in tagged {
+            if !valid.iter().any(|x| x == &tag_name) {
+                removed += tx.execute(
+                    "DELETE FROM file_tags WHERE file_id=?1 AND tag_id=?2",
+                    params![file_id, tag_id],
+                )?;
+            }
+        }
+    }
+
+    // ② topic 体裁弱词：跳过锁定文件的挂载
+    let weak: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id, name FROM tags WHERE kind='topic'")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut v = Vec::new();
+        for r in rows {
+            let (id, name): (i64, String) = r?;
+            if crate::deep_tag::is_weak_topic(&name) {
+                v.push(id);
+            }
+        }
+        v
+    };
+    for tag_id in weak {
+        removed += tx.execute(
+            "DELETE FROM file_tags WHERE tag_id=?1
+               AND file_id IN (SELECT id FROM files WHERE COALESCE(tag_locked,0)=0)",
+            [tag_id],
+        )?;
+    }
+
+    // ③ 清掉没人挂的标签行（第二次跑到这里已经没有脏数据）
+    tx.execute(
+        "DELETE FROM tags WHERE kind IN ('keyword','topic')
+           AND id NOT IN (SELECT tag_id FROM file_tags)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(removed)
+}
+
 /// 某个绝对路径属于哪个源区（取最长前缀，多个源区嵌套时不会挑错）
 pub fn root_for_path(conn: &Connection, path: &str) -> Result<Option<i64>, CmdError> {
     let low = path.replace('\\', "/").to_lowercase();

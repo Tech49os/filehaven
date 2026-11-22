@@ -48,6 +48,11 @@ describe('ipc 参数键必须是 camelCase（对齐 Rust serde rename_all）', (
     void ipc.saveNote(5, '等财务确认')
     expect(invoke.mock.calls[0]).toEqual(['save_note', { fileId: 5, note: '等财务确认' }])
   })
+
+  it('BUG-004：clean_bad_tags 是无参命令', () => {
+    void ipc.cleanBadTags()
+    expect(invoke.mock.calls[0]).toEqual(['clean_bad_tags'])
+  })
 })
 
 describe('检索 ipc（P3 T3.2）', () => {
