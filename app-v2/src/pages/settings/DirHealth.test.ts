@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { DirHealthReport, DirHealthIssue, DirHealthStage } from '../../core/types'
+import tokens from '../../styles/tokens.css?raw'
+import dirHealthSource from './DirHealth.vue?raw'
 
 const dirHealthScan = vi.fn()
 const applyDirHealth = vi.fn()
@@ -43,6 +45,14 @@ function report(issues: DirHealthIssue[], reviewed = true): DirHealthReport {
 
 const btn = (w: ReturnType<typeof mount>, label: string) =>
   w.findAll('button').find((b) => b.text().includes(label))
+
+describe('目录体检 · 可见性', () => {
+  it('样式令牌必须在 tokens.css 里定义，别让主按钮白底白字变成隐身', () => {
+    const defined = new Set([...tokens.matchAll(/^\s*(--[\w-]+):/gm)].map((m) => m[1]))
+    const used = [...new Set([...dirHealthSource.matchAll(/var\((--[\w-]+)/g)].map((m) => m[1]))]
+    expect(used.filter((v) => !defined.has(v))).toEqual([])
+  })
+})
 
 describe('目录体检 · 建议列表', () => {
   beforeEach(() => {

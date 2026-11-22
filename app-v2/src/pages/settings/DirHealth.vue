@@ -172,29 +172,30 @@ async function undo() {
 .dir-health { display: flex; flex-direction: column; gap: 8px; }
 .bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .btn {
-  font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 6px;
-  border: 0.5px solid var(--c-border); background: var(--c-accent); color: #fff; cursor: pointer;
+  font: inherit; font-size: 12px; padding: 5px 12px; border-radius: var(--r-btn);
+  border: 0; background: var(--c-primary); color: #fff; cursor: pointer;
+  box-shadow: var(--sh-primary);
 }
-.btn.ghost { background: transparent; color: var(--c-text-1); }
+.btn.ghost { background: var(--c-field); color: var(--c-text); box-shadow: none; }
 .btn.mini { padding: 3px 9px; font-size: 11px; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .stage { font-size: 11px; color: var(--c-text-3); }
-.err { color: var(--c-danger, #d64545); font-size: 12px; margin: 0; }
+.err { color: var(--c-danger); font-size: 12px; margin: 0; }
 .hint { font-size: 12px; color: var(--c-text-2); margin: 0; }
 .hint.dim { color: var(--c-text-3); }
-.degraded { color: var(--c-warn, #b8860b); }
+.degraded { color: var(--c-warning-deep); }
 .note { font-size: 11px; color: var(--c-text-3); margin: 0; }
 .issues { list-style: none; margin: 0; padding: 0; max-height: min(320px, 36vh); overflow: auto; min-height: 0; }
 .issue { padding: 8px 10px; border: 0.5px solid var(--c-border); border-radius: 8px; display: flex; flex-direction: column; gap: 4px; }
 .issue.done { opacity: 0.55; }
 .line1, .line2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.kind { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--c-surface-2, rgba(127,127,127,.15)); }
+.kind { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--c-field); }
 .kind.rename { color: #c77b30; }
 .kind.move { color: #4a7fd0; }
 .kind.merge { color: #8b6fc0; }
 .kind.empty { color: var(--c-text-3); }
 .path { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; max-width: 240px; white-space: nowrap; }
-.target { font-size: 11px; color: var(--c-accent); }
+.target { font-size: 11px; color: var(--c-primary); }
 .conf { margin-left: auto; font-size: 11px; color: var(--c-text-3); }
 .reason { font-size: 11px; color: var(--c-text-2); }
 .meta { margin-left: auto; font-size: 10px; color: var(--c-text-3); }

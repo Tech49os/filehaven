@@ -157,6 +157,19 @@ describe('设置页 · 目录结构', () => {
     await entry!.trigger('click')
     expect(push).toHaveBeenCalledWith('/onboarding/dirs')
   })
+
+  it('目录体检有自己的首屏入口卡片，不能埋在目录树卡片底部', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const cards = w.findAll('section.card')
+    const health = cards.find((c) => c.text().includes('目录体检'))
+    expect(health, '目录体检应该有独立卡片，而不是拖在目录树末尾').toBeTruthy()
+    // 必须第一张卡：设置页七张卡会互相压缩，放在后面依然要滚动才能看到
+    expect(cards[0].text()).toContain('目录体检')
+    expect(health!.findAll('button').some((b) => b.text().includes('目录体检'))).toBe(true)
+    const tree = cards.find((c) => c.text().includes('AI 建议目录'))
+    expect(tree?.findAll('button').some((b) => b.text().includes('目录体检'))).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------- 深度解读队列（P2 T2.8）

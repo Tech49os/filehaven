@@ -269,6 +269,15 @@ async function removeRoot(id: number) {
 
 <template>
   <div class="grid">
+    <!-- 目录体检必须首屏可见：设置页多张卡会互相压缩，原先埋在「目录结构」卡底部，
+         那张卡内部滚动 3000px，用户根本找不到入口（BUG-003 入口可见性） -->
+    <Card title="目录体检" class="health-card">
+      <p class="hint">
+        扫描已有目录，逐条采纳「改名 / 调层级」建议；采纳后可按批次撤销。空目录与同义目录只报告，不会自动删。
+      </p>
+      <DirHealth @changed="onDirsChanged" />
+    </Card>
+
     <Card title="归档区">
       <div class="row">
         <AppIcon name="drive" :size="16" />
@@ -332,7 +341,6 @@ async function removeRoot(id: number) {
       <div v-if="adding" class="newdir">
         <NewDirInput @confirm="onCreateDir" @cancel="adding = false" />
       </div>
-      <DirHealth @changed="onDirsChanged" />
     </Card>
 
     <Card title="深度解读">
@@ -462,6 +470,11 @@ async function removeRoot(id: number) {
   gap: 14px;
   overflow: auto;
   min-height: 0;
+}
+
+/* 首屏入口不许被其他卡片压扁，否则按钮又变成「看不见」 */
+.health-card {
+  flex: 0 0 auto;
 }
 
 .row {
