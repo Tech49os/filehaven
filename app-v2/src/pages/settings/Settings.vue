@@ -190,7 +190,7 @@ onMounted(async () => {
   if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
-  // 目录树加载后套用默认折叠策略（BUG-002，与浏览页共用同一 helper）
+  // 默认折叠策略与浏览页共用同一 helper（BUG-002）；此处紧接 load，没有额外 await 间隔
   collapsed.value = collapsedBeyondDepth(dirs.tree)
   await loadTags()
   unlisten = await onScanProgress((p) => {

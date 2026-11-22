@@ -299,6 +299,21 @@ describe('目录树默认折叠（BUG-002）', () => {
     expect(caretOf3, '收起后第 3 层重新处于折叠态').toBeTruthy()
   })
 
+  it('树加载与默认折叠同批落位：列表 IPC 未返回时深层已折叠，不闪全展开', async () => {
+    let releaseFiles!: (rows: FileRow[]) => void
+    browseDirFiles.mockReturnValueOnce(new Promise((resolve) => { releaseFiles = resolve }))
+
+    const w = mount(Browser)
+    await flushPromises() // browseTree 已回、browseDirFiles 仍挂起
+
+    // 此刻树已渲染：第 3 层不能被画出（否则会先闪一帧全展开）
+    expect(w.text()).toContain('三层')
+    expect(w.text()).not.toContain('四层')
+
+    releaseFiles([file()])
+    await flushPromises()
+  })
+
   it('手动展开深层后，点「仅看前两层」恢复默认折叠', async () => {
     const w = await mountBrowser()
     await w.findAll('.caret').find((b) => b.attributes('aria-label') === '展开')!.trigger('click')

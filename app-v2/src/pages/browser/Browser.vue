@@ -94,9 +94,11 @@ async function select(sel: Sel) {
   await loadList()
 }
 
-async function refreshAll() {
+async function refreshAll(applyDefaultFold = false) {
   const [t, p, pk] = await Promise.all([ipc.browseTree(), ipc.poolRows(), ipc.listParked()])
   tree.value = t
+  // 默认折叠与树数据同批落位：否则列表 IPC 未返回时会先闪一帧全展开（BUG-002）
+  if (applyDefaultFold) collapsed.value = collapsedBeyondDepth(t)
   pool.value = p
   // listParked 给的是带候选的 ParkedItem，虚拟视图只要文件行
   parkedRows.value = pk.map((x) => x.file)
@@ -104,9 +106,8 @@ async function refreshAll() {
 }
 
 /** 首次进页面加载树并套用默认折叠；后续 refresh（如重新归类后）不动用户的手动展开 */
-async function boot() {
-  await refreshAll()
-  collapseToDefault()
+function boot() {
+  return refreshAll(true)
 }
 
 onMounted(boot)
