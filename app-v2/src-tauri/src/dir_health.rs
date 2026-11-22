@@ -1,0 +1,208 @@
+//! BUG-003 目录体检 · 规则层（确定性预筛）
+//!
+//! 纯函数：只吃目录事实快照，不碰数据库、不发事件、不发模型请求。
+//! 先按确定性规则筛出候选，模型复核（若有）只是二次确认，绝不静默执行。
+//! 设计依据：`spec/BUG-003-dir-health-scan.md`、`spec/PLAN_BUG-003-dir-health-scan.md`。
+
+use crate::model::DirHealthIssue;
+use crate::suggest_dirs::{
+    is_filler_composed, strip_version_suffix, FAN_WORDS, FILLER_WORDS,
+};
+
+/// 括号包裹的版本/草稿词：`报告（最终版）` / `方案(最新版)`。
+/// 不含年份/编码，避免误伤 `资料（2026）` 这类合法目录。
+const BRACKET_VERSION_WORDS: &[&str] = &[
+    "最终版", "最新版", "定稿", "终版", "初稿", "初版", "草稿", "副本", "打印版",
+];
+
+/// 一个目录的体检事实（由命令层从 DB 一次性投影出来，锁内取、锁外算）。
+#[derive(Clone, Debug)]
+pub struct DirFact {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub rel_path: String,
+    pub depth: i64,
+    pub file_count: usize,
+    pub child_count: usize,
+}
+
+/// 输出上限（spec §6：≤20 条，按置信度截断）。
+const MAX_ISSUES: usize = 20;
+/// 超过此层级视为过深（depth 从 1 起，5 层已明显难浏览）。
+const MAX_DEPTH: i64 = 5;
+
+fn issue(
+    kind: &str,
+    fact: &DirFact,
+    target: Option<String>,
+    reason: impl Into<String>,
+    confidence: f64,
+) -> DirHealthIssue {
+    DirHealthIssue {
+        id: format!("{kind}:{}", fact.id),
+        kind: kind.to_string(),
+        dir_id: fact.id,
+        dir_name: fact.name.clone(),
+        rel_path: fact.rel_path.clone(),
+        target_path: target,
+        reason: reason.into(),
+        confidence,
+        affected_files: fact.file_count,
+        source: "rule".to_string(),
+    }
+}
+
+/// 上提一层：把 rel_path 去掉最后一段；顶层无父可提则返回 None。
+fn lift_one_level(rel_path: &str) -> Option<String> {
+    let mut segs: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() <= 1 {
+        return None;
+    }
+    segs.pop();
+    Some(segs.join("/"))
+}
+
+/// 剥掉括号包裹的版本词：`报告（最终版）` → `报告`。剥不动就原样返回。
+fn strip_bracket_version(s: &str) -> String {
+    for (open, close) in [('（', '）'), ('(', ')')] {
+        if s.ends_with(close) {
+            if let Some(pos) = s.rfind(open) {
+                let inner = s[pos + open.len_utf8()..s.len() - close.len_utf8()].trim();
+                if BRACKET_VERSION_WORDS.iter().any(|w| *w == inner) {
+                    return s[..pos].trim_end_matches([' ', '_', '-']).to_string();
+                }
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// 名字是否看起来是「年份/编码」这类刻意设计的基础目录（`2026`、`2026-Q4`、`GB-T1`）。
+/// 这类目录剥掉数字后是空的，`is_filler_composed` 会误判成泛词，必须豁免。
+fn looks_like_code_or_year(s: &str) -> bool {
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    let letters: String = s.chars().filter(|c| c.is_alphabetic()).collect();
+    // 无字母或仅少量 ASCII 字母 + 数字/连字符：当作编码/年份
+    has_digit
+        && letters.len() <= 4
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | '·' | 'Q' | 'q'))
+}
+
+/// 该名字的「实际内容」是否确实由泛词/修饰词拼成。
+/// 先排除年份编码，再要求至少命中一个已知泛词（否则 `智能工厂平台` 这种会被误伤）。
+fn is_filler_name(s: &str) -> bool {
+    if looks_like_code_or_year(s) {
+        return false;
+    }
+    let hits_filler = FAN_WORDS
+        .iter()
+        .chain(FILLER_WORDS.iter())
+        .any(|w| s.contains(w));
+    hits_filler && is_filler_composed(s)
+}
+
+/// 确定性预筛。输入是目录事实快照，输出按置信度降序、截断到 20 条。
+///
+/// 六条规则互不叠加（一个目录只取置信度最高的那条），避免同一目录重复刷屏。
+pub fn analyze(facts: &[DirFact]) -> Vec<DirHealthIssue> {
+    let mut out: Vec<DirHealthIssue> = Vec::new();
+
+    // 同父分组，用于「高度相似路径」检测
+    use std::collections::HashMap;
+    let mut by_parent: HashMap<Option<i64>, Vec<&DirFact>> = HashMap::new();
+    for f in facts {
+        by_parent.entry(f.parent_id).or_default().push(f);
+    }
+
+    for f in facts {
+        // 规则 1：空目录（无文件、无子目录）
+        if f.file_count == 0 && f.child_count == 0 {
+            out.push(issue(
+                "empty",
+                f,
+                None,
+                "空目录：既没有文件也没有子目录",
+                0.9,
+            ));
+            continue;
+        }
+
+        // 规则 2：超深层级
+        if f.depth >= MAX_DEPTH {
+            if let Some(target) = lift_one_level(&f.rel_path) {
+                out.push(issue(
+                    "move",
+                    f,
+                    Some(target),
+                    format!("层级过深（第 {} 层），建议上提一层", f.depth),
+                    0.7,
+                ));
+                continue;
+            }
+        }
+
+        // 规则 3：同父下高度相似路径（剥掉版本后缀后同名）。
+        // 必须先于 rename：像「项目资料」+「项目资料(1)」这样的一对，
+        // 单看前者会被泛词规则判成 rename，但两者放一起显然是同义重复，归并更贴切。
+        let normalized = strip_version_suffix(&strip_bracket_version(&f.name));
+        if !looks_like_code_or_year(&f.name) && !normalized.trim().is_empty() {
+            if let Some(siblings) = by_parent.get(&f.parent_id) {
+                let dup = siblings.iter().find(|g| {
+                    g.id != f.id
+                        && strip_version_suffix(&strip_bracket_version(&g.name)) == normalized
+                });
+                if let Some(other) = dup {
+                    out.push(issue(
+                        "merge",
+                        f,
+                        Some(other.rel_path.clone()),
+                        format!("与同层目录「{}」含义高度相似", other.name),
+                        0.6,
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        // 规则 4：版本/草稿后缀、纯泛词拼装名
+        let unbracketed = strip_bracket_version(&f.name);
+        let clean = strip_version_suffix(&unbracketed);
+        let suffix_changed = clean.trim() != f.name.trim() && !clean.trim().is_empty();
+        if suffix_changed || is_filler_name(&f.name) {
+            let new_name = if suffix_changed { clean } else { f.name.clone() };
+            let target = match f.rel_path.rfind('/') {
+                Some(i) => format!("{}/{}", &f.rel_path[..i], new_name),
+                None => new_name,
+            };
+            let reason = if suffix_changed {
+                "名称含版本/草稿后缀，建议去掉后缀"
+            } else {
+                "名称由泛词拼装，缺少实际含义"
+            };
+            out.push(issue("rename", f, Some(target), reason, 0.85));
+        }
+    }
+
+    // 同一目录只保留置信度最高的一条
+    let mut best: std::collections::HashMap<i64, DirHealthIssue> = std::collections::HashMap::new();
+    for it in out {
+        match best.get(&it.dir_id) {
+            Some(cur) if cur.confidence >= it.confidence => {}
+            _ => {
+                best.insert(it.dir_id, it);
+            }
+        }
+    }
+
+    let mut issues: Vec<DirHealthIssue> = best.into_values().collect();
+    issues.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.dir_id.cmp(&b.dir_id))
+    });
+    issues.truncate(MAX_ISSUES);
+    issues
+}

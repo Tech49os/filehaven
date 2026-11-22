@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod batch;
 mod deep_tag;
+mod dir_health;
 mod error;
 // 正文抽取：P0 写好后一直没接线，整理台的「看内容」才真正用上它
 #[allow(dead_code)]

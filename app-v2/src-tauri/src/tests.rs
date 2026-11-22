@@ -4672,3 +4672,97 @@ mod p4_m1 {
         assert_eq!(report.failed.len(), 1);
     }
 }
+
+// ================================================================ BUG-003：目录体检规则层
+mod dir_health {
+    use crate::dir_health::{analyze, DirFact};
+
+    fn f(id: i64, parent: Option<i64>, name: &str, depth: i64, files: usize, kids: usize) -> DirFact {
+        DirFact {
+            id,
+            parent_id: parent,
+            name: name.to_string(),
+            rel_path: name.to_string(),
+            depth,
+            file_count: files,
+            child_count: kids,
+        }
+    }
+
+    #[test]
+    fn flags_empty_dir_with_no_files_and_no_children() {
+        let facts = vec![
+            f(1, None, "归档", 1, 0, 1),
+            f(2, Some(1), "空文件夹", 2, 0, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.iter().any(|x| x.kind == "empty" && x.dir_id == 2), "空目录应被识别");
+        assert!(!issues.iter().any(|x| x.dir_id == 1), "有子目录的父不该报空");
+    }
+
+    #[test]
+    fn flags_overdeep_dir_and_suggests_lifting_one_level() {
+        let mut facts = vec![
+            f(1, None, "A", 1, 0, 1),
+            f(2, Some(1), "B", 2, 0, 1),
+            f(3, Some(2), "C", 3, 0, 1),
+            f(4, Some(3), "D", 4, 0, 1),
+            f(5, Some(4), "深层目录", 5, 3, 0),
+        ];
+        // 真实 rel_path 带父路径段（辅助函数默认只填 name）
+        facts[4].rel_path = "A/B/C/D/深层目录".to_string();
+        let issues = analyze(&facts);
+        let deep = issues.iter().find(|x| x.kind == "move" && x.dir_id == 5);
+        assert!(deep.is_some(), "depth=5 应报层级过深");
+        assert_eq!(deep.unwrap().target_path.as_deref(), Some("A/B/C/D"), "上提一层");
+    }
+
+    #[test]
+    fn flags_version_and_draft_suffix_dirs() {
+        let facts = vec![
+            f(1, None, "合同_初稿", 1, 2, 0),
+            f(2, None, "报告（最终版）", 1, 1, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.iter().any(|x| x.kind == "rename" && x.dir_id == 1), "版本后缀应报 rename");
+        assert!(issues.iter().any(|x| x.kind == "rename" && x.dir_id == 2), "草稿后缀应报 rename");
+        assert!(issues.iter().filter(|x| x.kind == "rename").all(|x| x.target_path.is_some()));
+    }
+
+    #[test]
+    fn flags_near_duplicate_dirs_under_same_parent() {
+        let facts = vec![
+            f(1, None, "项目资料", 1, 2, 0),
+            f(2, None, "项目资料(1)", 1, 1, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.iter().any(|x| x.kind == "merge"), "同父下近似同义应报 merge");
+    }
+
+    #[test]
+    fn no_false_positive_on_normal_baseline_dirs() {
+        // 项目既有教训：这些是刻意设计的基础目录，绝不能被当成问题
+        let facts = vec![
+            f(1, None, "2026", 1, 5, 0),
+            f(2, None, "2026-Q4", 1, 3, 0),
+            f(3, None, "智能工厂平台", 1, 8, 0),
+            f(4, None, "合同", 1, 6, 0),
+            f(5, Some(4), "采购合同", 2, 4, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.is_empty(), "正常目录树不该产生任何建议，实际：{issues:?}");
+    }
+
+    #[test]
+    fn caps_output_at_twenty_sorted_by_confidence() {
+        let mut facts = Vec::new();
+        for i in 1..=30 {
+            facts.push(f(i, None, &format!("空{i}"), 1, 0, 0));
+        }
+        let issues = analyze(&facts);
+        assert!(issues.len() <= 20, "输出上限 20 条");
+        for w in issues.windows(2) {
+            assert!(w[0].confidence >= w[1].confidence, "按置信度降序");
+        }
+    }
+}

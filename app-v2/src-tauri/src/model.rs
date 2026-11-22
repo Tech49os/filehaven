@@ -114,6 +114,41 @@ pub struct SuggestStage {
     pub note: String,
 }
 
+/// BUG-003 单条目录体检建议
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthIssue {
+    /// 稳定 id：`{kind}:{dirId}`，前端逐条采纳/忽略的键
+    pub id: String,
+    /// rename|merge|move|empty
+    pub kind: String,
+    pub dir_id: i64,
+    pub dir_name: String,
+    pub rel_path: String,
+    /// rename/move 的建议目标 rel_path（empty/merge 可能为 Some）
+    pub target_path: Option<String>,
+    /// 中文依据，必须可解释
+    pub reason: String,
+    /// 0..1
+    pub confidence: f64,
+    /// 影响的已归档文件数
+    pub affected_files: usize,
+    /// rule|model
+    pub source: String,
+}
+
+/// BUG-003 一次目录体检的报告
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthReport {
+    pub issues: Vec<DirHealthIssue>,
+    /// false = 模型不可用/被占用，只有规则初筛
+    pub model_reviewed: bool,
+    /// 降级说明 / 统计
+    pub note: String,
+    pub elapsed_ms: u64,
+}
+
 /// 一次扫描的汇总（前端用它显示「已跳过 N 份非资料型文件」，不许静默）
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
