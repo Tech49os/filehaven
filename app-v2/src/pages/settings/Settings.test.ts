@@ -33,11 +33,15 @@ vi.mock('../../core/ipc', () => ({
   renameTag,
   createDir: vi.fn(),
   previewDirName: vi.fn(),
+  dirHealthScan: vi.fn().mockResolvedValue({ issues: [], modelReviewed: true, note: '', elapsedMs: 0 }),
+  applyDirHealth: vi.fn(),
+  undoDirHealth: vi.fn(),
 }))
 vi.mock('../../core/events', () => ({
   onScanProgress: vi.fn().mockResolvedValue(() => {}),
   onDeepTagProgress: vi.fn().mockResolvedValue(() => {}),
   onFilesFound: vi.fn().mockResolvedValue(() => {}),
+  onDirHealthStage: vi.fn().mockResolvedValue(() => {}),
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push, replace: push }) }))
 

@@ -19,6 +19,9 @@ import type {
   DirNode,
   DeepTagStats,
   DirSuggestion,
+  DirHealthReport,
+  DirHealthApplyReq,
+  DirHealthApplyAck,
   FilePreview,
   FileRow,
   FileKind,
@@ -323,4 +326,21 @@ export interface SearchResult {
 /** 检索（三个入口共用同一查询层） */
 export function searchFiles(req: SearchReq) {
   return invoke<SearchResult>('search_files', { req })
+}
+
+// ---- BUG-003 目录体检 ----
+
+/** 手动触发目录体检（规则预筛 + 可选模型复核，降级不报错） */
+export function dirHealthScan() {
+  return invoke<DirHealthReport>('dir_health_scan')
+}
+
+/** 采纳一条 rename/move 建议 */
+export function applyDirHealth(req: DirHealthApplyReq) {
+  return invoke<DirHealthApplyAck>('apply_dir_health', { req })
+}
+
+/** 按批次撤销一次目录修正 */
+export function undoDirHealth(migrationId: number) {
+  return invoke<UndoReport>('undo_dir_health', { migrationId })
 }

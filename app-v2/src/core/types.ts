@@ -352,3 +352,48 @@ export interface MigrateProgress {
   name: string
   stage: 'copy' | 'verify' | 'quarantine'
 }
+
+// ---- BUG-003 目录体检 ----
+
+export type DirHealthKind = 'rename' | 'merge' | 'move' | 'empty'
+
+export interface DirHealthIssue {
+  id: string
+  kind: DirHealthKind
+  dirId: number
+  dirName: string
+  relPath: string
+  targetPath: string | null
+  reason: string
+  confidence: number
+  affectedFiles: number
+  source: 'rule' | 'model'
+}
+
+export interface DirHealthReport {
+  issues: DirHealthIssue[]
+  modelReviewed: boolean
+  note: string
+  elapsedMs: number
+}
+
+export interface DirHealthStage {
+  stage: 'scan' | 'rule' | 'model' | 'done'
+  elapsedMs: number
+  note: string
+}
+
+export interface DirHealthApplyReq {
+  issueId: string
+  kind: string
+  dirId: number
+  targetPath: string
+}
+
+export interface DirHealthApplyAck {
+  migrationId: number
+  newRelPath: string
+  renamed: boolean
+  affectedDirs: number
+  affectedFiles: number
+}

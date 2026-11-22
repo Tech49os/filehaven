@@ -5,6 +5,7 @@ import Card from '../../components/Card.vue'
 import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
 import NewDirInput from '../../components/NewDirInput.vue'
+import DirHealth from './DirHealth.vue'
 import { useAppStore } from '../../stores/app'
 import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
@@ -34,6 +35,11 @@ async function onCreateDir(input: string) {
   } catch (e) {
     err.value = humanize(toCmdError(e))
   }
+}
+
+/** 目录体检采纳/撤销后：重拉目录树，保持用户当前展开状态不动 */
+async function onDirsChanged() {
+  await dirs.load()
 }
 const scanning = ref(false)
 const report = ref<ScanReport | null>(null)
@@ -326,6 +332,7 @@ async function removeRoot(id: number) {
       <div v-if="adding" class="newdir">
         <NewDirInput @confirm="onCreateDir" @cancel="adding = false" />
       </div>
+      <DirHealth @changed="onDirsChanged" />
     </Card>
 
     <Card title="深度解读">

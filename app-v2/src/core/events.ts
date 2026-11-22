@@ -8,6 +8,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   DeepTagStats,
+  DirHealthStage,
   FilesFound,
   MigrateProgress,
   ScanProgress,
@@ -45,4 +46,9 @@ export function onMigrateProgress(cb: (p: MigrateProgress) => void) {
 
 export function onUndoProgress(cb: (p: MigrateProgress) => void) {
   return safeListen<MigrateProgress>('undo-progress', cb)
+}
+
+/** BUG-003 目录体检阶段：scan → rule → model → done */
+export function onDirHealthStage(cb: (p: DirHealthStage) => void) {
+  return safeListen<DirHealthStage>('dir-health-stage', cb)
 }
