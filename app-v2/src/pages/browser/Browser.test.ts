@@ -245,6 +245,74 @@ describe('浏览页 · 虚拟视图与详情条（T2.5）', () => {
   })
 })
 
+describe('目录树默认折叠（BUG-002）', () => {
+  // 3 层样例树：1 → 2 → 3 → 4，第 3 层有子节点应被默认折叠
+  let deep: DirNode[]
+
+  beforeEach(() => {
+    deep = [
+      node({
+        id: 1, name: '一层', relPath: '一层', depth: 1,
+        children: [
+          node({
+            id: 2, name: '二层', relPath: '一层/二层', depth: 2,
+            children: [
+              node({
+                id: 3, name: '三层', relPath: '一层/二层/三层', depth: 3,
+                children: [node({ id: 4, name: '四层', relPath: '一层/二层/三层/四层', depth: 4 })],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]
+    browseTree.mockReset().mockResolvedValue(deep)
+  })
+
+  it('加载树后只展开到第 2 层：aria-expanded=true 只属于 depth 1、2', async () => {
+    const w = await mountBrowser()
+    const expanded = w.findAll('[role="treeitem"][aria-expanded="true"]').map((n) => n.text())
+    expect(expanded.some((t) => t.includes('一层'))).toBe(true)
+    expect(expanded.some((t) => t.includes('二层'))).toBe(true)
+    expect(expanded.some((t) => t.includes('三层'))).toBe(false)
+    // 第 4 层整行不渲染
+    expect(w.text()).not.toContain('四层')
+  })
+
+  it('点第 3 层 caret 展开其子树，再点收起', async () => {
+    const w = await mountBrowser()
+    let caretOf3 = w.findAll('.caret').find((b) => b.attributes('aria-label') === '展开')
+    expect(caretOf3, '第 3 层应处于折叠态').toBeTruthy()
+
+    await caretOf3!.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('四层')
+
+    // 用所在行锚定第 3 层的 caret，再点一次恢复折叠
+    const row3 = w.findAll('.row').find((r) => r.text().includes('三层'))!
+    await row3.find('.caret').trigger('click')
+    await flushPromises()
+    expect(w.text()).not.toContain('四层')
+    caretOf3 = w.findAll('.caret').find(
+      (b) => b.attributes('aria-label') === '展开',
+    )
+    expect(caretOf3, '收起后第 3 层重新处于折叠态').toBeTruthy()
+  })
+
+  it('手动展开深层后，点「仅看前两层」恢复默认折叠', async () => {
+    const w = await mountBrowser()
+    await w.findAll('.caret').find((b) => b.attributes('aria-label') === '展开')!.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('四层')
+
+    const resetBtn = w.findAll('button').find((b) => b.text().includes('仅看前两层'))
+    expect(resetBtn, '树头应有「仅看前两层」按钮').toBeTruthy()
+    await resetBtn!.trigger('click')
+    await flushPromises()
+    expect(w.text()).not.toContain('四层')
+  })
+})
+
 describe('目录内筛选（T3.5）', () => {
   it('输入后请求带 dirId（与树选择联动），150ms 防抖后走 searchFiles', async () => {
     vi.useFakeTimers()
