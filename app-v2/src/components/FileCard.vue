@@ -344,7 +344,10 @@ function cancelRename() {
 
     <p v-if="confirmed" class="result">
       <AppIcon name="check" :size="13" />
-      已归到 <b>{{ targetPath ?? '所选目录' }}</b>
+      <!-- BUG-005：长路径单独成块，两行后省略；title 永远是完整值 -->
+      <span class="dest" :title="targetPath ?? '所选目录'">
+        已归到 <b>{{ targetPath ?? '所选目录' }}</b>
+      </span>
       <span v-if="f.targetName" class="as">存为 {{ f.targetName }}</span>
     </p>
     <p v-else-if="handledElsewhere" class="result dim">
@@ -407,7 +410,7 @@ function cancelRename() {
   flex-direction: column;
   /* 底色 / 边框 / 圆角 / 内边距 / 间距 / 字号统一由全局 .file-entry + tokens 提供（BUG-008） */
   box-shadow: var(--sh-card);
-  min-height: 0;
+  /* BUG-005：卡片不是滚动容器，不给它设最小高度为 0（项目踩坑：子项被压扁溢出） */
   /* 换一份文件 = 组件重挂（key 变了），这一下淡入就是「换张卡」的反馈 */
   animation: card-in var(--dur) var(--ease-out) both;
   transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
@@ -430,10 +433,14 @@ function cancelRename() {
   border-color: rgba(255, 149, 0, 0.3);
 }
 
+/* BUG-005：图标 / 标题 / 徽章分列。标题列 minmax(0,1fr) 保证长名省略而不被徽章顶破，
+   徽章列封顶 45% 迫使多徽章换行；显式 column-gap 保住标题与徽章的最小间距 */
 .hd {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) minmax(0, 45%);
+  align-items: start;
+  column-gap: 12px;
+  row-gap: 6px;
 }
 
 .ico {
@@ -585,8 +592,12 @@ function cancelRename() {
   display: flex;
   align-items: center;
   gap: 6px;
+  row-gap: 4px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-content: start;
+  min-width: 0;
+  max-width: 45%;
   flex: 0 0 auto;
 }
 
@@ -843,6 +854,9 @@ function cancelRename() {
   display: flex;
   align-items: center;
   gap: 6px;
+  row-gap: 2px;
+  flex-wrap: wrap;
+  min-width: 0;
   margin: 0;
   padding: 9px 12px;
   border-radius: var(--r-banner);
@@ -850,6 +864,20 @@ function cancelRename() {
   color: var(--c-success-deep);
   font-size: 13px;
   animation: result-in var(--dur) var(--ease-out) both;
+}
+/* BUG-005：归档路径最多两行后省略，绝不把绿色结果行撑成一大块 */
+.result .dest {
+  min-width: 0;
+  flex: 1 1 60%;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: var(--lh-file);
+}
+.result .dest b {
+  font-weight: 600;
 }
 @keyframes result-in {
   from {
@@ -875,9 +903,7 @@ function cancelRename() {
   white-space: nowrap;
 }
 
-.body {
-  min-height: 0;
-}
+/* BUG-005：.body 不是滚动容器，删掉 min-height:0，避免候选区被压扁溢出 */
 
 .ft {
   display: flex;

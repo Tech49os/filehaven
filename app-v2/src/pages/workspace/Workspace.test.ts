@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { BatchView, Candidate } from '../../core/types'
+import workspaceSource from './Workspace.vue?raw'
+
+/** happy-dom 没有布局引擎：用 CSS 不变量 + DOM 数量守住「2 条与 10 条行高一致」 */
+function cssRule(css: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = css.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  return m ? m[1] : ''
+}
 
 const nextBatch = vi.fn()
 const bootState = vi.fn()
@@ -517,5 +525,72 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     await flushPromises()
     expect(w.find('.rest').text()).toContain('全部整理完了')
     expect(w.find('.rest').text()).not.toContain('0')
+  })
+})
+
+// ------------------------------------- BUG-005：右侧已确认栏行高稳定
+describe('BUG-005 · 右侧已确认栏行高稳定', () => {
+  function matchMediaAs(matches: boolean) {
+    return vi.fn().mockImplementation(() => ({
+      matches,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('matchMedia', matchMediaAs(false))
+    decide.mockReset().mockResolvedValue({
+      fileId: 1,
+      status: 'confirmed',
+      confirmed: 1,
+      targetRelPath: '安全检查',
+      remainingInPool: 30,
+    })
+  })
+
+  async function confirmedRows(count: number) {
+    // 每次挂载用独立 Pinia，避免两个 wrapper 共享 store 互相改状态
+    setActivePinia(createPinia())
+    nextBatch.mockResolvedValue(
+      view({
+        items: Array.from({ length: 12 }, (_, i) =>
+          item(i + 1, `文件${i + 1}.docx`, [cand(7, '安全检查')]),
+        ),
+      }),
+    )
+    const w = mount(Workspace)
+    await flushPromises()
+    for (let i = 0; i < count; i++) {
+      await w.find('.mid .ft .btn.primary').trigger('click')
+      await flushPromises()
+    }
+    return w
+  }
+
+  it('2 条与 10 条时都是同一套 .drow，行高由固定基线决定而非列表长度', async () => {
+    const two = await confirmedRows(2)
+    const ten = await confirmedRows(10)
+    // VTU 默认把 <TransitionGroup> 换成 stub，所以用 aside + li 的限定后代选择器
+    expect(two.findAll('aside.right li.drow')).toHaveLength(2)
+    expect(ten.findAll('aside.right li.drow')).toHaveLength(10)
+    // 两种长度下节点结构一致（没有按索引加不同的高度类/内联样式）
+    const shape = (w: typeof two) =>
+      w
+        .findAll('aside.right li.drow')
+        .map((li) => [li.classes().join(' '), li.attributes('style') ?? ''])
+    const base = shape(two)
+    expect(shape(ten)).toEqual(base.concat(Array.from({ length: 8 }, () => base[0])))
+
+    const drow = cssRule(workspaceSource, '.drow')
+    expect(drow, '行高必须有固定下限，2 条和 10 条才一致').toMatch(/min-height:\s*\d+px/)
+    expect(drow, '行不能被 flex 容器压缩').toMatch(/flex:\s*0\s+0\s+auto/)
+    expect(drow, '图标 + 文件名的两列 grid 保证省略号不顶破').toMatch(
+      /grid-template-columns:\s*12px\s+minmax\(0,\s*1fr\)/,
+    )
+    const right = cssRule(workspaceSource, '.left,\n.right')
+    expect(right, '右栏是真正的滚动容器').toMatch(/overflow:\s*auto/)
+    expect(right, '滚动容器才允许 min-height:0').toMatch(/min-height:\s*0/)
   })
 })

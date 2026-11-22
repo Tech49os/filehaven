@@ -699,12 +699,15 @@ h3.mt {
   white-space: nowrap;
 }
 
+/* BUG-005：固定行高下限 + 不参与 flex 伸缩 → 2 条与 10 条行高完全一致 */
 .drow {
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr);
   align-items: center;
   column-gap: 6px;
   padding: 4px 6px;
+  min-height: 24px;
+  flex: 0 0 auto;
   font-size: 12px;
   color: var(--c-success-deep);
 }
