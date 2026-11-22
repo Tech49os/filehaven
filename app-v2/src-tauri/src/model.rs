@@ -149,6 +149,29 @@ pub struct DirHealthReport {
     pub elapsed_ms: u64,
 }
 
+/// BUG-003 采纳一条 rename/move 后的结果
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthApplyAck {
+    pub migration_id: i64,
+    /// 实际落地的 rel_path（撞名时可能带 _2）
+    pub new_rel_path: String,
+    /// 是否因撞名做了错开
+    pub renamed: bool,
+    pub affected_dirs: usize,
+    pub affected_files: usize,
+}
+
+/// BUG-003 前端请求采纳一条建议
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthApplyReq {
+    pub issue_id: String,
+    pub kind: String,
+    pub dir_id: i64,
+    pub target_path: String,
+}
+
 /// 一次扫描的汇总（前端用它显示「已跳过 N 份非资料型文件」，不许静默）
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

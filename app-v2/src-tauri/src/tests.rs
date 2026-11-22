@@ -4873,3 +4873,79 @@ mod dir_health_degrade {
         assert!(report.issues[0].source == "rule");
     }
 }
+
+#[cfg(test)]
+mod dir_health_apply {
+    use crate::dir_health::{apply_rename, undo_dir_health};
+    use crate::index as db;
+    use crate::tests::index::fresh_db;
+
+    /// 构造：归档根/顶层「旧名」/子「子目录」，2 份已归档文件落在子目录
+    fn seed() -> (tempfile::TempDir, rusqlite::Connection, i64, i64, std::path::PathBuf) {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let parent = db::insert_dir(&conn, None, "旧名", "user").unwrap();
+        let child = db::insert_dir(&conn, Some(parent.id), "子目录", "user").unwrap();
+        // 磁盘上建出对应目录 + 文件
+        let dir_path = arc.path().join("旧名/子目录");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        let archived = dir_path.join("a.docx");
+        std::fs::write(&archived, b"data").unwrap();
+        let ap = archived.to_string_lossy().to_string();
+        // 直接插一份已迁移文件（绕过扫描/迁移流程，聚焦路径改写）
+        conn.execute(
+            "INSERT INTO files(abs_path, rel_path, name, ext, kind, size, mtime, status, archived_path, archive_dir_id, discovered_at, last_seen_at)
+             VALUES(?1,?2,'a.docx','docx','word',4,1,'migrated',?3,?4,1,1)",
+            rusqlite::params![ap, "a.docx", ap, child.id],
+        ).unwrap();
+        let arc_path = arc.path().to_path_buf();
+        (arc, conn, parent.id, child.id, arc_path)
+    }
+
+    fn archived_of(conn: &rusqlite::Connection, id: i64) -> String {
+        conn.query_row("SELECT archived_path FROM files WHERE id=?1", [id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn apply_rename_updates_dir_tree_and_file_paths() {
+        let (arc, mut conn, parent, child, _) = seed();
+        let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
+        assert_eq!(out.new_rel_path, "新名");
+        let d = db::get_dir(&conn, parent).unwrap().unwrap();
+        assert_eq!(d.rel_path, "新名", "目标目录路径已改");
+        let c = db::get_dir(&conn, child).unwrap().unwrap();
+        assert_eq!(c.rel_path, "新名/子目录", "后代路径前缀同步改");
+        assert_eq!(c.depth, 2, "层级不变");
+        let ap: String = conn.query_row("SELECT archived_path FROM files", [], |r| r.get(0)).unwrap();
+        assert!(ap.contains("新名/子目录"), "文件归档路径同步：{ap}");
+        assert!(arc.path().join("新名/子目录/a.docx").is_file(), "磁盘文件跟着目录改名");
+        assert!(!out.migration_id.to_string().is_empty());
+    }
+
+    #[test]
+    fn undo_restores_dir_tree_and_file_paths_fully() {
+        let (arc, mut conn, parent, child, _) = seed();
+        let before = archived_of(&conn, 1);
+        let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
+        let report = undo_dir_health(&mut conn, arc.path(), out.migration_id).unwrap();
+        assert_eq!(report.restored, 2, "父目录+子目录都还原");
+        assert!(report.failed.is_empty(), "撤销不该有失败：{:?}", report.failed);
+        let d = db::get_dir(&conn, parent).unwrap().unwrap();
+        assert_eq!(d.rel_path, "旧名", "目录路径完全还原");
+        let c = db::get_dir(&conn, child).unwrap().unwrap();
+        assert_eq!(c.rel_path, "旧名/子目录", "后代路径还原");
+        assert_eq!(archived_of(&conn, 1), before, "文件路径完全还原");
+        assert!(arc.path().join("旧名/子目录/a.docx").is_file(), "磁盘目录名还原");
+    }
+
+    #[test]
+    fn rename_avoids_overwriting_existing_disk_dir() {
+        let (arc, mut conn, parent, _child, _) = seed();
+        // 磁盘上已有一个「新名」目录 → 必须错开，不能覆盖
+        std::fs::create_dir_all(arc.path().join("新名")).unwrap();
+        std::fs::write(arc.path().join("新名/keep.txt"), b"keep").unwrap();
+        let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
+        assert_eq!(out.new_rel_path, "新名_2", "撞名应错开 _2");
+        assert!(arc.path().join("新名/keep.txt").is_file(), "原目录内容未被覆盖");
+    }
+}

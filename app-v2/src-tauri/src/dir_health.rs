@@ -339,3 +339,213 @@ pub fn make_reviewer<'a>(
         Ok(kept)
     }
 }
+
+/// 采纳一条 rename/move：把 `dir_id` 的 rel_path 改成 `new_rel_path`，
+/// 连同所有后代目录与受影响文件的 archived_path 一起改，磁盘目录同步改名，写批次可撤销。
+///
+/// 安全纪律：
+/// - 磁盘目标已存在 → unique_name 错开 `_2`，绝不覆盖；
+/// - 全部 DB 改动在一个事务里，磁盘改名失败则事务不提交；
+/// - 台账 kind='dir_health'，每个受影响目录一条 item（src=old_rel, dst=new_rel）。
+pub fn apply_rename(
+    conn: &mut rusqlite::Connection,
+    archive_root: &std::path::Path,
+    dir_id: i64,
+    new_rel_path: &str,
+    _source: &str,
+) -> Result<crate::model::DirHealthApplyAck, crate::error::CmdError> {
+    use crate::error::CmdError;
+
+    let dir = crate::index::get_dir(conn, dir_id)?
+        .ok_or_else(|| CmdError::new(crate::error::BAD_INPUT, "目录不存在"))?;
+    let old_rel = dir.rel_path.clone();
+    if old_rel == new_rel_path {
+        return Err(CmdError::new(crate::error::BAD_INPUT, "目标路径与当前相同"));
+    }
+
+    // 磁盘目标撞名错开（对目标目录的父目录做 unique_name）
+    let new_clean = new_rel_path.trim_end_matches('/').to_string();
+    let new_path_disk = archive_root.join(&new_clean);
+    let mut actual = new_clean.clone();
+    let mut renamed = false;
+    if new_path_disk.exists() {
+        let parent = new_path_disk.parent().unwrap_or(archive_root);
+        let base = new_clean.rsplit('/').next().unwrap_or(&new_clean);
+        let unique = crate::plan::unique_name(parent, base);
+        actual = match parent.strip_prefix(archive_root) {
+            Ok(rel) if !rel.as_os_str().is_empty() => {
+                format!("{}/{}", rel.to_string_lossy().replace('\\', "/"), unique)
+            }
+            _ => unique,
+        };
+        renamed = true;
+    }
+
+    // 一次性查出所有受影响目录（目标 + 后代），按 depth 升序（先改浅的）
+    let descendants: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, rel_path FROM archive_dirs
+             WHERE id=?1 OR substr(rel_path,1,length(?2)+1)=?2||'/'
+             ORDER BY depth, id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![dir_id, old_rel], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let prefix_len = old_rel.len();
+    let mapped: Vec<(i64, String, String)> = descendants
+        .iter()
+        .map(|(id, rel)| {
+            let new = format!("{}{}", actual, &rel[prefix_len..]);
+            (*id, rel.clone(), new)
+        })
+        .collect();
+
+    // 受影响文件数（按目录 id 集合）
+    let affected_files: usize = {
+        let ids: Vec<i64> = mapped.iter().map(|(id, _, _)| *id).collect();
+        if ids.is_empty() {
+            0
+        } else {
+            let marks = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT COUNT(*) FROM files WHERE archive_dir_id IN ({marks}) AND archived_path IS NOT NULL"
+            );
+            let params: Vec<&i64> = ids.iter().collect();
+            conn.query_row(&sql, rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))? as usize
+        }
+    };
+
+    // 磁盘改名（先做，失败则不动 DB）
+    let src_disk = archive_root.join(&old_rel);
+    let dst_disk = archive_root.join(&actual);
+    if src_disk.exists() {
+        if let Some(p) = dst_disk.parent() {
+            std::fs::create_dir_all(p).map_err(|e| CmdError::new(crate::error::IO, format!("创建目标目录失败：{e}")))?;
+        }
+        std::fs::rename(&src_disk, &dst_disk)
+            .map_err(|e| CmdError::new(crate::error::IO, format!("目录改名失败（目标已存在则不会覆盖）：{e}")))?;
+    }
+
+    let result = (|| -> Result<crate::model::DirHealthApplyAck, CmdError> {
+        let tx = conn.transaction()?;
+        // 目录 rel_path：按映射逐个改（每个 rel_path 唯一，无中间碰撞）
+        for (id, _, new_rel) in &mapped {
+            tx.execute(
+                "UPDATE archive_dirs SET rel_path=?1 WHERE id=?2",
+                rusqlite::params![new_rel, id],
+            )?;
+        }
+        // 文件 archived_path 是「归档根 + rel_path」的绝对路径，前缀要用绝对目录路径替换，
+        // 不能用相对 rel_path（会漏掉盘符/反斜杠）。substr 精确匹配开头，避免误替换路径中段的同名段。
+        for (id, old, new) in &mapped {
+            let old_prefix = archive_root.join(old).to_string_lossy().to_string();
+            let new_prefix = archive_root.join(new).to_string_lossy().to_string();
+            tx.execute(
+                "UPDATE files SET archived_path=?1 || substr(archived_path, ?2)
+                 WHERE archive_dir_id=?3 AND archived_path IS NOT NULL
+                   AND substr(archived_path,1,?4)=?5",
+                rusqlite::params![new_prefix, old_prefix.chars().count() + 1, id, old_prefix.chars().count(), old_prefix],
+            )?;
+        }
+        let mig_id = crate::index::insert_migration_with_kind(&tx, affected_files as i64, "dir_health")?;
+        for (id, old, new) in &mapped {
+            crate::index::insert_migration_item_ext(
+                &tx, mig_id, 0, old, new, None, "ok", None, Some(*id),
+            )?;
+        }
+        crate::index::finish_migration(&tx, mig_id, "done", 0)?;
+        tx.commit()?;
+        Ok(crate::model::DirHealthApplyAck {
+            migration_id: mig_id,
+            new_rel_path: actual.clone(),
+            renamed,
+            affected_dirs: mapped.len(),
+            affected_files,
+        })
+    })();
+
+    if result.is_err() {
+        // DB 失败：磁盘已改名，尝试改回（尽力而为，不覆盖用户后续改动）
+        if src_disk.exists() == false && dst_disk.exists() {
+            let _ = std::fs::rename(&dst_disk, &src_disk);
+        }
+    }
+    result
+}
+
+/// 撤销一批 dir_health 修正：按台账逆序把目录 rel_path 与文件 archived_path 改回。
+pub fn undo_dir_health(
+    conn: &mut rusqlite::Connection,
+    archive_root: &std::path::Path,
+    migration_id: i64,
+) -> Result<crate::model::UndoReport, crate::error::CmdError> {
+    use crate::error::CmdError;
+    use crate::model::{MigrationFailure, UndoReport};
+
+    let mig = crate::index::get_migration(conn, migration_id)?
+        .ok_or_else(|| CmdError::new(crate::error::MIGRATE_FAILED, "找不到修正批次"))?;
+    if mig.status == "undone" {
+        return Err(CmdError::new(crate::error::MIGRATE_FAILED, "这批修正已经撤销过了"));
+    }
+    let items: Vec<(crate::index::MigrationItemRow, String)> = crate::index::migration_items(conn, migration_id)?
+        .into_iter()
+        .filter(|(_, r)| r == "ok")
+        .collect();
+
+    let total = items.len();
+    let mut restored = 0usize;
+    let mut failed = Vec::new();
+
+    // 逆序：深层先还原，避免前缀碰撞
+    for (item, _) in items.into_iter().rev() {
+        let dir_id = item.old_dir_id.unwrap_or(0);
+        let old_rel = item.src_path.clone(); // 要还原成的路径
+        let cur_rel = item.dst_path.clone(); // 当前路径
+        let cur_disk = archive_root.join(&cur_rel);
+        let old_disk = archive_root.join(&old_rel);
+        // 磁盘：当前位置在、旧位置空，才能安全改回
+        if cur_disk.exists() && !old_disk.exists() {
+            if let Some(p) = old_disk.parent() {
+                let _ = std::fs::create_dir_all(p);
+            }
+            if let Err(e) = std::fs::rename(&cur_disk, &old_disk) {
+                failed.push(MigrationFailure {
+                    file_id: 0,
+                    name: old_rel.clone(),
+                    reason: format!("磁盘还原失败：{e}"),
+                });
+                continue;
+            }
+        }
+        let tx = match conn.transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                failed.push(MigrationFailure { file_id: 0, name: old_rel.clone(), reason: e.to_string() });
+                continue;
+            }
+        };
+        let r = (|| -> Result<(), rusqlite::Error> {
+            tx.execute("UPDATE archive_dirs SET rel_path=?1 WHERE id=?2", rusqlite::params![old_rel, dir_id])?;
+            let cur_prefix = archive_root.join(&cur_rel).to_string_lossy().to_string();
+            let old_prefix = archive_root.join(&old_rel).to_string_lossy().to_string();
+            tx.execute(
+                "UPDATE files SET archived_path=?1 || substr(archived_path, ?2)
+                 WHERE archive_dir_id=?3 AND archived_path IS NOT NULL
+                   AND substr(archived_path,1,?4)=?5",
+                rusqlite::params![old_prefix, cur_prefix.chars().count() + 1, dir_id, cur_prefix.chars().count(), cur_prefix],
+            )?;
+            Ok(())
+        })();
+        match r {
+            Ok(()) => { let _ = tx.commit(); restored += 1; }
+            Err(e) => failed.push(MigrationFailure { file_id: 0, name: old_rel.clone(), reason: e.to_string() }),
+        }
+    }
+
+    if failed.is_empty() {
+        crate::index::finish_migration(conn, migration_id, "undone", mig.bytes)?;
+    }
+    Ok(UndoReport { restored, skipped: 0, failed })
+}

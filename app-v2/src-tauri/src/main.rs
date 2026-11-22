@@ -1241,6 +1241,43 @@ async fn dir_health_scan(app: AppHandle) -> Result<model::DirHealthReport, CmdEr
     Ok(report)
 }
 
+/// BUG-003：采纳一条 rename/move 建议。只接受这两类；empty/merge 拒绝执行。
+#[tauri::command]
+async fn apply_dir_health(
+    app: AppHandle,
+    req: model::DirHealthApplyReq,
+) -> Result<model::DirHealthApplyAck, CmdError> {
+    if req.kind != "rename" && req.kind != "move" {
+        return Err(CmdError::new(
+            error::BAD_INPUT,
+            "这类建议只能查看，不能自动执行（空目录请手工确认后删除；语义合并由专门功能处理）",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        dir_health::apply_rename(&mut conn, &root, req.dir_id, &req.target_path, "user")
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("采纳修正线程异常：{e}")))?
+}
+
+/// BUG-003：按批次撤销一次目录修正。
+#[tauri::command]
+async fn undo_dir_health(app: AppHandle, migration_id: i64) -> Result<UndoReport, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        dir_health::undo_dir_health(&mut conn, &root, migration_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("撤销修正线程异常：{e}")))?
+}
+
 // ---------------------------------------------------------------- 正文预览
 
 /// 整理台「看一眼内容」：返回正文摘要（长文截断）/ 图片标记 / 读不出的原因
@@ -2543,7 +2580,9 @@ fn main() {
             browse_dir,
             pool_rows,
             search_files,
-            dir_health_scan
+            dir_health_scan,
+            apply_dir_health,
+            undo_dir_health
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");
