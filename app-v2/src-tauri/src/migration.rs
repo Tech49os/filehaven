@@ -6,12 +6,12 @@
 //! 事务粒度：**按文件一个事务**（`migration_items` 一行 + `status=migrated`）。
 //! 一批 43 份失败 2 份就 41 成功 2 失败，绝不整批回滚。
 
-use crate::error::{self, CmdError, BAD_INPUT, MIGRATE_FAILED};
+use crate::error::{self, CmdError, BAD_INPUT, BAD_TRANSITION, MIGRATE_FAILED};
 use crate::index::{self, Status};
 use crate::migrate::{self, ItemResult, UndoOutcome};
 use crate::model::{
     ChangedOut, FileRow, MigrationFailure, MigrationPreview, MigrationResult, NameConflictOut,
-    PreviewGroup, RecatOutcome, UndoReport,
+    PreviewGroup, RecatOutcome, TrashOutcome, UndoReport,
 };
 use crate::plan::{self, PlanInput, PlanItem};
 use rusqlite::{Connection, OptionalExtension};
@@ -264,12 +264,13 @@ pub fn undo(
         .ok_or_else(|| CmdError::new(MIGRATE_FAILED, format!("找不到迁移记录：{migration_id}")))?;
     // BUG-003：目录体检修正走自己的撤销入口（migration_items.file_id=0，没有文件可退）。
     // BUG-006：同义目录合并也走自己的撤销入口（隔离区要按哈希校验后还原，新副本不能直删）。
-    // 若误从这里撤，会把台账错误地标成 undone，导致专用入口再也撤不了。
-    if mig.kind == "dir_health" || mig.kind == "dir_merge" {
-        let tip = if mig.kind == "dir_health" {
-            "这是目录体检修正，请在设置的「目录体检」里点「撤销上次修正」"
-        } else {
-            "这是同义目录合并，请在设置的「同义目录合并」里点「撤销上次合并」"
+    // BUG-007：删除（移入隔离区）走 undo_trash；这批的 dst 就是隔离区本身，
+    // 从这里撤会把台账错误地标成 undone，导致专用入口再也撤不了。
+    if mig.kind == "dir_health" || mig.kind == "dir_merge" || mig.kind == "trash" {
+        let tip = match mig.kind.as_str() {
+            "dir_health" => "这是目录体检修正，请在设置的「目录体检」里点「撤销上次修正」",
+            "dir_merge" => "这是同义目录合并，请在设置的「同义目录合并」里点「撤销上次合并」",
+            _ => "这是删除后移入隔离区，请在整理台的提示上点「撤销」或按 Ctrl+Z 还原",
         };
         return Err(CmdError::new(MIGRATE_FAILED, tip));
     }
@@ -577,4 +578,216 @@ fn undo_recategorize_one(
         ));
     }
     UndoOutcome::Restored
+}
+
+// ================================================================ BUG-007：整理台删除 → 隔离区（可撤销）
+
+/// 删除一份源区文件 = 移入隔离区（绝不永久删除）。
+///
+/// 安全模型：
+/// - 只有 pending_confirm / confirmed / parked 能进来，其它来源态直接 BAD_TRANSITION；
+/// - 目标沿用 `plan::quarantine_path(<归档根>/.filebutler/quarantine/<批次id>/<源区相对路径>)`，
+///   撞名由 `plan::unique_name` 错开 `_2`，绝不覆盖；
+/// - 源文件离开原位置复用 `move_file`（同盘 rename 原子完成；跨盘 copy + SHA-256 校验
+///   成功后才清源），移动后再验一次哈希，不一致就把原件搬回原处；
+/// - 批次 id 预分配、台账、状态写入全在一个事务里：任何一步失败整笔回滚，
+///   不会留下「库里有记录、文件没动」的幽灵批次。
+pub fn trash_file(
+    conn: &mut Connection,
+    archive_root: &Path,
+    file_id: i64,
+) -> Result<TrashOutcome, CmdError> {
+    // ① 只读闸门：状态、存在性、哈希、相对路径 —— 全部在写库/写盘之前
+    let row = index::file_row(conn, file_id)?
+        .ok_or_else(|| CmdError::new(BAD_INPUT, "找不到这份文件"))?;
+    let from = Status::parse(&row.status).ok_or_else(|| {
+        CmdError::new(
+            BAD_TRANSITION,
+            format!("未知的文件状态：{}", row.status),
+        )
+    })?;
+    if !index::allowed(from, Status::Trashed) {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!(
+                "只有待确认 / 已确认 / 先放着的文件才能移入隔离区（当前：{}）",
+                row.status
+            ),
+        ));
+    }
+    if row.archived_path.is_some() {
+        return Err(CmdError::new(
+            MIGRATE_FAILED,
+            "已归档的文件不在删除范围，请先撤销归档",
+        ));
+    }
+    let src = PathBuf::from(&row.abs_path);
+    if !src.is_file() {
+        return Err(CmdError::new(
+            error::FILE_CHANGED,
+            "源文件已不在磁盘上，不能移入隔离区",
+        ));
+    }
+    let src_hash = migrate::sha256_of(&src)
+        .map_err(|e| CmdError::new(error::IO, format!("读取源文件失败：{e}")))?;
+    let bytes = std::fs::metadata(&src).map(|m| m.len() as i64).unwrap_or(0);
+    let rel = match row.source_root_id {
+        Some(rid) => match index::get_source_root(conn, rid)? {
+            Some(root) => rel_in_source(&row.abs_path, &root.path),
+            None => file_name_of(&row.abs_path),
+        },
+        None => file_name_of(&row.abs_path),
+    };
+
+    // ② 单事务：批次 id + 台账 + 状态；磁盘操作在事务内完成，失败整笔回滚
+    let tx = conn.transaction()?;
+    let migration_id = index::insert_migration_with_kind(&tx, 1, "trash")?;
+
+    let desired = plan::quarantine_path(archive_root, migration_id, &rel);
+    let dst = if desired.exists() {
+        let parent = desired.parent().unwrap_or_else(|| Path::new("."));
+        let name = desired
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| row.name.clone());
+        parent.join(plan::unique_name(parent, &name))
+    } else {
+        desired
+    };
+    let dst_s = dst.to_string_lossy().to_string();
+
+    if let Err(e) = migrate::move_file(&src, &dst) {
+        return Err(CmdError::new(
+            MIGRATE_FAILED,
+            format!("移入隔离区失败：{e}"),
+        ));
+    }
+    // 移动后的哈希闸门：不一致就把原件搬回原处，状态与台账都不写。
+    // move_file 跨盘分支内部已经校验过，这里再验一次兜住同盘 rename 之外的任何意外。
+    let q_hash = match migrate::sha256_of(&dst) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = migrate::move_file(&dst, &src);
+            return Err(CmdError::new(
+                error::IO,
+                format!("校验隔离区副本失败，原件已尝试搬回原处：{e}"),
+            ));
+        }
+    };
+    if q_hash != src_hash {
+        let _ = migrate::move_file(&dst, &src);
+        return Err(CmdError::new(
+            MIGRATE_FAILED,
+            "哈希校验不一致，原件已搬回原处，未改状态",
+        ));
+    }
+
+    index::insert_migration_item(
+        &tx,
+        migration_id,
+        file_id,
+        &row.abs_path,
+        &dst_s,
+        Some(&src_hash),
+        "ok",
+        None,
+    )?;
+    index::mark_trashed(&tx, file_id, from)?;
+    index::finish_migration(&tx, migration_id, "done", bytes)?;
+    tx.commit()?;
+
+    Ok(TrashOutcome {
+        file_id,
+        migration_id,
+        src_path: row.abs_path,
+        dst_path: dst_s,
+        sha256: src_hash,
+    })
+}
+
+/// 撤销一次删除：隔离区原件 → 原路径 → SHA-256 校验 → 状态回删除前。
+///
+/// 两道硬闸（复用 `migrate::undo_one`）：
+/// ① 隔离区原件哈希必须与台账一致 —— 被改过就拒绝，且不覆盖被改过的副本；
+/// ② 原位置已有同名文件就拒绝 —— 永不覆盖。
+/// 任一闸门不过：原文件不动、状态仍是 trashed、批次不标 undone，错误原因直达前端。
+pub fn undo_trash(
+    conn: &mut Connection,
+    archive_root: &Path,
+    migration_id: i64,
+) -> Result<UndoReport, CmdError> {
+    let mig = index::get_migration(conn, migration_id)?
+        .ok_or_else(|| CmdError::new(MIGRATE_FAILED, format!("找不到删除记录：{migration_id}")))?;
+    if mig.kind != "trash" {
+        return Err(CmdError::new(
+            MIGRATE_FAILED,
+            "这不是删除（隔离区）批次，请走对应的撤销入口",
+        ));
+    }
+    if mig.status == "undone" {
+        return Err(CmdError::new(
+            MIGRATE_FAILED,
+            "这次删除已经撤销过了，不能重复撤销",
+        ));
+    }
+
+    let items: Vec<_> = index::migration_items(conn, migration_id)?
+        .into_iter()
+        .filter(|(_, result)| result == "ok")
+        .collect();
+    if items.is_empty() {
+        return Err(CmdError::new(MIGRATE_FAILED, "这次删除没有可撤销的条目"));
+    }
+
+    let mut restored = 0usize;
+    let q_dir = plan::archive_dir_path(
+        archive_root,
+        &format!(".filebutler/quarantine/{migration_id}"),
+    );
+    for (item, _) in items {
+        let Some(file_id) = item.file_id else { continue };
+        if index::get_file_status(conn, file_id)? != Some(Status::Trashed) {
+            // 已经不在 trashed（比如被手工还原过）：不碰它，也不算失败
+            continue;
+        }
+        // 用台账里的真实落点算相对路径：撞名错开的 _2 也能准确找回
+        let rel = Path::new(&item.dst_path)
+            .strip_prefix(&q_dir)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| {
+                match index::get_source_root_of_file(conn, file_id)
+                    .ok()
+                    .flatten()
+                {
+                    Some(root) => rel_in_source(&item.src_path, &root),
+                    None => file_name_of(&item.src_path),
+                }
+            });
+        let mut stage = |_s: &str| {};
+        match migrate::undo_one(
+            archive_root,
+            migration_id,
+            &item.src_path,
+            &item.dst_path,
+            item.sha256.as_deref(),
+            &rel,
+            &mut stage,
+        ) {
+            UndoOutcome::Restored => {
+                let tx = conn.transaction()?;
+                index::restore_trashed(&tx, file_id)?;
+                index::finish_migration(&tx, migration_id, "undone", mig.bytes)?;
+                tx.commit()?;
+                restored += 1;
+            }
+            UndoOutcome::Failed(reason) => {
+                return Err(CmdError::new(MIGRATE_FAILED, reason));
+            }
+        }
+    }
+    Ok(UndoReport {
+        restored,
+        skipped: 0,
+        failed: Vec::new(),
+    })
 }

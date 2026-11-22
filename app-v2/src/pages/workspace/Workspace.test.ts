@@ -23,6 +23,8 @@ const openPath = vi.fn()
 const revealPath = vi.fn()
 const renameFile = vi.fn()
 const rescoreFiles = vi.fn()
+const trashFile = vi.fn()
+const undoTrash = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   nextBatch,
@@ -37,6 +39,8 @@ vi.mock('../../core/ipc', () => ({
   revealPath,
   renameFile,
   rescoreFiles,
+  trashFile,
+  undoTrash,
   listDirs: vi.fn().mockResolvedValue([]),
   previewDirName: vi.fn(),
 }))
@@ -592,5 +596,137 @@ describe('BUG-005 · 右侧已确认栏行高稳定', () => {
     const right = cssRule(workspaceSource, '.left,\n.right')
     expect(right, '右栏是真正的滚动容器').toMatch(/overflow:\s*auto/)
     expect(right, '滚动容器才允许 min-height:0').toMatch(/min-height:\s*0/)
+  })
+})
+
+describe('BUG-007：整理台删除 → 隔离区（二次确认 / 撤销入口 / Delete 键）', () => {
+  function matchMediaAs(matches: boolean) {
+    return vi.fn().mockImplementation(() => ({
+      matches,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('matchMedia', matchMediaAs(false))
+    undoDecide.mockReset()
+    nextBatch.mockReset().mockResolvedValue(
+      view({ items: [item(1, '报告.docx', [cand(7, '安全检查')])] }),
+    )
+    previewFile.mockReset().mockResolvedValue({ text: '', truncated: false, reason: '', kind: 'text' })
+    bootState.mockReset().mockResolvedValue({
+      configured: true,
+      archiveRoot: 'D:/归档',
+      sourceRoots: [{ id: 1, path: 'C:/桌面', enabled: true }],
+      counts: {
+        queued: 0,
+        labeled: 0,
+        pendingConfirm: 1,
+        confirmed: 0,
+        migrated: 0,
+        parked: 0,
+        skipped: 0,
+        missing: 0,
+      },
+      model: { reachable: true, model: 'qwen2.5:7b' },
+    })
+    trashFile.mockReset().mockResolvedValue({
+      fileId: 1,
+      migrationId: 7,
+      srcPath: 'C:/桌面/报告.docx',
+      dstPath: 'D:/归档/.filebutler/quarantine/7/报告.docx',
+      sha256: 'abc',
+    })
+    undoTrash.mockReset().mockResolvedValue({ restored: 1, skipped: 0, failed: [] })
+    decide.mockReset().mockResolvedValue({
+      fileId: 1,
+      status: 'confirmed',
+      confirmed: 1,
+      targetRelPath: '安全检查',
+      remainingInPool: 37,
+    })
+  })
+
+  async function press(key: string, ctrlKey = false) {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey, bubbles: true }))
+    await flushPromises()
+  }
+
+  // 红测：Delete 弹二次确认，写明目标路径与可撤销；取消零 IPC
+  it('Delete 弹确认框写明目标路径与「移入隔离区，可撤销」；取消零 IPC', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await press('Delete')
+
+    const dlg = w.find('[role="dialog"]')
+    expect(dlg.exists(), 'Delete 必须弹二次确认').toBe(true)
+    expect(dlg.text()).toContain('移入隔离区')
+    expect(dlg.text()).toContain('可撤销')
+    expect(dlg.text()).toContain('D:/归档')
+    expect(dlg.text()).toContain('.filebutler/quarantine')
+    expect(dlg.text()).not.toContain('永久删除')
+
+    const cancel = dlg.findAll('button').find((b) => b.text().includes('取消'))
+    expect(cancel).toBeTruthy()
+    await cancel!.trigger('click')
+    await flushPromises()
+    expect(trashFile).not.toHaveBeenCalled()
+    expect(w.find('[role="dialog"]').exists()).toBe(false)
+  })
+
+  // 红测：确认 → trash_file；成功提示带撤销入口；全链路无「永久删除」
+  it('确认后调用 trash_file，成功提示带「撤销」入口', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await press('Delete')
+    const ok = w
+      .find('[role="dialog"]')
+      .findAll('button')
+      .find((b) => b.text().includes('移入隔离区'))
+    expect(ok).toBeTruthy()
+    await ok!.trigger('click')
+    await flushPromises()
+
+    expect(trashFile).toHaveBeenCalledWith(1)
+    expect(w.find('[role="dialog"]').exists()).toBe(false)
+    expect(w.text()).toContain('撤销') // 成功提示里的撤销入口
+    expect(w.text()).not.toContain('永久删除')
+    // 从当前批次消失：最后一份删掉后 .cols 整块消失，只剩提示条
+    expect(w.find('.cols').exists()).toBe(false)
+    expect(w.find('.trash-notice').exists()).toBe(true)
+    expect(w.find('.trash-notice').text()).toContain('报告.docx')
+  })
+
+  // 红测：Ctrl+Z 走 undo_trash，不是 undo_decide
+  it('Ctrl+Z 调 undo_trash 而不是 undo_decide', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await press('Delete')
+    await w
+      .find('[role="dialog"]')
+      .findAll('button')
+      .find((b) => b.text().includes('移入隔离区'))!
+      .trigger('click')
+    await flushPromises()
+    expect(trashFile).toHaveBeenCalledWith(1)
+
+    await press('z', true)
+    expect(undoTrash).toHaveBeenCalledWith(7)
+    expect(w.find('.trash-notice').exists()).toBe(false)
+    expect(w.text()).not.toContain('永久删除')
+  })
+
+  // 红测：已确认条目也有删除入口
+  it('已确认条目与待确认卡片都有「删除（移入隔离区）」入口', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await w.find('.mid .ft .btn.primary').trigger('click')
+    await flushPromises()
+    const drow = w.find('aside.right li.drow')
+    expect(drow.exists()).toBe(true)
+    expect(drow.findAll('button').some((b) => /删除|隔离区/.test(b.text()))).toBe(true)
+    expect(w.text()).not.toContain('永久删除')
   })
 })

@@ -41,7 +41,7 @@ mod tests;
 use error::CmdError;
 use model::{
     ArchiveDir, BatchView, BootState, Counts, DirNode, MigrationResult, MigrationSummary,
-    ModelStatus, RecatOutcome, ScanReport, SourceRoot, UndoReport,
+    ModelStatus, RecatOutcome, ScanReport, SourceRoot, TrashOutcome, UndoReport,
 };
 use state::AppState;
 
@@ -935,6 +935,32 @@ async fn undo_migration(app: AppHandle, migration_id: i64) -> Result<UndoReport,
     })
     .await
     .map_err(|e| CmdError::new(error::DB, format!("撤销线程异常：{e}")))?
+}
+
+/// BUG-007：整理台删除 = 移入隔离区（可撤销，绝不永久删除）
+#[tauri::command]
+async fn trash_file(app: AppHandle, file_id: i64) -> Result<TrashOutcome, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        migration::trash_file(&mut conn, Path::new(&archive), file_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("删除线程异常：{e}")))?
+}
+
+/// BUG-007：撤销删除（隔离区原件 → 原路径，哈希校验 + 同名拒绝）
+#[tauri::command]
+async fn undo_trash(app: AppHandle, migration_id: i64) -> Result<UndoReport, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        migration::undo_trash(&mut conn, Path::new(&archive), migration_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("撤销删除线程异常：{e}")))?
 }
 
 /// P4：重新归类——归档区内二次迁移（浏览页右键）
@@ -2690,6 +2716,8 @@ fn main() {
             unpark,
             assign_parked,
             drop_file,
+            trash_file,
+            undo_trash,
             undo_decide,
             close_batch,
             migration_preview,

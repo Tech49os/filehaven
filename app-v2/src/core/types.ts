@@ -14,6 +14,7 @@ export type FileStatus =
   | 'parked'
   | 'skipped'
   | 'missing'
+  | 'trashed'
 
 /** 目录来源：导入的、模型方案采纳的、用户自建的、卡片里顺手建的 */
 export type DirOrigin = 'imported' | 'model_approved' | 'user' | 'inline'
@@ -279,8 +280,8 @@ export interface MigrationSummary {
   fileCount: number
   bytes: number
   finishedAt: number | null
-  /** migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4） */
-  kind: 'migrate' | 'recategorize'
+  /** migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4）；trash = BUG-007 删除进隔离区 */
+  kind: 'migrate' | 'recategorize' | 'trash'
 }
 
 /** 重新归类结果（P4）：renamed=true 表示目标撞名自动错开成了 `_2` */
@@ -301,6 +302,15 @@ export interface UndoReport {
   restored: number
   skipped: number
   failed: { fileId: number; name: string; reason: string }[]
+}
+
+/** BUG-007：删除（移入隔离区）回执；撤销靠 migrationId */
+export interface TrashOutcome {
+  fileId: number
+  migrationId: number
+  srcPath: string
+  dstPath: string
+  sha256: string
 }
 
 /** 深度标签队列的实时状态（`deep-tag-progress` 事件与 `deep_tag_status` 命令同一个形状） */

@@ -38,6 +38,8 @@ const emit = defineEmits<{
   (e: 'newDir'): void
   (e: 'defer'): void
   (e: 'park'): void
+  /** BUG-007：删除（移入隔离区，可撤销） */
+  (e: 'trash'): void
   (e: 'open'): void
   (e: 'reveal'): void
   /** 归档时改的名字；空串 = 恢复原名 */
@@ -398,6 +400,17 @@ function cancelRename() {
         @click="emit('park')"
       >
         <span class="kbd">P</span> 先放着
+      </button>
+      <!-- BUG-007：待确认 / 已确认都能删。文案只说「移入隔离区，可撤销」，
+           由 Workspace 的二次确认真正执行 -->
+      <button
+        v-if="!handledElsewhere"
+        class="btn trash-btn"
+        :disabled="busy"
+        title="移入隔离区，可撤销（Delete）；原文件可取回"
+        @click="emit('trash')"
+      >
+        <span class="kbd">Del</span> 删除（移入隔离区）
       </button>
       <span v-if="confirmed || handledElsewhere" class="hint">按 ↓ 看下一份，Ctrl+Z 撤销</span>
     </footer>
@@ -933,5 +946,13 @@ function cancelRename() {
   margin-left: auto;
   font-size: 11px;
   color: var(--c-text-3);
+}
+
+/* BUG-007：删除入口压暗但常驻 —— 用危险色提示后果，又不像主按钮那样诱导误点 */
+.trash-btn {
+  color: var(--c-danger);
+}
+.trash-btn:hover {
+  background: var(--c-danger-bg);
 }
 </style>

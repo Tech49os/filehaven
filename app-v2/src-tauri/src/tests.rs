@@ -147,9 +147,10 @@ mod index {
         assert_eq!(db::count_by_status(&conn).unwrap().len(), 1);
     }
 
-    // T1.7 状态机守卫：8 × 8 = 64 组全覆盖（P1 最重要的单测，不许抽查）
+    // T1.7 状态机守卫：9 × 9 = 81 组全覆盖（P1 最重要的单测，不许抽查）
+    // BUG-007 新增 trashed：来源 3 态 + 撤销还原 3 态，合法转移 17 → 23
     #[test]
-    fn status_machine_all_64_transitions() {
+    fn status_machine_all_81_transitions() {
         let (_d, conn) = fresh_db();
         let root = db::add_source_root(&conn, "C:/r").unwrap();
         let fid = db::insert_test_file(&conn, root.id, "x.docx", db::Status::Queued).unwrap();
@@ -183,7 +184,7 @@ mod index {
                 }
             }
         }
-        assert_eq!((ok, bad), (17, 47), "转移表条目数变了？");
+        assert_eq!((ok, bad), (23, 58), "转移表条目数变了？");
     }
 
     // T4.6 批次落库：关批次把未确认的退回池，且暂缓过的文件必须能再进池
@@ -5332,5 +5333,280 @@ mod dir_merge {
         let report = scan_report(&facts, deny, false, "模型正忙", &mut |_, _, _| {});
         assert!(report.note.contains("模型正忙"));
         assert_eq!(report.candidates.len(), 1);
+    }
+}
+
+// ================================================================ BUG-007：整理台删除 → 隔离区可撤销（红测）
+
+#[cfg(test)]
+mod bug007_trash {
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::ScannedFile;
+    use crate::plan;
+    use crate::tests::index::fresh_db;
+    use std::path::{Path, PathBuf};
+
+    struct Seeded {
+        _src: tempfile::TempDir,
+        _arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        file_id: i64,
+        src_file: PathBuf,
+        arc: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    /// 造一份真实磁盘文件 + 库里记录（abs_path 与磁盘一致），状态可指定
+    fn seed(status: db::Status, rel: &str, bytes: &[u8]) -> Seeded {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let arc_path = arc.path().to_path_buf();
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+
+        let p = src.path().join(rel);
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(&p, bytes).unwrap();
+        let m = std::fs::metadata(&p).unwrap();
+        let sf = ScannedFile {
+            name: p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path: p.to_string_lossy().to_string(),
+            ext: "docx".into(),
+            kind: "word".into(),
+            size: m.len(),
+            mtime: plan::mtime_ms(&m),
+        };
+        db::upsert_files(&mut conn, root.id, &[sf]).unwrap();
+        let file_id = db::list_queued(&conn, Some(root.id)).unwrap()[0].0;
+        db::force_status(&conn, file_id, status).unwrap();
+
+        Seeded {
+            _src: src,
+            _arc: arc,
+            conn,
+            file_id,
+            src_file: p,
+            arc: arc_path,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn mig_count(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM migrations", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    // 红测 1：删除后原路径不存在，隔离区副本哈希一致，台账记 src/dst/sha256，状态 trashed
+    #[test]
+    fn trash_moves_to_quarantine_with_matching_hash_and_records_item() {
+        let mut s = seed(db::Status::PendingConfirm, "子目录/报告.docx", b"to-be-trashed");
+        let rel = "子目录/报告.docx";
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+
+        assert!(!s.src_file.exists(), "源文件必须离开原位置");
+        let q = plan::quarantine_path(&s.arc, out.migration_id, rel);
+        assert!(q.is_file(), "隔离区副本必须在：{}", q.display());
+        assert_eq!(std::fs::read(&q).unwrap(), s.bytes);
+        assert_eq!(out.dst_path, q.to_string_lossy().to_string());
+        assert_eq!(out.sha256.len(), 64);
+
+        let items = db::migration_items(&s.conn, out.migration_id).unwrap();
+        assert_eq!(items.len(), 1);
+        let (item, result) = &items[0];
+        assert_eq!(result, "ok");
+        assert_eq!(item.src_path, s.src_file.to_string_lossy().to_string());
+        assert_eq!(item.dst_path, q.to_string_lossy().to_string());
+        assert_eq!(item.sha256.as_deref(), Some(out.sha256.as_str()));
+
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Trashed)
+        );
+        assert_eq!(
+            db::get_prev_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::PendingConfirm)
+        );
+        let m = db::get_migration(&s.conn, out.migration_id).unwrap().unwrap();
+        assert_eq!(m.kind, "trash");
+        assert_eq!(m.status, "done");
+    }
+
+    // 红测 2：撤销 → 字节级还原、状态回到删除前、隔离区副本清理、批次标 undone
+    #[test]
+    fn undo_trash_restores_bytes_and_previous_status() {
+        let mut s = seed(db::Status::Confirmed, "子目录/报告.docx", b"undo-me-bytes");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        let q = plan::quarantine_path(&s.arc, out.migration_id, "子目录/报告.docx");
+
+        let report = mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap();
+        assert_eq!(report.restored, 1, "{:?}", report.failed);
+        assert!(s.src_file.is_file(), "原路径必须还原");
+        assert_eq!(std::fs::read(&s.src_file).unwrap(), s.bytes);
+        assert!(!q.exists(), "隔离区副本必须清理");
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Confirmed),
+            "状态回到删除前的 confirmed"
+        );
+        assert_eq!(db::get_prev_status(&s.conn, s.file_id).unwrap(), None);
+        assert_eq!(
+            db::get_migration(&s.conn, out.migration_id).unwrap().unwrap().status,
+            "undone"
+        );
+    }
+
+    // 红测 3：三个合法来源态都能删、都能还原到各自的删除前状态
+    #[test]
+    fn trash_accepts_all_legal_source_statuses() {
+        for from in [
+            db::Status::PendingConfirm,
+            db::Status::Confirmed,
+            db::Status::Parked,
+        ] {
+            let mut s = seed(from, "报告.docx", format!("bytes-{from:?}").as_bytes());
+            let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+            assert_eq!(db::get_prev_status(&s.conn, s.file_id).unwrap(), Some(from));
+            mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap();
+            assert_eq!(db::get_file_status(&s.conn, s.file_id).unwrap(), Some(from));
+            assert_eq!(std::fs::read(&s.src_file).unwrap(), s.bytes);
+        }
+    }
+
+    // 红测 4：隔离区撞名 → _2 错开，绝不覆盖既有文件
+    #[test]
+    fn trash_never_overwrites_existing_quarantine_name() {
+        let mut s = seed(db::Status::PendingConfirm, "子目录/报告.docx", b"new-bytes");
+        // 新库第一次插入迁移的 id 是 1：先占住它要用的隔离区路径
+        let occupied = plan::quarantine_path(&s.arc, 1, "子目录/报告.docx");
+        write(&occupied, b"existing-untouched");
+
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        assert_eq!(out.migration_id, 1);
+        assert!(
+            Path::new(&out.dst_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("_2"),
+            "应错开成 _2：{}",
+            out.dst_path
+        );
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-untouched");
+        assert_eq!(std::fs::read(&out.dst_path).unwrap(), s.bytes);
+        assert!(!s.src_file.exists());
+        // _2 错开的副本也必须能按台账落点准确撤销，且不碰原有的那份
+        assert_eq!(
+            mig::undo_trash(&mut s.conn, &s.arc, out.migration_id)
+                .unwrap()
+                .restored,
+            1
+        );
+        assert_eq!(std::fs::read(&s.src_file).unwrap(), s.bytes);
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-untouched");
+    }
+
+    // 红测 5：隔离区原件被篡改 → 拒绝撤销，原文件不动，状态/批次不变
+    #[test]
+    fn undo_trash_refuses_tampered_quarantine_file() {
+        let mut s = seed(db::Status::PendingConfirm, "报告.docx", b"original-bytes");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        let q = PathBuf::from(&out.dst_path);
+        write(&q, b"tampered!!!");
+
+        let err = mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap_err();
+        assert!(
+            err.message.contains("不一致") || err.message.contains("修改"),
+            "要明确说明拒绝原因：{}",
+            err.message
+        );
+        assert!(!s.src_file.exists(), "原文件不动");
+        assert_eq!(std::fs::read(&q).unwrap(), b"tampered!!!", "不覆盖被篡改的副本");
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Trashed)
+        );
+        assert_eq!(
+            db::get_migration(&s.conn, out.migration_id).unwrap().unwrap().status,
+            "done",
+            "撤销失败不能把批次标成 undone"
+        );
+    }
+
+    // 红测 6：原路径出现同名 → 拒绝撤销，既不还原也不覆盖
+    #[test]
+    fn undo_trash_refuses_when_source_path_taken() {
+        let mut s = seed(db::Status::PendingConfirm, "报告.docx", b"original-bytes");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        write(&s.src_file, b"newcomer");
+
+        let err = mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap_err();
+        assert!(
+            err.message.contains("同名") || err.message.contains("覆盖"),
+            "要明确说明拒绝原因：{}",
+            err.message
+        );
+        assert_eq!(std::fs::read(&s.src_file).unwrap(), b"newcomer", "同名文件不许被覆盖");
+        assert!(Path::new(&out.dst_path).is_file(), "隔离区副本仍在");
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Trashed)
+        );
+    }
+
+    // 红测 7：非法来源态 → 明确报错、不写磁盘、不产生批次
+    #[test]
+    fn illegal_source_status_produces_no_batch() {
+        for from in [db::Status::Queued, db::Status::Migrated, db::Status::Skipped] {
+            let mut s = seed(from, "报告.docx", b"do-not-touch");
+            let before = mig_count(&s.conn);
+            let err = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap_err();
+            assert_eq!(err.code, crate::error::BAD_TRANSITION);
+            assert_eq!(mig_count(&s.conn), before, "非法转移不许产生批次");
+            assert!(s.src_file.is_file(), "源文件不动");
+            assert_eq!(db::get_file_status(&s.conn, s.file_id).unwrap(), Some(from));
+        }
+    }
+
+    // 红测 8：通用 undo 必须拒绝 trash 批次（BUG-003/006 的坑：不能误标 undone）
+    #[test]
+    fn generic_undo_refuses_trash_batch() {
+        let mut s = seed(db::Status::PendingConfirm, "报告.docx", b"generic-undo-guard");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        let r = mig::undo(
+            &mut s.conn,
+            &s.arc,
+            out.migration_id,
+            &mut |_, _, _, _| {},
+        );
+        assert!(r.is_err(), "通用 undo 必须按 kind 拒绝 trash 批次");
+        assert!(
+            r.unwrap_err().message.contains("撤销"),
+            "错误要指向专用撤销入口"
+        );
+        assert_eq!(
+            db::get_migration(&s.conn, out.migration_id).unwrap().unwrap().status,
+            "done",
+            "不能被通用 undo 误标成 undone"
+        );
+        // 专用入口仍然撤得回来
+        assert_eq!(
+            mig::undo_trash(&mut s.conn, &s.arc, out.migration_id)
+                .unwrap()
+                .restored,
+            1
+        );
     }
 }

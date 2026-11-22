@@ -61,6 +61,11 @@ describe('mapKey（详设 §8.3 全 9 键）', () => {
     expect(mapKey(k('F5'), ctx)).toBeNull()
   })
 
+  // BUG-007：Delete 键 = 删除（移入隔离区），与 Ctrl+Z 撤销配对
+  it('Delete → trash（移入隔离区）', () => {
+    expect(mapKey(k('Delete'), ctx)).toEqual<KeyCmd>({ t: 'trash' })
+  })
+
   // 2026-11-20 新增：看内容不必离开键盘
   // 判一份文件经常要「打开确认一眼再回来」，鼠标去点按钮会打断流水线
   it('o → open，l → reveal（大写也认）', () => {
@@ -80,6 +85,8 @@ describe('输入框打开时只拦 Esc / Enter（最容易踩的坑）', () => {
     expect(mapKey(k('l'), typed)).toBeNull()
     expect(mapKey(k('1'), typed)).toBeNull()
     expect(mapKey(k('ArrowDown'), typed)).toBeNull()
+    // BUG-007：输入框里按 Delete 是删字，不能触发「移入隔离区」
+    expect(mapKey(k('Delete'), typed)).toBeNull()
     // Ctrl+Z 在输入框里属于「撤销文本」，不能抢
     expect(mapKey(k('z', { ctrlKey: true }), typed)).toBeNull()
   })

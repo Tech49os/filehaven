@@ -53,6 +53,15 @@ describe('ipc 参数键必须是 camelCase（对齐 Rust serde rename_all）', (
     void ipc.cleanBadTags()
     expect(invoke.mock.calls[0]).toEqual(['clean_bad_tags'])
   })
+
+  // BUG-007：删除走隔离区，撤销走专用命令；参数名严格 camelCase
+  it('BUG-007：trash_file 传 fileId，undo_trash 传 migrationId', () => {
+    void ipc.trashFile(7)
+    expect(invoke.mock.calls[0]).toEqual(['trash_file', { fileId: 7 }])
+    invoke.mockClear()
+    void ipc.undoTrash(9)
+    expect(invoke.mock.calls[0]).toEqual(['undo_trash', { migrationId: 9 }])
+  })
 })
 
 describe('检索 ipc（P3 T3.2）', () => {

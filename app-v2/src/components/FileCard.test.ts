@@ -517,12 +517,14 @@ describe('BUG-005 · 已确认卡片布局加固', () => {
     })
   }
 
-  it('confirmed：根节点带 done，候选区与操作按钮不渲染，结果行给长路径 title', () => {
+  it('confirmed：根节点带 done，候选区与判定按钮不渲染，只留删除入口，结果行给长路径 title', () => {
     const w = confirmedCard()
     expect(w.find('.card').classes()).toContain('done')
-    // 已确认卡片不再渲染候选区与「确认/暂缓/先放着」按钮
+    // 已确认卡片不再渲染候选区与「确认/暂缓/先放着」按钮；
+    // BUG-007 起保留一个「删除（移入隔离区）」入口
     expect(w.find('.body').find('*').exists()).toBe(false)
-    expect(w.findAll('.ft .btn')).toHaveLength(0)
+    expect(w.findAll('.ft .btn')).toHaveLength(1)
+    expect(w.find('.ft .btn').text()).toContain('移入隔离区')
     expect(w.find('.ft > .hint').exists()).toBe(true)
     // 结果行的长路径必须有完整 title（这是加固项：原来直接塞在 <b> 里，没有 title）
     const dest = w.find('.result > .dest')
@@ -582,5 +584,34 @@ describe('BUG-005 · 已确认卡片布局加固', () => {
     const nameCss = cssRule(fileCardSource, '.name')
     expect(nameCss).toMatch(/text-overflow:\s*ellipsis/)
     expect(nameCss).toMatch(/white-space:\s*nowrap/)
+  })
+})
+
+/* ---- BUG-007：待确认卡片 / 已确认条目都要有「删除（移入隔离区）」入口 ---- */
+describe('BUG-007：删除入口', () => {
+  function mountCard(over: Partial<BatchItem['file']> = {}) {
+    return mount(FileCard, {
+      props: {
+        item: item(over),
+        dirCount: 2,
+        position: { index: 0, total: 1 },
+      },
+    })
+  }
+
+  it('待确认卡片有删除按钮，点击 emit trash', async () => {
+    const w = mountCard()
+    const btn = w.findAll('button').find((b) => /删除|隔离区/.test(b.text()))
+    expect(btn, '待确认卡片必须有删除入口').toBeTruthy()
+    expect(btn!.text()).toContain('移入隔离区')
+    await btn!.trigger('click')
+    expect(w.emitted('trash')).toBeTruthy()
+  })
+
+  it('已确认卡片同样有删除入口，文案禁止「永久删除」', () => {
+    const w = mountCard({ status: 'confirmed' })
+    const btn = w.findAll('button').find((b) => /删除|隔离区/.test(b.text()))
+    expect(btn, '已确认条目也必须有删除入口').toBeTruthy()
+    expect(w.text()).not.toContain('永久删除')
   })
 })

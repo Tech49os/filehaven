@@ -37,6 +37,7 @@ import type {
   SourceRoot,
   TagCount,
   TagRef,
+  TrashOutcome,
   UndoReport,
 } from './types'
 
@@ -160,6 +161,19 @@ export function unpark(fileId: number) {
 
 export function dropFile(fileId: number) {
   return invoke<void>('drop_file', { fileId })
+}
+
+/**
+ * BUG-007：删除 = 移入隔离区（可撤销）。
+ * 返回值带 migrationId，撤销入口和 Ctrl+Z 都拿它调 undoTrash。
+ */
+export function trashFile(fileId: number) {
+  return invoke<TrashOutcome>('trash_file', { fileId })
+}
+
+/** BUG-007：撤销删除（隔离区原件 → 原路径，哈希校验 + 同名拒绝） */
+export function undoTrash(migrationId: number) {
+  return invoke<UndoReport>('undo_trash', { migrationId })
 }
 
 export function saveNote(fileId: number, note: string) {

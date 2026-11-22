@@ -522,6 +522,18 @@ pub struct RecatOutcome {
     pub renamed: bool,
 }
 
+/// BUG-007：删除（移入隔离区）的回执。前端靠 migrationId 走撤销，
+/// dstPath 用来在确认弹窗/提示条里告诉用户原件落在哪。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashOutcome {
+    pub file_id: i64,
+    pub migration_id: i64,
+    pub src_path: String,
+    pub dst_path: String,
+    pub sha256: String,
+}
+
 /// 最近一次迁移（撤销入口）
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

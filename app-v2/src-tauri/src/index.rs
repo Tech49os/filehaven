@@ -45,10 +45,12 @@ pub enum Status {
     Parked,
     Skipped,
     Missing,
+    /// BUG-007：整理台删除 = 移入隔离区，仍可撤销；不是永久删除
+    Trashed,
 }
 
 impl Status {
-    pub const ALL: [Status; 8] = [
+    pub const ALL: [Status; 9] = [
         Status::Queued,
         Status::Labeled,
         Status::PendingConfirm,
@@ -57,6 +59,7 @@ impl Status {
         Status::Parked,
         Status::Skipped,
         Status::Missing,
+        Status::Trashed,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -69,6 +72,7 @@ impl Status {
             Status::Parked => "parked",
             Status::Skipped => "skipped",
             Status::Missing => "missing",
+            Status::Trashed => "trashed",
         }
     }
 
@@ -88,6 +92,7 @@ pub static ALLOWED: &[(Status, &[Status])] = &[
             Status::Queued,
             Status::Parked,
             Status::Missing,
+            Status::Trashed,
         ],
     ),
     (
@@ -97,15 +102,26 @@ pub static ALLOWED: &[(Status, &[Status])] = &[
             Status::Confirmed,
             Status::Skipped,
             Status::Missing,
+            Status::Trashed,
         ],
     ),
     (
         Status::Confirmed,
-        &[Status::Migrated, Status::Queued, Status::Missing],
+        &[
+            Status::Migrated,
+            Status::Queued,
+            Status::Missing,
+            Status::Trashed,
+        ],
     ),
     (Status::Migrated, &[Status::Confirmed]),
     (Status::Missing, &[Status::Queued]),
     (Status::Skipped, &[]),
+    // BUG-007：撤销删除时只回到删除前记下的那个状态（由台账 prev_status 指定）
+    (
+        Status::Trashed,
+        &[Status::PendingConfirm, Status::Confirmed, Status::Parked],
+    ),
 ];
 
 pub fn allowed(from: Status, to: Status) -> bool {
@@ -141,6 +157,8 @@ pub fn open(path: &Path) -> Result<Connection, CmdError> {
     ensure_column(&conn, "migration_items", "old_dir_id", "INTEGER")?;
     // BUG-006：同义目录合并后源目录标记 empty（保留目录记录，不删磁盘空目录）
     ensure_column(&conn, "archive_dirs", "is_empty", "INTEGER NOT NULL DEFAULT 0")?;
+    // BUG-007：删除前状态（pending_confirm / confirmed / parked），撤销时按它还原
+    ensure_column(&conn, "files", "prev_status", "TEXT")?;
     Ok(conn)
 }
 
@@ -672,6 +690,73 @@ pub fn set_status(conn: &Connection, file_id: i64, to: Status) -> Result<(), Cmd
     Ok(())
 }
 
+// ---------------------------------------------------------------- BUG-007：删除（隔离区）
+//
+// 这几个函数是所有 `trashed` 状态写入的唯一入口：先查转移表，再写状态 + 删除前状态。
+// 调用方（migration.rs）把整个批次的操作包在一个事务里，失败整笔回滚。
+
+/// 删除前状态（只有 trashed 的文件才有）
+pub fn get_prev_status(conn: &Connection, file_id: i64) -> Result<Option<Status>, CmdError> {
+    // prev_status 是可空列：闭包里必须显式取 Option<String>，否则外层 optional() 会把
+    // T 推成 String，NULL 就会报「Invalid column type Null」。
+    let s: Option<Option<String>> = conn
+        .query_row("SELECT prev_status FROM files WHERE id=?1", [file_id], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?;
+    Ok(s.flatten().and_then(|s| Status::parse(&s)))
+}
+
+/// 转 trashed 并记下删除前状态（一次 UPDATE，调用方在事务里）
+pub fn mark_trashed(conn: &Connection, file_id: i64, prev: Status) -> Result<(), CmdError> {
+    let from = get_file_status(conn, file_id)?
+        .ok_or_else(|| CmdError::new("NOT_FOUND", format!("文件不存在：{file_id}")))?;
+    if !allowed(from, Status::Trashed) {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!("不允许的状态转换：{} → trashed", from.as_str()),
+        ));
+    }
+    conn.execute(
+        "UPDATE files SET status=?1, prev_status=?2 WHERE id=?3",
+        params![Status::Trashed.as_str(), prev.as_str(), file_id],
+    )?;
+    Ok(())
+}
+
+/// 撤销删除：只从 trashed 回到 prev_status，并清空 prev_status。
+/// 带 `status='trashed'` 守卫，重复撤销/中途被改过时直接拒绝，不做半吊子写入。
+pub fn restore_trashed(conn: &Connection, file_id: i64) -> Result<Status, CmdError> {
+    let (status, prev): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, prev_status FROM files WHERE id=?1",
+            [file_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CmdError::new("NOT_FOUND", format!("文件不存在：{file_id}")))?;
+    if status != Status::Trashed.as_str() {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!("文件当前不是隔离区状态（{status}），不能撤销删除"),
+        ));
+    }
+    let prev = prev
+        .and_then(|s| Status::parse(&s))
+        .ok_or_else(|| CmdError::new(BAD_TRANSITION, "删除前状态缺失，无法撤销"))?;
+    if !allowed(Status::Trashed, prev) {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!("删除前状态不允许还原：{}", prev.as_str()),
+        ));
+    }
+    conn.execute(
+        "UPDATE files SET status=?1, prev_status=NULL WHERE id=?2 AND status='trashed'",
+        params![prev.as_str(), file_id],
+    )?;
+    Ok(prev)
+}
+
 pub fn count_by_status(conn: &Connection) -> Result<Vec<(String, i64)>, CmdError> {
     let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM files GROUP BY status")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
@@ -1147,16 +1232,17 @@ pub fn pool_rows(conn: &Connection) -> Result<Vec<crate::model::FileRow>, CmdErr
     Ok(out)
 }
 
-/// 目录建议的抽样输入：除 skipped / missing 之外的所有文件（详设 §7.6）
+/// 目录建议的抽样输入：除 skipped / missing / trashed 之外的所有文件（详设 §7.6）
 ///
 /// 已迁移的也算进来 —— 它们同样是「这个人在管什么」的证据，
 /// 只是不再需要被整理。`source` 取路径最后两层，用来告诉模型文件原本散在哪。
+/// BUG-007：已被移入隔离区的文件不该继续影响目录建议。
 pub fn suggest_input_rows(
     conn: &Connection,
 ) -> Result<Vec<crate::suggest_dirs::SampleInput>, CmdError> {
     let mut stmt = conn.prepare(
         "SELECT name, kind, abs_path, mtime FROM files
-         WHERE status NOT IN ('skipped','missing')
+         WHERE status NOT IN ('skipped','missing','trashed')
          ORDER BY mtime DESC, id",
     )?;
     let rows = stmt.query_map([], |r| {

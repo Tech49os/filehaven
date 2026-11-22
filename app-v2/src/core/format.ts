@@ -91,6 +91,8 @@ export function statusLabel(status: string): string {
       return '已跳过'
     case 'missing':
       return '找不到了'
+    case 'trashed':
+      return '已移入隔离区'
     default:
       return status
   }

@@ -18,7 +18,17 @@ import type {
   DecideAck,
   Decision,
   DecideOrigin,
+  TrashOutcome,
 } from '../core/types'
+
+/** BUG-007：一次删除的本地撤销凭据（文件已从批次移除，撤销时要按原位插回） */
+interface TrashUndo {
+  fileId: number
+  migrationId: number
+  item: BatchItem
+  index: number
+  outcome: TrashOutcome
+}
 
 export const useBatchStore = defineStore('batch', () => {
   const view = ref<BatchView | null>(null)
@@ -34,6 +44,8 @@ export const useBatchStore = defineStore('batch', () => {
   /** 新建目录输入框是否打开（决定键盘谁说话） */
   const inputOpen = ref(false)
   const lastAck = ref<DecideAck | null>(null)
+  /** BUG-007：最近一次删除的撤销凭据（删除后文件从批次消失，靠它插回） */
+  const trashUndo = ref<TrashUndo | null>(null)
 
   const items = computed<BatchItem[]>(() => view.value?.items ?? [])
   const current = computed<BatchItem | null>(() => items.value[index.value] ?? null)
@@ -48,6 +60,8 @@ export const useBatchStore = defineStore('batch', () => {
     () => items.value.filter((i) => i.file.status === 'confirmed').length,
   )
   const confirmedList = computed(() => items.value.filter((i) => i.file.status === 'confirmed'))
+  /** BUG-007：有没有可撤销的删除（Ctrl+Z 与提示条按钮共用） */
+  const canUndoTrash = computed(() => trashUndo.value !== null)
 
   /** 每份都处理过了（确认 / 暂缓 / 先放着都算处理） */
   const allDone = computed(
@@ -79,6 +93,7 @@ export const useBatchStore = defineStore('batch', () => {
     closed.value = false
     resolved.value = new Set()
     undoStack.value = []
+    trashUndo.value = null
     try {
       view.value = await ipc.nextBatch(size)
       // 开批时从第一个未确认项开始（暂缓回来的排最后）
@@ -195,8 +210,58 @@ export const useBatchStore = defineStore('batch', () => {
     return apply(null, 'parked', 'user_changed', null, note)
   }
 
-  /** Ctrl+Z：撤销最近一次确认并回填 */
+  /**
+   * BUG-007：删除（移入隔离区）。成功后文件从当前批次消失，
+   * 本地留下撤销凭据；失败则批次纹丝不动，不产生幽灵状态。
+   */
+  async function trash(fileId: number): Promise<TrashOutcome | null> {
+    if (!view.value) return null
+    const at = items.value.findIndex((x) => x.file.id === fileId)
+    if (at < 0) return null
+    try {
+      const outcome = await ipc.trashFile(fileId)
+      const item = items.value[at]
+      view.value.items.splice(at, 1)
+      trashUndo.value = { fileId, migrationId: outcome.migrationId, item, index: at, outcome }
+      if (lastAck.value?.fileId === fileId) lastAck.value = null
+      if (index.value >= at && index.value > 0) index.value -= 1
+      if (index.value >= items.value.length) index.value = Math.max(0, items.value.length - 1)
+      error.value = null
+      return outcome
+    } catch (e) {
+      error.value = toCmdError(e).message
+      return null
+    }
+  }
+
+  /** BUG-007：撤销删除（提示条按钮 / Ctrl+Z 都走这里） */
+  async function undoTrash(migrationId?: number): Promise<boolean> {
+    const rec = trashUndo.value
+    if (!rec) return false
+    if (migrationId !== undefined && migrationId !== rec.migrationId) return false
+    try {
+      await ipc.undoTrash(rec.migrationId)
+      const at = Math.min(rec.index, items.value.length)
+      view.value?.items.splice(at, 0, rec.item)
+      trashUndo.value = null
+      index.value = at
+      error.value = null
+      if (rec.item.file.status === 'confirmed') {
+        undoStack.value = pushUndo(undoStack.value, rec.fileId)
+      }
+      return true
+    } catch (e) {
+      error.value = toCmdError(e).message
+      return false
+    }
+  }
+
+  /** Ctrl+Z：优先撤销最近的删除，否则撤销最近一次确认并回填 */
   async function undo() {
+    if (trashUndo.value) {
+      await undoTrash()
+      return
+    }
     if (!view.value || undoStack.value.length === 0) return
     const { fileId, rest } = popUndo(undoStack.value)
     if (fileId === null) return
@@ -332,6 +397,8 @@ export const useBatchStore = defineStore('batch', () => {
     deferredBadge,
     confirmedCount,
     confirmedList,
+    canUndoTrash,
+    trashUndo,
     allDone,
     loading,
     error,
@@ -347,6 +414,8 @@ export const useBatchStore = defineStore('batch', () => {
     newDirConfirm,
     defer,
     park,
+    trash,
+    undoTrash,
     undo,
     move,
     focus,
