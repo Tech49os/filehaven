@@ -559,87 +559,8 @@ async function onSubToggle() {
   text-underline-offset: 2px;
 }
 
-.list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  min-height: 0;
-  overflow: auto;
-  flex: 1;
-  background: var(--c-surface);
-  border: 0.5px solid var(--c-border);
-  border-radius: var(--r-card);
-}
-.row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 52px 72px 92px minmax(0, 1.1fr) 72px;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 10px;
-  font-size: 12.5px;
-  border-bottom: 0.5px solid var(--c-border);
-  cursor: default;
-}
-.row:last-child {
-  border-bottom: 0;
-}
-.row:hover {
-  background: var(--c-hover);
-}
-.row.on {
-  background: var(--c-primary-bg);
-}
-.cell {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cell.name {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--c-text);
-}
-.cell.kind,
-.cell.size,
-.cell.time,
-.cell.st {
-  color: var(--c-text-2);
-  font-size: 11.5px;
-}
-.cell.time,
-.cell.size {
-  font-variant-numeric: tabular-nums;
-}
-
-.tchip {
-  display: inline-block;
-  font-size: 10px;
-  line-height: 1.5;
-  padding: 0 6px;
-  margin-right: 3px;
-  border-radius: var(--r-pill);
-  background: var(--c-field);
-  color: var(--c-text-2);
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: middle;
-}
-.tchip.topic {
-  background: var(--c-indigo-bg);
-  color: var(--c-indigo);
-}
-.tchip.user {
-  background: transparent;
-  border: 1px dashed var(--c-border-strong);
-}
-.tchip.more {
-  background: transparent;
-  color: var(--c-text-3);
-}
+/* 浏览页列表样式全部在 FileList.vue（scoped）；此处旧有的一份 .list/.row/.cell/.tchip
+   因 scoped 不作用于子组件而从未生效，BUG-009 删除，避免两套字号标准。 */
 
 /* 详情条 */
 .detail {

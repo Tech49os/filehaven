@@ -64,7 +64,11 @@
     'Microsoft YaHei', 'PingFang SC', sans-serif;
   /* 文件条目统一尺度（BUG-008；BUG-009/005 复用这组 token）
      可读性基线：文件名 ≥13、次要信息 ≥12、chip ≥11、行高 ≥1.6。
-     名字固定，数值可按窗口分档微调。 */
+     名字固定，数值可按窗口分档微调。
+
+     BUG-009 窄窗策略：横向滚动（二选一取此方案，不隐藏列）。
+     文件行给 min-width，列宽不再被压到阈值以下；窗口窄于内容时由列表容器
+     overflow:auto 出横向滚动条。绝不靠缩小 --fs-* 把 6 列硬塞进窄窗。 */
   --fs-file-name: 14px;
   --fs-meta: 12px;
   --fs-chip: 11px;
