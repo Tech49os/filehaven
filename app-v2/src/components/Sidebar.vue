@@ -78,7 +78,7 @@ function goNewFiles() {
 </script>
 
 <template>
-  <aside class="side glass-side">
+  <div class="side">
     <div class="group-title">资料库</div>
     <nav>
       <button
@@ -121,26 +121,17 @@ function goNewFiles() {
         <span class="mtext ellipsis">{{ modelTip }}</span>
       </div>
     </div>
-  </aside>
+  </div>
 </template>
 
 <style scoped>
 .side {
-  width: 200px;
-  flex: 0 0 200px;
-  /* 材质背景与右侧分隔线由 glass.css 的 .glass-side 提供 */
+  /* 宽度与材质由父级 .side-rail 统一提供（尺寸集中在 tokens.css） */
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 10px 10px 0;
-}
-
-/* 窄窗时侧栏也让一步：省下来的 24px 直接给中间的卡片 */
-@media (max-width: 1240px) {
-  .side {
-    width: 176px;
-    flex-basis: 176px;
-    padding: 8px 8px 0;
-  }
 }
 
 .group-title {
@@ -162,12 +153,12 @@ nav {
   align-items: center;
   gap: 9px;
   padding: 7px 10px;
-  border-radius: var(--r-item);
+  border-radius: 12px;
   font-size: 13px;
   color: var(--c-text);
   text-align: left;
   transition: background 0.12s ease;
-  min-height: 32px;
+  min-height: 40px;
   background: transparent;
   border: 0;
   cursor: default;
@@ -179,6 +170,8 @@ nav {
   background: var(--c-primary-bg);
   color: var(--c-primary);
   font-weight: 500;
+  /* 白 38% 描边：用 inset 阴影避免选中时行高/宽度跳动 */
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.38);
 }
 .nav:focus-visible {
   outline: 2px solid var(--c-primary);
@@ -195,10 +188,10 @@ nav {
   color: #fff;
   font-size: 11px;
   font-weight: 500;
-  border-radius: 10px;
-  min-width: 18px;
+  border-radius: 9px;
+  min-width: 24px;
   height: 18px;
-  padding: 0 6px;
+  padding: 0 5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;

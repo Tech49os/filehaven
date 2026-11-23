@@ -60,8 +60,11 @@ describe('BUG-011 · 组件真实挂载材质', () => {
     expect(appWindow).toMatch(/class="titlebar glass-title"/)
   })
 
-  it('侧栏 / 主面板 / 浮层分别挂上材质类', () => {
-    expect(sidebar).toMatch(/class="side glass-side"/)
+  it('侧栏材质交由父级 rail；主面板 / 浮层分别挂上材质类', () => {
+    // 块①：Sidebar 退成内部容器，.glass-side 只由 AppWindow 的 .side-rail 提供
+    expect(sidebar).toMatch(/<div class="side">/)
+    expect(sidebar).not.toMatch(/glass-side/)
+    expect(appWindow).toMatch(/class="side-rail glass-side"/)
     expect(appSource).toMatch(/class="main glass-panel"/)
     expect(searchPanel).toMatch(/class="panel glass-float"/)
   })

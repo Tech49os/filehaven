@@ -24,6 +24,16 @@ const showSidebar = computed(() => route.meta.sidebar !== false)
 const title = computed(() => (route.meta.title as string | undefined) ?? '文件管家')
 
 /**
+ * 右上角「快速检索」胶囊：复用 SearchPanel 已经挂好的全局 Ctrl+K 监听。
+ * 派发真实键盘事件比给 SearchPanel 加 defineExpose/ref 更稳，也不用动块②的文件。
+ */
+function openQuickSearch() {
+  window.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }),
+  )
+}
+
+/**
  * 首屏分岔：没配置完 → 引导；配置完了还停在引导 → 整理台。
  * 只做一次，之后由页面自己跳，避免和用户的操作抢方向。
  */
@@ -51,16 +61,28 @@ watch(
 
 <template>
   <AppWindow :title="title">
-    <div class="shell">
-      <Sidebar v-if="showSidebar" />
-      <div class="main glass-panel">
-        <p v-if="app.error" class="err" role="alert">{{ app.error }}</p>
-        <RouterView v-slot="{ Component }">
-          <Transition name="page" mode="out-in">
-            <component :is="Component" :key="route.path" />
-          </Transition>
-        </RouterView>
-      </div>
+    <!-- 引导页 meta.sidebar=false 时不提供 slot，AppWindow 用 $slots.side 判断不渲染 rail -->
+    <template v-if="showSidebar" #side>
+      <Sidebar />
+    </template>
+    <template #tail>
+      <button
+        class="quick-search"
+        type="button"
+        aria-label="快速检索"
+        title="快速检索 Ctrl K"
+        @click="openQuickSearch"
+      >
+        <span>快速检索</span><kbd>Ctrl K</kbd>
+      </button>
+    </template>
+    <div class="main glass-panel">
+      <p v-if="app.error" class="err" role="alert">{{ app.error }}</p>
+      <RouterView v-slot="{ Component }">
+        <Transition name="page" mode="out-in">
+          <component :is="Component" :key="route.path" />
+        </Transition>
+      </RouterView>
     </div>
     <!-- Ctrl+K 命令面板：全局一个，挂在这里（T3.3） -->
     <SearchPanel />
@@ -162,10 +184,28 @@ button:not(:disabled):active {
 </style>
 
 <style scoped>
-.shell {
-  flex: 1;
-  min-height: 0;
-  display: flex;
+/* 右上角快速检索胶囊：本块只要可见可点，激活态蓝描边交给块② */
+.quick-search {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 242px;
+  max-width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 0.5px solid rgba(255, 255, 255, 0.64);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.56);
+  color: var(--c-text-2);
+  font-size: 12px;
+  font-family: var(--font);
+  cursor: pointer;
+}
+.quick-search kbd {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--c-text-3);
 }
 
 .main {
