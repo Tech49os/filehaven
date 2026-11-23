@@ -42,3 +42,6 @@ app-v2/test/e2e-*-log.txt
 
 # 设计评审的中间产物（截图+标注 jsonl，可由 design/ 效果图重建）
 .workbuddy/design-review/
+
+# GitHub Release 操作临时目录（脚本与回传校验文件）
+.tmp-ghrel/
