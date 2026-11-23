@@ -14,6 +14,8 @@ export type KeyCmd =
   | { t: 'move'; d: 1 | -1 }
   | { t: 'escape' }
   | { t: 'undo' }
+  /** BUG-007：删除（移入隔离区，可撤销） */
+  | { t: 'trash' }
   /** 打开当前文件（系统默认程序） */
   | { t: 'open' }
   /** 在资源管理器中定位当前文件 */
@@ -48,6 +50,9 @@ export function mapKey(e: KeyEventLike, ctx: KeyCtx): KeyCmd | null {
   switch (e.key) {
     case 'Enter':
       return { t: 'accept' }
+    // BUG-007：Delete  = 删除（移入隔离区）；Backspace 不抢（浏览器返回键）
+    case 'Delete':
+      return { t: 'trash' }
     case '1':
       return { t: 'pick', n: 1 }
     case '2':

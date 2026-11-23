@@ -68,7 +68,7 @@ const emit = defineEmits<{
 <style scoped>
 .hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--c-text-3);
   padding: 16px 4px;
 }
@@ -78,13 +78,14 @@ const emit = defineEmits<{
   gap: 8px;
   padding: 48px 12px;
   color: var(--c-text-3);
-  font-size: 13px;
+  font-size: var(--fs-file-name);
 }
 .list {
   list-style: none;
   margin: 0;
   padding: 0;
   min-height: 0;
+  /* BUG-009 窄窗策略：横向滚动。行有 min-width，列不被压窄，字号不缩 */
   overflow: auto;
   flex: 1;
   background: var(--c-surface);
@@ -93,12 +94,15 @@ const emit = defineEmits<{
 }
 .row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 52px 72px 92px minmax(0, 1.1fr) 72px;
+  grid-template-columns: minmax(180px, 1fr) 64px 80px 104px minmax(150px, 1.1fr) 80px;
   align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 10px;
-  font-size: 12.5px;
+  gap: var(--gap-row);
+  /* 行高由内容决定，只给下限；不再固定 32px 把字号挤小 */
+  min-height: 36px;
+  min-width: 740px;
+  padding: var(--pad-row-y) var(--pad-row-x);
+  font-size: var(--fs-file-name);
+  line-height: var(--lh-file);
   border-bottom: 0.5px solid var(--c-border);
   cursor: default;
 }
@@ -128,7 +132,7 @@ const emit = defineEmits<{
 .cell.time,
 .cell.st {
   color: var(--c-text-2);
-  font-size: 11.5px;
+  font-size: var(--fs-meta);
 }
 .cell.time,
 .cell.size {
@@ -136,8 +140,8 @@ const emit = defineEmits<{
 }
 .tchip {
   display: inline-block;
-  font-size: 10px;
-  line-height: 1.5;
+  font-size: var(--fs-chip);
+  line-height: var(--lh-file);
   padding: 0 6px;
   margin-right: 3px;
   border-radius: var(--r-pill);

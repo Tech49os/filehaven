@@ -39,3 +39,6 @@ app-v2/test/e2e-*-log.txt
 # 早期手测遗留的隔离语料（测试文档，不该进版本库）
 .e2e3-src/
 .e2e3-archive/
+
+# 设计评审的中间产物（截图+标注 jsonl，可由 design/ 效果图重建）
+.workbuddy/design-review/

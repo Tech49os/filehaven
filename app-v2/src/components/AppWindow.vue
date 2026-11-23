@@ -19,22 +19,44 @@ function onClose() {
 </script>
 
 <template>
-  <div class="win">
-    <header class="titlebar" data-tauri-drag-region>
-      <div class="lights" aria-hidden="true">
-        <i class="r" /><i class="y" /><i class="g" />
+  <div class="win glass-frame" :class="{ 'no-side': !$slots.side }">
+    <!-- 侧栏贯通到顶：灯区与 slot 共用同一块 .glass-side，灯区不另加材质/分隔线 -->
+    <div v-if="$slots.side" class="side-rail glass-side" data-tauri-drag-region>
+      <div class="lights">
+        <button
+          class="lamp r"
+          type="button"
+          aria-label="关闭窗口"
+          title="关闭"
+          @click="onClose"
+        ></button>
+        <button
+          class="lamp y"
+          type="button"
+          aria-label="最小化窗口"
+          title="最小化"
+          @click="onMin"
+        ></button>
+        <button
+          class="lamp g"
+          type="button"
+          aria-label="最大化或还原窗口"
+          title="最大化/还原"
+          @click="onMax"
+        ></button>
       </div>
-      <div class="title" data-tauri-drag-region>{{ title }}</div>
-      <div class="tail"><slot name="tail" /></div>
-      <div class="winbtns">
-        <button class="wb" title="最小化" @click="onMin">&#8211;</button>
-        <button class="wb" title="最大化" @click="onMax">&#9633;</button>
-        <button class="wb close" title="关闭" @click="onClose">&#10005;</button>
-      </div>
-    </header>
-    <main class="body">
-      <slot />
-    </main>
+      <div class="side-body"><slot name="side" /></div>
+    </div>
+
+    <div class="content">
+      <header class="titlebar glass-title" data-tauri-drag-region>
+        <div class="title">{{ title }}</div>
+        <div class="tail"><slot name="tail" /></div>
+      </header>
+      <main class="body">
+        <slot />
+      </main>
+    </div>
   </div>
 </template>
 
@@ -43,44 +65,91 @@ function onClose() {
   width: 100vw;
   height: 100vh;
   display: flex;
-  flex-direction: column;
-  background: var(--c-bg);
+  flex-direction: row;
+  /* 背景由 glass.css 的 .glass-frame 提供（渐变底图供四层材质采样） */
   border-radius: var(--r-window);
   border: 0.5px solid var(--c-border-strong);
   overflow: hidden;
 }
 
-.titlebar {
-  height: 44px;
-  flex: 0 0 44px;
+/* 整根 rail 从 y=0 贯通到底；材质由 .glass-side 统一提供。
+   自带左上/左下圆角：rail 带 backdrop-filter 会独立合成，
+   祖先 .win 的 overflow:hidden 裁不掉它，必须自己圆角，
+   否则窗口左上角会露出直角（真机实测，见 ui-window.test.ts）。 */
+.side-rail {
+  width: var(--side-width);
+  flex: 0 0 var(--side-width);
+  min-width: 0;
   display: flex;
-  align-items: center;
-  padding: 0 8px 0 16px;
-  background: var(--c-titlebar);
-  border-bottom: 0.5px solid var(--c-border);
-  position: relative;
-  user-select: none;
+  flex-direction: column;
+  border-top-left-radius: var(--r-window);
+  border-bottom-left-radius: var(--r-window);
 }
 
 .lights {
+  height: var(--titlebar-h);
+  flex: 0 0 var(--titlebar-h);
   display: flex;
+  align-items: center;
+  padding-left: 22px;
   gap: 8px;
-  width: 76px;
+  user-select: none;
 }
-.lights i {
+
+/* 灯本身是 button，绝不能带 data-tauri-drag-region，否则点不到 */
+.lamp {
   width: 12px;
   height: 12px;
+  padding: 0;
+  margin: 0;
+  border: 0;
   border-radius: 50%;
   display: block;
+  cursor: pointer;
 }
-.lights .r {
+.lamp.r {
   background: #ff5f57;
 }
-.lights .y {
+.lamp.y {
   background: #febc2e;
 }
-.lights .g {
+.lamp.g {
   background: #28c840;
+}
+.lamp:hover {
+  filter: brightness(0.94);
+}
+.lamp:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+.side-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 标题栏只盖内容区；右上角三键已删除，右上角留给 #tail。
+   自带右上圆角，理由同 .side-rail：backdrop-filter 层不被祖先裁剪。 */
+.titlebar {
+  height: var(--titlebar-h);
+  flex: 0 0 var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 16px;
+  position: relative;
+  user-select: none;
+  border-top-right-radius: var(--r-window);
 }
 
 .title {
@@ -91,39 +160,20 @@ function onClose() {
   font-weight: 500;
   color: var(--c-text-2);
   letter-spacing: 0.1px;
+  white-space: nowrap;
+}
+
+/* 无侧栏（引导页）时标题栏从窗口最左开始，左上角也要圆角，
+   否则同样会露出直角——理由同 .side-rail。 */
+.win.no-side .titlebar {
+  border-top-left-radius: var(--r-window);
 }
 
 .tail {
-  margin-left: 76px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.winbtns {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 2px;
-}
-
-.wb {
-  width: 34px;
-  height: 26px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--c-text-2);
-  font-size: 12px;
-  line-height: 1;
-  cursor: default;
-}
-.wb:hover {
-  background: var(--c-hover);
-}
-.wb.close:hover {
-  background: var(--c-danger);
-  color: #fff;
+  gap: 8px;
 }
 
 .body {

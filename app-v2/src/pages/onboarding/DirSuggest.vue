@@ -769,15 +769,6 @@ onUnmounted(() => {
   background: linear-gradient(to top, var(--c-bg) 72%, transparent);
 }
 
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 8px 14px;
-  font-size: 13px;
-  background: var(--c-field);
-  color: var(--c-text);
-  flex: 0 0 auto;
-}
 .btn.primary {
   background: var(--c-primary);
   color: #fff;

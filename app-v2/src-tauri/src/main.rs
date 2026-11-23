@@ -12,6 +12,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod batch;
 mod deep_tag;
+mod dir_health;
+mod dir_merge;
+mod dir_norm;
 mod error;
 // 正文抽取：P0 写好后一直没接线，整理台的「看内容」才真正用上它
 #[allow(dead_code)]
@@ -38,7 +41,7 @@ mod tests;
 use error::CmdError;
 use model::{
     ArchiveDir, BatchView, BootState, Counts, DirNode, MigrationResult, MigrationSummary,
-    ModelStatus, RecatOutcome, ScanReport, SourceRoot, UndoReport,
+    ModelStatus, RecatOutcome, ScanReport, SourceRoot, TrashOutcome, UndoReport,
 };
 use state::AppState;
 
@@ -695,6 +698,15 @@ async fn rename_tag(app: AppHandle, tag_id: i64, name: String) -> Result<i64, Cm
     index::rename_tag(&mut conn, tag_id, &name)
 }
 
+/// BUG-004：一次性清理已落库的 2-gram 伪词与 AI 体裁弱标签。
+/// 幂等、尊重 tag_locked；返回清掉的标签挂载行数。
+#[tauri::command]
+async fn clean_bad_tags(app: AppHandle) -> Result<usize, CmdError> {
+    let state = app.state::<AppState>();
+    let mut conn = lock_db(&state)?;
+    index::clean_bad_tags(&mut conn)
+}
+
 /// 浏览页目录树（P3 T2.4）：归档目录 + 直属已迁移份数
 #[tauri::command]
 async fn browse_tree(app: AppHandle) -> Result<Vec<model::DirNode>, CmdError> {
@@ -923,6 +935,32 @@ async fn undo_migration(app: AppHandle, migration_id: i64) -> Result<UndoReport,
     })
     .await
     .map_err(|e| CmdError::new(error::DB, format!("撤销线程异常：{e}")))?
+}
+
+/// BUG-007：整理台删除 = 移入隔离区（可撤销，绝不永久删除）
+#[tauri::command]
+async fn trash_file(app: AppHandle, file_id: i64) -> Result<TrashOutcome, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        migration::trash_file(&mut conn, Path::new(&archive), file_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("删除线程异常：{e}")))?
+}
+
+/// BUG-007：撤销删除（隔离区原件 → 原路径，哈希校验 + 同名拒绝）
+#[tauri::command]
+async fn undo_trash(app: AppHandle, migration_id: i64) -> Result<UndoReport, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        migration::undo_trash(&mut conn, Path::new(&archive), migration_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("撤销删除线程异常：{e}")))?
 }
 
 /// P4：重新归类——归档区内二次迁移（浏览页右键）
@@ -1163,6 +1201,244 @@ async fn suggest_dirs(
     req.map_err(|e| CmdError::new(error::DB, format!("目录建议线程异常：{e}")))?
 }
 
+// ---------------------------------------------------------------- BUG-003 目录体检
+
+/// 手动触发的目录体检：规则预筛 → （可选）模型复核 → 可解释建议清单。
+///
+/// 与 suggest_dirs 的关键差别：模型不可用 / 闸被占用时**降级而非报错**，
+/// 因为这是用户主动点开的质量检查，不该因为 Ollama 没开就白屏。
+/// 绝不挂进 refreshBoot（铁律）——只有前端按钮显式调用。
+#[tauri::command]
+async fn dir_health_scan(app: AppHandle) -> Result<model::DirHealthReport, CmdError> {
+    let state = app.state::<AppState>();
+    // ① 锁内取事实快照 + 模型配置，立刻放锁（锁内不做 IO）
+    let (facts, base, model_name) = {
+        let conn = lock_db(&state)?;
+        let (b, m) = llm_cfg(&conn);
+        (dir_health::facts_from_db(&conn)?, b, m)
+    };
+    // ② 判断模型能否用：探活（3s）→ 抢闸（0ms 非阻塞，绝不等待）
+    // 任何一步不成就降级，绝不返回 Err、绝不阻塞用户
+    let gate = app.state::<Arc<deep_tag::Queue>>().inner().clone();
+    let model_ok = llm::reachable(&base, Duration::from_secs(3));
+    let got_gate = if model_ok {
+        gate.gate.acquire(model_gate::Owner::Suggest, 0)
+    } else {
+        false
+    };
+
+    let skip_reason = if !model_ok {
+        "本地模型未启动"
+    } else if !got_gate {
+        "模型正忙"
+    } else {
+        ""
+    };
+    let can_review = model_ok && got_gate;
+
+    // ③ 阶段事件闭包工厂：每次 clone AppHandle，可安全 move 进 blocking 线程
+    fn emitter(app: &AppHandle) -> impl FnMut(&str, u64, &str) {
+        let a = app.clone();
+        move |stage: &str, ms: u64, note: &str| {
+            let _ = a.emit(
+                "dir-health-stage",
+                model::SuggestStage {
+                    stage: stage.to_string(),
+                    elapsed_ms: ms,
+                    note: note.to_string(),
+                },
+            );
+        }
+    }
+
+    // ④ 模型请求是同步 HTTP，扔 blocking 池，别冻住界面；降级路径无需线程
+    let report = if can_review {
+        let facts2 = facts.clone();
+        let base2 = base.clone();
+        let model2 = model_name.clone();
+        let mut emit2 = emitter(&app);
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            let reviewer = dir_health::make_reviewer(&base2, &model2, Duration::from_secs(SUGGEST_TIMEOUT_SECS));
+            dir_health::scan_report(&facts2, &reviewer, true, "", &mut emit2)
+        })
+        .await;
+        gate.gate.release(model_gate::Owner::Suggest);
+        match res {
+            Ok(r) => r,
+            Err(_) => {
+                let noop: &dir_health::Reviewer = &|_| Err("模型线程异常".to_string());
+                dir_health::scan_report(&facts, noop, false, "模型线程异常", &mut emitter(&app))
+            }
+        }
+    } else {
+        let noop: &dir_health::Reviewer = &|_| Err("模型不可用".to_string());
+        dir_health::scan_report(&facts, noop, false, skip_reason, &mut emitter(&app))
+    };
+
+    Ok(report)
+}
+
+/// BUG-003：采纳一条 rename/move 建议。只接受这两类；empty/merge 拒绝执行。
+#[tauri::command]
+async fn apply_dir_health(
+    app: AppHandle,
+    req: model::DirHealthApplyReq,
+) -> Result<model::DirHealthApplyAck, CmdError> {
+    if req.kind != "rename" && req.kind != "move" {
+        return Err(CmdError::new(
+            error::BAD_INPUT,
+            "这类建议只能查看，不能自动执行（空目录请手工确认后删除；语义合并由专门功能处理）",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        dir_health::apply_rename(&mut conn, &root, req.dir_id, &req.target_path, "user")
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("采纳修正线程异常：{e}")))?
+}
+
+/// BUG-003：按批次撤销一次目录修正。
+#[tauri::command]
+async fn undo_dir_health(app: AppHandle, migration_id: i64) -> Result<UndoReport, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        dir_health::undo_dir_health(&mut conn, &root, migration_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("撤销修正线程异常：{e}")))?
+}
+
+// ---------------------------------------------------------------- BUG-006 同义目录合并
+
+/// 手动触发同义目录扫描：规则预筛 → （可选）模型复核 → 可解释建议清单。
+///
+/// 与 dir_health_scan 同样的降级纪律：模型不可用/闸被占用时返回规则候选而非报错；
+/// 绝不挂进 refreshBoot，只有设置页按钮显式调用。
+#[tauri::command]
+async fn dir_merge_scan(app: AppHandle) -> Result<model::DirMergeReport, CmdError> {
+    let state = app.state::<AppState>();
+    // ① 锁内取事实快照 + 模型配置，立刻放锁
+    let (facts, base, model_name) = {
+        let conn = lock_db(&state)?;
+        let (b, m) = llm_cfg(&conn);
+        (dir_merge::facts_from_db(&conn)?, b, m)
+    };
+    // ② 探活 + 0ms 非阻塞抢闸：深读占用时直接避让，绝不抢闸、绝不等待
+    let gate = app.state::<Arc<deep_tag::Queue>>().inner().clone();
+    let model_ok = llm::reachable(&base, Duration::from_secs(3));
+    let got_gate = if model_ok {
+        gate.gate.acquire(model_gate::Owner::Suggest, 0)
+    } else {
+        false
+    };
+    let skip_reason = if !model_ok {
+        "本地模型未启动"
+    } else if !got_gate {
+        "模型正忙"
+    } else {
+        ""
+    };
+    let can_review = model_ok && got_gate;
+
+    fn emitter(app: &AppHandle) -> impl FnMut(&str, u64, &str) {
+        let a = app.clone();
+        move |stage: &str, ms: u64, note: &str| {
+            let _ = a.emit(
+                "dir-merge-stage",
+                model::SuggestStage {
+                    stage: stage.to_string(),
+                    elapsed_ms: ms,
+                    note: note.to_string(),
+                },
+            );
+        }
+    }
+
+    let report = if can_review {
+        let facts2 = facts.clone();
+        let base2 = base.clone();
+        let model2 = model_name.clone();
+        let mut emit2 = emitter(&app);
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            let reviewer = dir_merge::make_reviewer(
+                &base2,
+                &model2,
+                Duration::from_secs(SUGGEST_TIMEOUT_SECS),
+            );
+            dir_merge::scan_report(&facts2, &reviewer, true, "", &mut emit2)
+        })
+        .await;
+        gate.gate.release(model_gate::Owner::Suggest);
+        match res {
+            Ok(r) => r,
+            Err(_) => {
+                let noop: &dir_merge::MergeReviewer = &|_| Err("模型线程异常".to_string());
+                dir_merge::scan_report(&facts, noop, false, "模型线程异常", &mut emitter(&app))
+            }
+        }
+    } else {
+        let noop: &dir_merge::MergeReviewer = &|_| Err("模型不可用".to_string());
+        dir_merge::scan_report(&facts, noop, false, skip_reason, &mut emitter(&app))
+    };
+    Ok(report)
+}
+
+/// 采纳一组同义目录合并：逐份三段式搬移，单批 kind='dir_merge'，可整批撤销。
+#[tauri::command]
+async fn apply_dir_merge(
+    app: AppHandle,
+    req: model::DirMergeApplyReq,
+) -> Result<model::DirMergeApplyAck, CmdError> {
+    if req.candidate_id.trim().is_empty() {
+        return Err(CmdError::new(error::BAD_INPUT, "候选 id 不能为空"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        dir_merge::apply_merge(
+            &mut conn,
+            &root,
+            &req.source_dir_ids,
+            req.target_dir_id,
+            &mut |stage, ms, note| {
+                let _ = app.emit(
+                    "dir-merge-stage",
+                    model::SuggestStage {
+                        stage: stage.to_string(),
+                        elapsed_ms: ms,
+                        note: note.to_string(),
+                    },
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("采纳合并线程异常：{e}")))?
+}
+
+/// 按批次撤销一次同义目录合并（隔离区按哈希校验后还原，不覆盖）。
+#[tauri::command]
+async fn undo_dir_merge(app: AppHandle, migration_id: i64) -> Result<UndoReport, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = lock_db(&state)?;
+        let archive = archive_root_of(&conn)?;
+        let root = PathBuf::from(&archive);
+        dir_merge::undo_merge(&mut conn, &root, migration_id)
+    })
+    .await
+    .map_err(|e| CmdError::new(error::DB, format!("撤销合并线程异常：{e}")))?
+}
+
 // ---------------------------------------------------------------- 正文预览
 
 /// 整理台「看一眼内容」：返回正文摘要（长文截断）/ 图片标记 / 读不出的原因
@@ -1216,14 +1492,14 @@ fn dir_feature_of(
         .iter()
         .map(|s| recommend::DirSeg {
             name: (*s).to_string(),
-            tokens: tag::tokenize(s),
+            tokens: tag::tokenize_for_match(s),
         })
         .collect();
 
     let mut confirmed_tokens: Vec<String> = Vec::new();
     let mut confirmed_files: Vec<Vec<String>> = Vec::new();
     for n in confirmed_names {
-        let toks = tag::tokenize(stem_of(n));
+        let toks = tag::tokenize_for_match(stem_of(n));
         for t in &toks {
             if !confirmed_tokens.contains(t) {
                 confirmed_tokens.push(t.clone());
@@ -1246,7 +1522,7 @@ fn dir_feature_of(
 fn file_feature_of(name: &str, kind: &str, mtime: i64, topic_tags: Vec<String>) -> recommend::FileFeature {
     let stem = stem_of(name).to_string();
     recommend::FileFeature {
-        tokens: tag::tokenize(&stem),
+        tokens: tag::tokenize_for_match(&stem),
         stem,
         kind: kind.to_string(),
         mtime,
@@ -2440,6 +2716,8 @@ fn main() {
             unpark,
             assign_parked,
             drop_file,
+            trash_file,
+            undo_trash,
             undo_decide,
             close_batch,
             migration_preview,
@@ -2461,10 +2739,17 @@ fn main() {
             list_tags,
             delete_tag,
             rename_tag,
+            clean_bad_tags,
             browse_tree,
             browse_dir,
             pool_rows,
-            search_files
+            search_files,
+            dir_health_scan,
+            apply_dir_health,
+            undo_dir_health,
+            dir_merge_scan,
+            apply_dir_merge,
+            undo_dir_merge
         ])
         .run(tauri::generate_context!())
         .expect("应用启动失败");

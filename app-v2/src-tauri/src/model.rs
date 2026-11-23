@@ -114,6 +114,133 @@ pub struct SuggestStage {
     pub note: String,
 }
 
+/// BUG-003 单条目录体检建议
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthIssue {
+    /// 稳定 id：`{kind}:{dirId}`，前端逐条采纳/忽略的键
+    pub id: String,
+    /// rename|merge|move|empty
+    pub kind: String,
+    pub dir_id: i64,
+    pub dir_name: String,
+    pub rel_path: String,
+    /// rename/move 的建议目标 rel_path（empty/merge 可能为 Some）
+    pub target_path: Option<String>,
+    /// 中文依据，必须可解释
+    pub reason: String,
+    /// 0..1
+    pub confidence: f64,
+    /// 影响的已归档文件数
+    pub affected_files: usize,
+    /// rule|model
+    pub source: String,
+}
+
+/// BUG-003 一次目录体检的报告
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthReport {
+    pub issues: Vec<DirHealthIssue>,
+    /// false = 模型不可用/被占用，只有规则初筛
+    pub model_reviewed: bool,
+    /// 降级说明 / 统计
+    pub note: String,
+    pub elapsed_ms: u64,
+}
+
+/// BUG-003 采纳一条 rename/move 后的结果
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthApplyAck {
+    pub migration_id: i64,
+    /// 实际落地的 rel_path（撞名时可能带 _2）
+    pub new_rel_path: String,
+    /// 是否因撞名做了错开
+    pub renamed: bool,
+    pub affected_dirs: usize,
+    pub affected_files: usize,
+}
+
+/// BUG-003 前端请求采纳一条建议
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirHealthApplyReq {
+    pub issue_id: String,
+    pub kind: String,
+    pub dir_id: i64,
+    pub target_path: String,
+}
+
+// ---- BUG-006 同义目录合并 ----
+
+/// 一组同义目录的候选建议
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeCandidate {
+    /// 稳定 id：`dir_merge:{signature}`，前端逐组忽略/采纳的键
+    pub id: String,
+    /// 归一化签名（可解释）
+    pub signature: String,
+    /// 组内全部目录 id
+    pub dir_ids: Vec<i64>,
+    /// 组内全部目录 rel_path
+    pub dir_paths: Vec<String>,
+    /// 待搬空的源目录 id（默认除推荐目标外的全部）
+    pub source_dir_ids: Vec<i64>,
+    /// 待搬空的源目录 rel_path
+    pub source_dir_paths: Vec<String>,
+    /// 默认目标（规则推荐）
+    pub target_dir_id: i64,
+    /// 默认目标 rel_path
+    pub target_path: String,
+    /// 规则推荐的目标 id（用户可改选）
+    pub suggested_target_id: i64,
+    /// 归一化签名 + 差异点
+    pub reason: String,
+    /// 组内文件总数
+    pub file_count: usize,
+    /// 0..1
+    pub confidence: f64,
+    /// rule|model
+    pub source: String,
+}
+
+/// 一次同义合并扫描的报告
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeReport {
+    pub candidates: Vec<DirMergeCandidate>,
+    /// false = 模型不可用/被占用，只有规则初筛
+    pub model_reviewed: bool,
+    /// 降级说明 / 统计
+    pub note: String,
+    pub elapsed_ms: u64,
+}
+
+/// 前端请求采纳一组同义目录合并
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeApplyReq {
+    pub candidate_id: String,
+    pub source_dir_ids: Vec<i64>,
+    pub target_dir_id: i64,
+}
+
+/// 采纳合并后的回执
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMergeApplyAck {
+    pub migration_id: i64,
+    pub affected_files: usize,
+    /// 因目标同名而 `_2` 错开的文件数
+    pub renamed: usize,
+    /// 失败项（显式记录，不静默跳过）
+    pub failed: Vec<MigrationFailure>,
+    pub source_dir_ids: Vec<i64>,
+    pub target_dir_id: i64,
+}
+
 /// 一次扫描的汇总（前端用它显示「已跳过 N 份非资料型文件」，不许静默）
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -393,6 +520,18 @@ pub struct UndoReport {
 pub struct RecatOutcome {
     pub new_path: String,
     pub renamed: bool,
+}
+
+/// BUG-007：删除（移入隔离区）的回执。前端靠 migrationId 走撤销，
+/// dstPath 用来在确认弹窗/提示条里告诉用户原件落在哪。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashOutcome {
+    pub file_id: i64,
+    pub migration_id: i64,
+    pub src_path: String,
+    pub dst_path: String,
+    pub sha256: String,
 }
 
 /// 最近一次迁移（撤销入口）

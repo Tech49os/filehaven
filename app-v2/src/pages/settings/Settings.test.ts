@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import settingsSource from './Settings.vue?raw'
+import type { DirNode } from '../../core/types'
 
 const bootState = vi.fn()
 const listDirs = vi.fn()
@@ -16,6 +18,7 @@ const setWatchEnabled = vi.fn()
 const listTags = vi.fn()
 const deleteTag = vi.fn()
 const renameTag = vi.fn()
+const cleanBadTags = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   bootState,
@@ -31,13 +34,23 @@ vi.mock('../../core/ipc', () => ({
   listTags,
   deleteTag,
   renameTag,
+  cleanBadTags,
   createDir: vi.fn(),
   previewDirName: vi.fn(),
+  dirHealthScan: vi.fn().mockResolvedValue({ issues: [], modelReviewed: true, note: '', elapsedMs: 0 }),
+  applyDirHealth: vi.fn(),
+  undoDirHealth: vi.fn(),
+  // BUG-006：设置页内新增「同义目录合并」卡片
+  dirMergeScan: vi.fn().mockResolvedValue({ candidates: [], modelReviewed: true, note: '', elapsedMs: 0 }),
+  applyDirMerge: vi.fn(),
+  undoDirMerge: vi.fn(),
 }))
 vi.mock('../../core/events', () => ({
   onScanProgress: vi.fn().mockResolvedValue(() => {}),
   onDeepTagProgress: vi.fn().mockResolvedValue(() => {}),
   onFilesFound: vi.fn().mockResolvedValue(() => {}),
+  onDirHealthStage: vi.fn().mockResolvedValue(() => {}),
+  onDirMergeStage: vi.fn().mockResolvedValue(() => {}),
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push, replace: push }) }))
 
@@ -152,6 +165,43 @@ describe('设置页 · 目录结构', () => {
     expect(entry).toBeTruthy()
     await entry!.trigger('click')
     expect(push).toHaveBeenCalledWith('/onboarding/dirs')
+  })
+
+  it('目录体检有自己的首屏入口卡片，不能埋在目录树卡片底部', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const cards = w.findAll('section.card')
+    const health = cards.find((c) => c.text().includes('目录体检'))
+    expect(health, '目录体检应该有独立卡片，而不是拖在目录树末尾').toBeTruthy()
+    // 必须第一张卡：设置页多张卡会互相压缩，放在后面依然要滚动才能看到
+    expect(cards[0].text()).toContain('目录体检')
+    expect(health!.findAll('button').some((b) => b.text().includes('目录体检'))).toBe(true)
+    const tree = cards.find((c) => c.text().includes('AI 建议目录'))
+    expect(tree?.findAll('button').some((b) => b.text().includes('目录体检'))).toBe(false)
+  })
+
+  // BUG-002：设置页与浏览页共用同一默认折叠策略（helper），第 3 层默认折叠
+  it('目录树默认折到第 2 层：第 3 层带子节点的目录 aria-expanded=false', async () => {
+    const node = (id: number, depth: number, children: DirNode[] = []): DirNode => ({
+      id, name: `目录${id}`, relPath: `目录${id}`, depth,
+      origin: 'user', fileCount: 0, children,
+    })
+    listDirs.mockResolvedValue([
+      node(1, 1, [node(2, 2, [node(3, 3, [node(4, 4)])])]),
+    ])
+    const w = mount(Settings)
+    await flushPromises()
+
+    const treeitems = w.findAll('[role="treeitem"][aria-expanded]')
+    const expanded1 = treeitems.filter((n) => n.attributes('aria-expanded') === 'true')
+    const collapsed3 = treeitems.find(
+      (n) => n.text().includes('目录3') && n.attributes('aria-expanded') === 'false',
+    )
+    expect(expanded1.some((n) => n.text().includes('目录1'))).toBe(true)
+    expect(expanded1.some((n) => n.text().includes('目录2'))).toBe(true)
+    expect(collapsed3, '第 3 层应默认折叠').toBeTruthy()
+    // 第 4 层整行不渲染
+    expect(w.text()).not.toContain('目录4')
   })
 })
 
@@ -276,6 +326,7 @@ describe('设置页 · 标签词表', () => {
     listTags.mockReset()
     deleteTag.mockReset()
     renameTag.mockReset()
+    cleanBadTags.mockReset()
   })
 
   it('渲染 user/topic 两类标签 + 使用份数', async () => {
@@ -312,6 +363,26 @@ describe('设置页 · 标签词表', () => {
     // 删掉的行要消失
     expect(names.some((t) => t.includes('安全检查'))).toBe(false)
     expect(w.findAll('.tagrow').length).toBe(1)
+  })
+
+  it('BUG-004：标签词表提供「清理弱标签」入口，调用后刷新列表', async () => {
+    listTags.mockResolvedValue([
+      { id: 11, name: '务要', kind: 'keyword', fileCount: 1 },
+      { id: 12, name: '服务委托书', kind: 'topic', fileCount: 1 },
+    ])
+    cleanBadTags.mockResolvedValue(2)
+    const w = mount(Settings)
+    await flushPromises()
+
+    const btnClean = btn(w, '清理弱标签')
+    expect(btnClean).toBeTruthy()
+    await btnClean!.trigger('click')
+    await flushPromises()
+
+    expect(cleanBadTags).toHaveBeenCalledTimes(1)
+    // 清理命令跑完必须重拉词表，脏标签才会从界面消失
+    expect(listTags).toHaveBeenCalledTimes(2)
+    expect(w.text()).toContain('已清理 2')
   })
 })
 
@@ -371,5 +442,102 @@ describe('设置页 · 图片解读开关', () => {
     const w = mount(Settings)
     await flushPromises()
     expect(w.text()).toContain('队列已停：模型未响应')
+  })
+})
+
+// ------------------------------------------------ BUG-010 设置页抗压缩 + 目录独立滚动
+
+describe('设置页 · BUG-010 卡片抗压缩与目录树独立滚动', () => {
+  /** 4 层 × 每层 3 子节点 = 160 个节点，远超验收要求的 100+ */
+  function bigTree(): DirNode[] {
+    let id = 1
+    const make = (depth: number, idx: number): DirNode => ({
+      id: id++,
+      name: `d${depth}-${idx}`,
+      relPath: `/d${depth}-${idx}`,
+      depth,
+      origin: 'imported',
+      fileCount: 0,
+      children:
+        depth < 4
+          ? [make(depth + 1, idx * 3 + 1), make(depth + 1, idx * 3 + 2), make(depth + 1, idx * 3 + 3)]
+          : [],
+    })
+    return [1, 2, 3, 4].map((i) => make(1, i))
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    bootState.mockReset().mockResolvedValue(boot([{ id: 1, path: 'C:/桌面', enabled: true }]))
+    listDirs.mockReset().mockResolvedValue(bigTree())
+    diskFreeGb.mockReset().mockResolvedValue(120.5)
+    listTags.mockReset().mockResolvedValue([])
+    deepTagStatus.mockReset().mockResolvedValue({
+      done: 0,
+      failed: 0,
+      remaining: 0,
+      current: '',
+      running: false,
+      paused: false,
+      enabled: true,
+      note: null,
+    })
+    push.mockReset()
+  })
+
+  it('红：每张卡片带抗压缩 class，且 .grid > .card 用 flex:0 0 auto 不被压扁', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const cards = w.findAll('section.card')
+    expect(cards.length, '设置页至少 7 张卡（BUG-003 拆出体检卡后为 8 张）').toBeGreaterThanOrEqual(7)
+    for (const c of cards) {
+      expect(c.classes(), '每张卡都要带 settings-card 抗压缩 class').toContain('settings-card')
+    }
+    expect(settingsSource, '必须存在 .grid > .card 规则').toContain('.grid > .card')
+    const gridRule = settingsSource.slice(
+      settingsSource.indexOf('.grid > .card'),
+      settingsSource.indexOf('.grid > .card') + 200,
+    )
+    expect(gridRule, '必须在 .grid > .card 上写 flex:0 0 auto').toContain('flex: 0 0 auto')
+  })
+
+  it('红：目录树有独立滚动容器，max-height/overflow/min-height 只加在容器上', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    expect(w.find('.tree-scroll').exists(), '目录树必须包在独立滚动容器 .tree-scroll 里').toBe(true)
+    expect(settingsSource, '必须存在 .tree-scroll 规则').toContain('.tree-scroll')
+    const scrollRule = settingsSource.slice(
+      settingsSource.indexOf('.tree-scroll'),
+      settingsSource.indexOf('.tree-scroll') + 200,
+    )
+    expect(scrollRule, '.tree-scroll 必须限制 max-height').toContain('max-height: min(360px, 40vh)')
+    expect(scrollRule, '.tree-scroll 必须可滚动').toContain('overflow: auto')
+    expect(scrollRule, 'min-height:0 只加在真正的滚动容器上').toContain('min-height: 0')
+  })
+
+  it('红：目录树加载后第 3 层 id 进 collapsed，其子节点（第 4 层）不渲染', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const names = w.findAll('.row .name').map((n) => n.text())
+    expect(names.some((n) => n.startsWith('d1-')), '第 1 层应渲染').toBe(true)
+    expect(names.some((n) => n.startsWith('d2-')), '第 2 层应渲染').toBe(true)
+    expect(names.some((n) => n.startsWith('d3-')), '第 3 层节点本身仍可见（其子节点被折叠）').toBe(true)
+    expect(names.some((n) => n.startsWith('d4-')), '第 4 层应因第 3 层被折叠而不渲染').toBe(false)
+    const d3Rows = w
+      .findAll('.row')
+      .filter((r) => r.find('.name').exists() && r.find('.name').text().startsWith('d3-'))
+    expect(d3Rows.length).toBeGreaterThan(0)
+    expect(d3Rows.every((r) => r.attributes('aria-expanded') === 'false'), '第 3 层节点都应处于收起态').toBe(true)
+  })
+
+  it('红：100+ 节点时卡片数量与抗压缩结构不退化（真实几何由 CDP 量测）', async () => {
+    const w = mount(Settings)
+    await flushPromises()
+    const cards = w.findAll('section.card')
+    expect(cards.length).toBeGreaterThanOrEqual(7)
+    expect(w.findAll('section.card.settings-card').length, '160 节点下每张卡都要抗压缩').toBe(cards.length)
+    expect(w.find('.tree-scroll').exists()).toBe(true)
+    // 体检入口仍是第一张卡（BUG-003 不可破坏）
+    expect(w.findAll('section.card')[0].text()).toContain('目录体检')
   })
 })

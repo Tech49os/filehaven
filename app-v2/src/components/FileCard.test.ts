@@ -1,6 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import type { BatchItem, FilePreview } from '../core/types'
+import fileCardSource from './FileCard.vue?raw'
+
+/** 从组件源码里取一段 CSS 规则体；happy-dom 没有布局引擎，用 CSS 不变量守住几何规则 */
+function cssRule(css: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = css.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  return m ? m[1] : ''
+}
 
 // Tauri 的 asset 协议在测试里不存在，把它换成一个可断言的假 URL
 vi.mock('@tauri-apps/api/core', () => ({
@@ -53,6 +62,51 @@ function mountCard(preview: FilePreview | null = null) {
   })
 }
 
+/* ---- BUG-001：happy-dom 无真实布局，mock 高度描述符驱动「是否溢出」，用完即恢复 ---- */
+let mockScrollHeight: number | null = null
+let mockClientHeight: number | null = null
+let savedScroll: PropertyDescriptor | undefined
+let savedClient: PropertyDescriptor | undefined
+
+function installLayoutMock() {
+  savedScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+  savedClient = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get() {
+      return mockScrollHeight ?? savedScroll?.get?.call(this) ?? 0
+    },
+  })
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      return mockClientHeight ?? savedClient?.get?.call(this) ?? 0
+    },
+  })
+}
+
+function restoreLayoutMock() {
+  if (savedScroll) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', savedScroll)
+  else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight
+  if (savedClient) Object.defineProperty(HTMLElement.prototype, 'clientHeight', savedClient)
+  else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight
+  mockScrollHeight = null
+  mockClientHeight = null
+  savedScroll = undefined
+  savedClient = undefined
+}
+
+function setLayout(scrollHeight: number, clientHeight: number) {
+  mockScrollHeight = scrollHeight
+  mockClientHeight = clientHeight
+}
+
+/** onMounted/watch 里都有 nextTick 测量，连刷两拍确保 DOM 更新到位 */
+const flush = async () => {
+  await nextTick()
+  await nextTick()
+}
+
 describe('整理台卡片：路径 / 内容 / 打开（2026-11-20 反馈）', () => {
   beforeEach(() => {
     // 模拟应用内环境：有 Tauri 上下文才走 asset 协议
@@ -76,15 +130,17 @@ describe('整理台卡片：路径 / 内容 / 打开（2026-11-20 反馈）', ()
     expect(w.emitted('reveal')).toHaveLength(1)
   })
 
-  it('有正文时直接显示摘要，长得截断的给「展开」', async () => {
-    const w = mountCard(textPreview({ truncated: true }))
-    expect(w.text()).toContain('合同金额：十二万元')
-    const toggle = w.find('.pv-toggle')
-    expect(toggle.exists()).toBe(true)
-    expect(toggle.text()).toContain('展开')
-    await toggle.trigger('click')
-    expect(toggle.text()).toContain('收起')
-    expect(w.find('.pv-text').classes()).toContain('full')
+  it('有正文时直接显示摘要（是否给展开由实测溢出决定，不看 truncated）', async () => {
+    installLayoutMock()
+    try {
+      setLayout(120, 40) // 内容高于可见高度 → 真溢出
+      const w = mountCard(textPreview({ truncated: false }))
+      await flush()
+      expect(w.text()).toContain('合同金额：十二万元')
+      expect(w.find('.pv-toggle').exists()).toBe(true)
+    } finally {
+      restoreLayoutMock()
+    }
   })
 
   it('读不出正文时给一句人话，不留空白框', () => {
@@ -356,5 +412,206 @@ describe('标签 → 检索的跳转（T3.6）', () => {
     expect(w.emitted('tagClick')).toBeUndefined()
     await chip.trigger('click', { ctrlKey: true })
     expect(w.emitted('tagClick')![0]).toEqual([3])
+  })
+})
+
+// ------------------------------------- BUG-001：正文摘要「实际溢出」才给展开入口
+describe('BUG-001：摘要溢出与展开', () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    installLayoutMock()
+  })
+  afterEach(() => {
+    restoreLayoutMock()
+  })
+
+  it('溢出（scrollHeight>clientHeight）时显示展开按钮，即便 truncated=false', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    expect(w.find('.pv-toggle').exists()).toBe(true)
+    expect(w.find('.pv-toggle').text()).toContain('展开全文')
+  })
+
+  it('未溢出时不显示按钮，即便 truncated=true', async () => {
+    setLayout(50, 50)
+    const w = mountCard(textPreview({ truncated: true }))
+    await flush()
+    expect(w.find('.pv-toggle').exists()).toBe(false)
+  })
+
+  it('展开：class 含 full、文案变「收起」；再点恢复 4 行', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('收起')
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).not.toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('展开全文')
+  })
+
+  it('换 file.id 后展开态复位为收起', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).toContain('full')
+
+    await w.setProps({ item: item({ id: 2 }) })
+    await flush()
+    expect(w.find('.pv-text').classes()).not.toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('展开全文')
+  })
+
+  it('图片 / 读不出原因分支不渲染展开按钮', async () => {
+    setLayout(200, 50)
+    const none = mountCard({
+      text: '',
+      truncated: true,
+      reason: 'PDF 这一版不抽正文，直接打开看最快',
+      kind: 'none',
+    })
+    await flush()
+    expect(none.find('.pv-toggle').exists()).toBe(false)
+  })
+
+  it('展开态下 resize 重算不清除溢出标记，仍能收起', async () => {
+    setLayout(200, 50)
+    const w = mountCard(textPreview({ truncated: false }))
+    await flush()
+    await w.find('.pv-toggle').trigger('click')
+    expect(w.find('.pv-text').classes()).toContain('full')
+    expect(w.find('.pv-toggle').text()).toContain('收起')
+
+    // 展开态正文高度 < 220px 时 scrollHeight == clientHeight，模拟 resize 触发重算
+    setLayout(100, 100)
+    window.dispatchEvent(new Event('resize'))
+    await flush()
+    expect(w.find('.pv-toggle').exists()).toBe(true)
+    expect(w.find('.pv-toggle').text()).toContain('收起')
+    expect(w.find('.pv-text').classes()).toContain('full')
+  })
+})
+
+// ------------------------------------- BUG-005：已确认卡片布局加固
+describe('BUG-005 · 已确认卡片布局加固', () => {
+  const longPath = 'D:/归档/很深的一级目录/二级目录/三级目录/四级目录/最终文件.docx'
+
+  function confirmedCard(over: Partial<BatchItem['file']> = {}) {
+    return mount(FileCard, {
+      props: {
+        item: item({ status: 'confirmed', absPath: longPath, ...over }),
+        dirCount: 2,
+        position: { index: 0, total: 3 },
+        preview: null,
+        ack: {
+          fileId: 1,
+          status: 'confirmed',
+          confirmed: 1,
+          targetRelPath: longPath,
+          remainingInPool: 3,
+        },
+      },
+    })
+  }
+
+  it('confirmed：根节点带 done，候选区与判定按钮不渲染，只留删除入口，结果行给长路径 title', () => {
+    const w = confirmedCard()
+    expect(w.find('.card').classes()).toContain('done')
+    // 已确认卡片不再渲染候选区与「确认/暂缓/先放着」按钮；
+    // BUG-007 起保留一个「删除（移入隔离区）」入口
+    expect(w.find('.body').find('*').exists()).toBe(false)
+    expect(w.findAll('.ft .btn')).toHaveLength(1)
+    expect(w.find('.ft .btn').text()).toContain('移入隔离区')
+    expect(w.find('.ft > .hint').exists()).toBe(true)
+    // 结果行的长路径必须有完整 title（这是加固项：原来直接塞在 <b> 里，没有 title）
+    const dest = w.find('.result > .dest')
+    expect(dest.exists()).toBe(true)
+    expect(dest.attributes('title')).toBe(longPath)
+    expect(dest.text()).toContain(longPath)
+  })
+
+  it('长路径结果行最多两行后省略，不靠换行把绿色条撑高', () => {
+    const css = cssRule(fileCardSource, '.result .dest')
+    expect(css, '.dest 必须限制溢出').toMatch(/overflow:\s*hidden/)
+    expect(css, '.dest 必须用 -webkit-box 做两行裁切').toMatch(/-webkit-box-orient:\s*vertical/)
+    expect(css, '.dest 最多两行').toMatch(/-webkit-line-clamp:\s*2/)
+    expect(css, '长路径内部允许断开，避免撑破容器').toMatch(/overflow-wrap:\s*anywhere/)
+    // 外层结果行也必须是可收缩的 flex 子项
+    expect(cssRule(fileCardSource, '.result')).toMatch(/min-width:\s*0/)
+  })
+
+  it('标题区与徽章区分列且各自可收缩：多徽章换行不覆盖文件名/路径', () => {
+    const w = confirmedCard()
+    // DOM 结构上三者互不嵌套，徽章再多也不会长进标题块里
+    expect(w.find('.hd > .nm').exists()).toBe(true)
+    expect(w.find('.hd > .state').exists()).toBe(true)
+    expect(w.find('.hd > .nm > .nameline > .name').exists()).toBe(true)
+    expect(w.find('.hd > .state > .badge.ok').exists()).toBe(true)
+
+    const hd = cssRule(fileCardSource, '.hd')
+    expect(hd, '.hd 用 grid 分列，minmax(0,1fr) 让标题可收缩而不被徽章顶破').toMatch(
+      /grid-template-columns:[^;]*minmax\(0,\s*1fr\)/,
+    )
+    const state = cssRule(fileCardSource, '.state')
+    expect(state, '徽章区需要 max-width 才能在窄窗换行').toMatch(/max-width:\s*\d+%/)
+    expect(state, '徽章区需要 min-width:0 才能作为 grid 子项收缩').toMatch(/min-width:\s*0/)
+    expect(state, '徽章换行后要有行间距').toMatch(/row-gap:\s*\d+px/)
+  })
+
+  it('标题与徽章之间保留 ≥8px 的最小水平间距', () => {
+    const hd = cssRule(fileCardSource, '.hd')
+    const gap = hd.match(/column-gap:\s*(\d+(?:\.\d+)?)px/)
+    expect(gap, '.hd 必须显式声明 column-gap，不能只写 gap').toBeTruthy()
+    expect(parseFloat(gap![1])).toBeGreaterThanOrEqual(8)
+    expect(hd, '换行时也要有行间距').toMatch(/row-gap:\s*\d+px/)
+  })
+
+  it('min-height:0 只给真正的滚动容器，不给被压缩的卡片子项', () => {
+    // 项目踩坑：待迁移曾被压扁溢出。卡片和 .body 都不是滚动容器，不许写 min-height:0
+    expect(cssRule(fileCardSource, '.card')).not.toMatch(/min-height:\s*0/)
+    expect(cssRule(fileCardSource, '.body')).not.toMatch(/min-height:\s*0/)
+  })
+
+  it('长文件名仍单行省略且 title 为完整值（ confirmed 态不退化）', () => {
+    const longName = '2026年度智能工厂平台安全生产大检查暨消防设施专项验收工作情况汇报最终定稿v3.docx'
+    const w = confirmedCard({ name: longName })
+    const name = w.find('.hd > .nm > .nameline > .name')
+    expect(name.text()).toBe(longName)
+    expect(name.attributes('title')).toBe(longName)
+    const nameCss = cssRule(fileCardSource, '.name')
+    expect(nameCss).toMatch(/text-overflow:\s*ellipsis/)
+    expect(nameCss).toMatch(/white-space:\s*nowrap/)
+  })
+})
+
+/* ---- BUG-007：待确认卡片 / 已确认条目都要有「删除（移入隔离区）」入口 ---- */
+describe('BUG-007：删除入口', () => {
+  function mountCard(over: Partial<BatchItem['file']> = {}) {
+    return mount(FileCard, {
+      props: {
+        item: item(over),
+        dirCount: 2,
+        position: { index: 0, total: 1 },
+      },
+    })
+  }
+
+  it('待确认卡片有删除按钮，点击 emit trash', async () => {
+    const w = mountCard()
+    const btn = w.findAll('button').find((b) => /删除|隔离区/.test(b.text()))
+    expect(btn, '待确认卡片必须有删除入口').toBeTruthy()
+    expect(btn!.text()).toContain('移入隔离区')
+    await btn!.trigger('click')
+    expect(w.emitted('trash')).toBeTruthy()
+  })
+
+  it('已确认卡片同样有删除入口，文案禁止「永久删除」', () => {
+    const w = mountCard({ status: 'confirmed' })
+    const btn = w.findAll('button').find((b) => /删除|隔离区/.test(b.text()))
+    expect(btn, '已确认条目也必须有删除入口').toBeTruthy()
+    expect(w.text()).not.toContain('永久删除')
   })
 })

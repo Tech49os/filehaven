@@ -8,7 +8,18 @@ const undoDecide = vi.fn()
 const closeBatch = vi.fn()
 const createDir = vi.fn()
 const saveNote = vi.fn()
-vi.mock('../core/ipc', () => ({ nextBatch, decide, undoDecide, closeBatch, createDir, saveNote }))
+const trashFile = vi.fn()
+const undoTrash = vi.fn()
+vi.mock('../core/ipc', () => ({
+  nextBatch,
+  decide,
+  undoDecide,
+  closeBatch,
+  createDir,
+  saveNote,
+  trashFile,
+  undoTrash,
+}))
 
 const { useBatchStore } = await import('./batch')
 
@@ -154,6 +165,53 @@ describe('batch store（T6.14 判定与焦点）', () => {
     await s.load()
     await s.undo()
     expect(undoDecide).not.toHaveBeenCalled()
+  })
+
+  // ------------------------------------------------ BUG-007：删除（移入隔离区）与撤销
+  it('BUG-007：trash 调 trash_file，成功后从当前批次消失并留下撤销入口', async () => {
+    const s = useBatchStore()
+    await s.load()
+    trashFile.mockReset().mockResolvedValue({
+      fileId: 1,
+      migrationId: 7,
+      srcPath: 'C:/t/文件1.docx',
+      dstPath: 'D:/归档/.filebutler/quarantine/7/文件1.docx',
+      sha256: 'abc',
+    })
+    await s.trash(1)
+    expect(trashFile).toHaveBeenCalledWith(1)
+    expect(s.items.some((i) => i.file.id === 1)).toBe(false)
+    expect(s.canUndoTrash).toBe(true)
+    expect(s.trashUndo?.migrationId).toBe(7)
+  })
+
+  it('BUG-007：trash 失败时不改本地批次（不产生幽灵状态）', async () => {
+    const s = useBatchStore()
+    await s.load()
+    trashFile.mockReset().mockRejectedValue({ code: 'BAD_TRANSITION', message: '状态不允许' })
+    await s.trash(1)
+    expect(s.items.some((i) => i.file.id === 1)).toBe(true)
+    expect(s.canUndoTrash).toBe(false)
+  })
+
+  it('BUG-007：Ctrl+Z 优先走 undo_trash，把文件放回原位', async () => {
+    const s = useBatchStore()
+    await s.load()
+    const original = s.items[0]
+    trashFile.mockReset().mockResolvedValue({
+      fileId: 1,
+      migrationId: 7,
+      srcPath: original.file.absPath,
+      dstPath: 'D:/归档/.filebutler/quarantine/7/文件1.docx',
+      sha256: 'abc',
+    })
+    await s.trash(1)
+    undoTrash.mockReset().mockResolvedValue({ restored: 1, skipped: 0, failed: [] })
+    await s.undo()
+    expect(undoTrash).toHaveBeenCalledWith(7)
+    expect(undoDecide).not.toHaveBeenCalled()
+    expect(s.items.some((i) => i.file.id === 1)).toBe(true)
+    expect(s.canUndoTrash).toBe(false)
   })
 
   it('move 在 0..n-1 之间夹紧，不环绕', async () => {

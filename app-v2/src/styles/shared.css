@@ -1,0 +1,67 @@
+/* ============================================================
+   共享基线（BUG-008）
+   - .btn       全应用唯一的按钮基线；组件里只允许保留场景特化覆盖
+   - .file-entry 整理台 / 待定区 / 待迁移文件条目的统一外壳
+   尺度全部取自 tokens.css，组件不再硬编码字号与内边距
+   ============================================================ */
+
+/* ---- 按钮基线 ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--r-btn);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+  background: var(--c-field);
+  color: var(--c-text);
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+.btn.primary {
+  background: var(--c-primary);
+  color: #fff;
+  box-shadow: var(--sh-primary);
+}
+.btn.ghost {
+  background: var(--c-field);
+  color: var(--c-text);
+  box-shadow: none;
+}
+.btn.small {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---- 文件条目统一外壳 ---- */
+.file-entry {
+  background: var(--c-surface);
+  border: 0.5px solid var(--c-border);
+  border-radius: var(--r-item);
+  padding: var(--pad-row-y) var(--pad-row-x);
+  gap: var(--gap-row);
+}
+.file-entry :is(.name, .fname) {
+  font-size: var(--fs-file-name);
+  line-height: var(--lh-file);
+}
+.file-entry :is(.meta, .sum, .summary, .note, .why, .fsize, .fst) {
+  font-size: var(--fs-meta);
+  line-height: var(--lh-file);
+}
+.file-entry :is(.chip, .tchip, .tag) {
+  font-size: var(--fs-chip);
+  line-height: var(--lh-file);
+}

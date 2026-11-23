@@ -150,7 +150,12 @@ onMounted(load)
     <p v-else-if="loading && items.length === 0" class="hint">正在算候选…</p>
 
     <ul v-else class="list">
-      <li v-for="it in items" :key="it.file.id" class="row" :class="{ busy: busy === it.file.id }">
+      <li
+        v-for="it in items"
+        :key="it.file.id"
+        class="row file-entry"
+        :class="{ busy: busy === it.file.id }"
+      >
         <div class="head">
           <AppIcon name="doc" :size="14" />
           <span class="name ellipsis" :title="it.file.absPath">{{ it.file.name }}</span>
@@ -229,13 +234,9 @@ onMounted(load)
 }
 
 .row {
-  border: 0.5px solid var(--c-border);
-  border-radius: var(--r-card);
-  padding: 12px 14px;
+  /* 规范条目：底色 / 边框 / 圆角 / 内边距 / 间距由全局 .file-entry 统一提供（BUG-008） */
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  background: var(--c-field);
 }
 .row.busy {
   opacity: 0.6;
@@ -250,23 +251,19 @@ onMounted(load)
 }
 
 .name {
-  font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--c-text);
   min-width: 0;
   flex: 1;
 }
 
 .meta {
-  font-size: 11px;
   color: var(--c-text-3);
   flex: 0 0 auto;
 }
 
 .sum {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
   color: var(--c-text);
 }
 .sum.none {
@@ -275,7 +272,6 @@ onMounted(load)
 
 .note {
   margin: 0;
-  font-size: 12px;
   color: var(--c-text-2);
 }
 
@@ -289,14 +285,12 @@ onMounted(load)
   min-width: 0;
 }
 .tchip {
-  font-size: 10.5px;
-  line-height: 1.5;
   padding: 0 7px;
   border-radius: var(--r-pill);
   background: var(--c-field);
   color: var(--c-text-2);
   border: 1px solid transparent;
-  max-width: 150px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -342,9 +336,7 @@ onMounted(load)
 
 .why {
   margin: 0;
-  font-size: 11px;
   color: var(--c-text-3);
-  line-height: 1.5;
 }
 
 .ph {

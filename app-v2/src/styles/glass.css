@@ -1,47 +1,163 @@
 /* ============================================================
-   毛玻璃工具类（P1 用 CSS 毛玻璃，Mica 留 P4）
-   可读性硬约束：毛玻璃区文字必须加底衬或描边
+   全局毛玻璃材质（BUG-011）
+
+   用户裁决：接受 WebView2 每帧合成成本，全局苹果风重做。
+   参数全部来自 tokens.css；框架四层（标题栏 / 侧栏 / 主面板 / 浮层）
+   各自一层半透明材质 + backdrop-filter，模糊半径不同形成纵深。
+   列表每一行故意不接材质（性能与可读性双输，见旧决策记录）。
+
+   两种回退路径，视觉完全一致：
+     1) 用户在设置页关掉「材质效果」→ <html class="no-glass">
+     2) 浏览器不支持 backdrop-filter → @supports not (...)
    ============================================================ */
 
-.glass {
-  background: var(--c-sidebar);
-  backdrop-filter: blur(30px) saturate(180%);
-  -webkit-backdrop-filter: blur(30px) saturate(180%);
+/* ---- 玻璃态（默认，即材质开关开启）---- */
+.glass-frame {
+  background: var(--glass-bg-win);
 }
 
-/* 毛玻璃上的文字底衬：保证深浅壁纸下都能读 */
+.glass-title {
+  background: var(--glass-bg-title);
+  backdrop-filter: blur(var(--glass-blur-title)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-title)) saturate(var(--glass-saturate));
+  border-bottom: 0.5px solid var(--glass-border);
+}
+
+.glass-side {
+  background: var(--glass-bg-side);
+  backdrop-filter: blur(var(--glass-blur-side)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-side)) saturate(var(--glass-saturate));
+  /* design §2：侧栏贯通到顶，无竖向分割亮线——不加 border-right */
+}
+
+.glass-panel {
+  background: var(--glass-bg-panel);
+  backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturate));
+}
+
+/* 浮层：更高不透明度 + 阴影，和底下的框架拉开层级 */
+.glass-float {
+  background: var(--glass-bg-float);
+  backdrop-filter: blur(var(--glass-blur-float)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-float)) saturate(var(--glass-saturate));
+  border: 0.5px solid var(--glass-border);
+  border-radius: var(--r-card);
+  box-shadow: var(--glass-shadow);
+}
+
+/* 材质上的文字底衬：保证深浅底图下正文都能读 */
 .glass-text {
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--glass-text-bg);
   border-radius: 6px;
   padding: 1px 6px;
 }
 
-/* 毛玻璃上的浮层/浮条（命令条、待迁移浮条） */
-.glass-panel {
-  background: rgba(255, 255, 255, 0.82);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
-  border: 0.5px solid var(--c-border-strong);
-  box-shadow: var(--sh-card);
+/* 兼容 P1 留下的通用工具类（当前没有组件直接用，保留给浮层/命令条） */
+.glass {
+  background: var(--glass-bg-side);
+  backdrop-filter: blur(var(--glass-blur-side)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-side)) saturate(var(--glass-saturate));
+}
+.glass-panel-legacy {
+  background: var(--glass-bg-float);
+  backdrop-filter: blur(var(--glass-blur-float)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-float)) saturate(var(--glass-saturate));
+  border: 0.5px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
 }
 
-/* 焦点环：Apple 蓝 2px 外发光 */
-.focus-ring {
-  outline: 2px solid var(--c-primary);
-  outline-offset: 2px;
-  box-shadow: 0 0 0 4px var(--c-primary-glow);
-}
-
-/* 列表卡片不用毛玻璃（性能与可读性双输） */
+/* 列表卡片不用毛玻璃：逐行 backdrop-filter 性能与可读性双输，
+   用户要的「全局风」是窗口框架层的连贯材质，不是逐行模糊。 */
 .list-surface {
   background: var(--c-surface);
   border: 0.5px solid var(--c-border);
   border-radius: var(--r-card);
 }
 
-/* 正文可读性底线：≥13px / 行高 1.6 */
+.focus-ring {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--c-primary-glow);
+}
+
 .readable {
   font-size: 13px;
   line-height: 1.6;
   color: var(--c-text);
+}
+
+/* ------------------------------------------------------------
+   回退 1：用户主动关闭材质（设置页开关，默认开）
+   规则与下方 @supports 回退保持一致：完整实色，无 blur、无阴影叠加。
+   ------------------------------------------------------------ */
+html.no-glass .glass-frame {
+  background: var(--c-bg);
+}
+html.no-glass .glass-title {
+  background: var(--c-titlebar);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-bottom: 0.5px solid var(--c-border);
+}
+html.no-glass .glass-side {
+  background: var(--c-sidebar);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  /* 与材质态一致：无竖向分割亮线 */
+}
+html.no-glass .glass-panel {
+  background: var(--c-surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html.no-glass .glass-float {
+  background: var(--c-surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 0.5px solid var(--c-border);
+  box-shadow: var(--sh-card);
+}
+html.no-glass .glass-text {
+  background: transparent;
+  padding: 0;
+}
+html.no-glass .glass,
+html.no-glass .glass-panel-legacy {
+  background: var(--c-surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ------------------------------------------------------------
+   回退 2：WebView2 / 浏览器不支持 backdrop-filter
+   ------------------------------------------------------------ */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-frame {
+    background: var(--c-bg);
+  }
+  .glass-title {
+    background: var(--c-titlebar);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .glass-side {
+    background: var(--c-sidebar);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .glass-panel,
+  .glass-float,
+  .glass,
+  .glass-panel-legacy {
+    background: var(--c-surface);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 0.5px solid var(--c-border);
+    box-shadow: var(--sh-card);
+  }
+  .glass-text {
+    background: transparent;
+    padding: 0;
+  }
 }

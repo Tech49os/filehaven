@@ -20,7 +20,7 @@ import * as ipc from '../../core/ipc'
 import { useAppStore } from '../../stores/app'
 import { useBatchStore } from '../../stores/batch'
 import { useDirsStore } from '../../stores/dirs'
-import type { FilePreview } from '../../core/types'
+import type { BatchItem, FilePreview } from '../../core/types'
 
 const router = useRouter()
 const app = useAppStore()
@@ -61,6 +61,67 @@ const pendingCount = computed(
 
 /** 刚重算完的一句话反馈（别弹窗，就一行小字） */
 const rescoreNote = ref<string | null>(null)
+
+/* ---- BUG-007：删除 = 移入隔离区（二次确认 + 成功提示里的撤销入口） ---- */
+interface TrashTarget {
+  fileId: number
+  name: string
+  absPath: string
+  relPath: string
+}
+const trashTarget = ref<TrashTarget | null>(null)
+const trashNotice = ref<{ name: string; migrationId: number } | null>(null)
+
+/** 与后端 plan::quarantine_path 同一布局；这里只做展示，真正落点以后端回执为准 */
+const trashTargetPath = computed(() => {
+  const t = trashTarget.value
+  if (!t) return ''
+  const root = (app.archiveRoot ?? '').replace(/[\\/]+$/, '')
+  if (!root) return '（尚未配置归档根）'
+  const rel = t.relPath || t.name
+  return `${root}/.filebutler/quarantine/${store.batchId}/${rel}`
+})
+
+function askTrash(it: BatchItem) {
+  trashTarget.value = {
+    fileId: it.file.id,
+    name: it.file.name,
+    absPath: it.file.absPath,
+    relPath: it.file.relPath,
+  }
+}
+
+function askTrashCurrent() {
+  if (store.current) askTrash(store.current)
+}
+
+function cancelTrash() {
+  trashTarget.value = null
+}
+
+async function confirmTrash() {
+  const t = trashTarget.value
+  if (!t) return
+  trashTarget.value = null
+  await run(async () => {
+    const out = await store.trash(t.fileId)
+    if (out) trashNotice.value = { name: t.name, migrationId: out.migrationId }
+  })
+}
+
+async function undoTrash() {
+  const n = trashNotice.value
+  if (!n) return
+  if (await store.undoTrash(n.migrationId)) trashNotice.value = null
+}
+
+// Ctrl+Z 走 store.undo() 时也会清掉 trashUndo；提示条跟着消失，不留给已撤销的删除
+watch(
+  () => store.trashUndo,
+  (rec) => {
+    if (!rec) trashNotice.value = null
+  },
+)
 
 /**
  * 全库还剩多少份没定去向（排队 + 已标签 + 待确认）。
@@ -158,6 +219,11 @@ async function onKey(e: KeyboardEvent) {
     case 'undo':
       e.preventDefault()
       await store.undo()
+      break
+    case 'trash':
+      // BUG-007：Delete 只负责弹二次确认，取消就不写任何东西
+      e.preventDefault()
+      askTrashCurrent()
       break
     case 'open':
       e.preventDefault()
@@ -405,6 +471,7 @@ function goSuggest() {
           @new-dir="store.openInput()"
           @defer="run(() => store.defer())"
           @park="run(() => store.park())"
+          @trash="askTrashCurrent"
           @open="openCurrent"
           @reveal="revealCurrent"
           @rename="onRename"
@@ -427,6 +494,7 @@ function goSuggest() {
           <span><kbd>N</kbd> 新建目录</span>
           <span><kbd>S</kbd> 暂缓</span>
           <span><kbd>P</kbd> 先放着</span>
+          <span><kbd>Del</kbd> 删除（移入隔离区）</span>
           <span><kbd>↑</kbd><kbd>↓</kbd> 换一份</span>
           <span><kbd>O</kbd> 打开</span>
           <span><kbd>L</kbd> 定位</span>
@@ -441,6 +509,11 @@ function goSuggest() {
           <li v-for="it in store.confirmedList" :key="it.file.id" class="drow">
             <AppIcon name="check" :size="12" />
             <span class="dname ellipsis" :title="it.file.name">{{ it.file.name }}</span>
+            <button
+              class="dtrash"
+              title="移入隔离区，可撤销（Delete）；原文件可取回"
+              @click="askTrash(it)"
+            >删除</button>
           </li>
           <li v-if="store.confirmedList.length === 0" class="none">还没确认任何一份</li>
         </TransitionGroup>
@@ -486,6 +559,30 @@ function goSuggest() {
       </button>
       <button v-else class="btn" @click="router.push('/settings')">去设置里扫描</button>
     </EmptyState>
+
+    <!-- BUG-007：删除（移入隔离区）二次确认。取消零写操作；文案写明落点与可撤销性 -->
+    <div v-if="trashTarget" class="dlg-mask" @click.self="cancelTrash">
+      <div class="dlg" role="dialog" aria-modal="true" aria-label="确认移入隔离区">
+        <h3>删除（移入隔离区）</h3>
+        <p>
+          确认把「<b>{{ trashTarget.name }}</b>」移入隔离区吗？
+        </p>
+        <p class="dlg-dest">目标路径：{{ trashTargetPath }}</p>
+        <p class="dlg-tip">文件将移入隔离区，可撤销；取消则不执行任何操作。</p>
+        <div class="dlg-acts">
+          <button class="btn" @click="cancelTrash">取消</button>
+          <button class="btn primary" @click="confirmTrash">确认移入隔离区</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- BUG-007：删除成功提示，撤销入口直通 undo_trash -->
+    <div v-if="trashNotice" class="trash-notice" role="status">
+      <AppIcon name="check" :size="14" />
+      <span>已将「{{ trashNotice.name }}」移入隔离区，可撤销</span>
+      <button class="btn small" @click="undoTrash">撤销</button>
+      <button class="btn small" @click="trashNotice = null">关闭</button>
+    </div>
 
     <!-- 完成提示条：非模态，不挡手（详设 §8.3） -->
     <div v-if="store.allDone && store.total > 0" class="donebar">
@@ -699,12 +796,15 @@ h3.mt {
   white-space: nowrap;
 }
 
+/* BUG-005：固定行高下限 + 不参与 flex 伸缩 → 2 条与 10 条行高完全一致 */
 .drow {
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr);
   align-items: center;
   column-gap: 6px;
   padding: 4px 6px;
+  min-height: 24px;
+  flex: 0 0 auto;
   font-size: 12px;
   color: var(--c-success-deep);
 }
@@ -783,30 +883,6 @@ kbd {
   color: var(--c-text-2);
 }
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 6px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
-.btn.primary {
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-}
-.btn.small {
-  padding: 4px 10px;
-}
-.btn:disabled {
-  opacity: 0.55;
-}
-
 .err {
   margin: 0;
   padding: 8px 12px;
@@ -844,5 +920,84 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- BUG-007：删除二次确认 / 成功提示 / 行内删除入口 ---- */
+.dlg-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.36);
+}
+.dlg {
+  width: min(520px, calc(100vw - 40px));
+  background: var(--c-surface);
+  border: 0.5px solid var(--c-border);
+  border-radius: var(--r-card);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dlg h3 {
+  font-size: 15px;
+  color: var(--c-text);
+}
+.dlg p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--c-text);
+  line-height: 1.6;
+}
+.dlg-dest {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px !important;
+  color: var(--c-text-2) !important;
+  word-break: break-all;
+  padding: 8px 10px;
+  border-radius: var(--r-item);
+  background: var(--c-field);
+}
+.dlg-tip {
+  color: var(--c-text-2) !important;
+  font-size: 12px !important;
+}
+.dlg-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+.trash-notice {
+  position: sticky;
+  bottom: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-radius: var(--r-banner);
+  background: var(--c-surface);
+  border: 0.5px solid var(--c-border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+}
+.trash-notice .btn:first-of-type {
+  margin-left: auto;
+}
+.dtrash {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  padding: 0 3px;
+  font-size: 10px;
+  font-family: var(--font);
+  color: var(--c-text-3);
+}
+.dtrash:hover {
+  color: var(--c-danger);
 }
 </style>

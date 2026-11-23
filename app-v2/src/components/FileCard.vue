@@ -9,7 +9,7 @@
  * 1. 完整绝对路径单独一行 —— 之前它挤在「大小·类型·时间·路径」那行末尾，被省略成只剩文件名；
  * 2. 正文摘要 / 图片缩略图 + 「打开」「定位」。判定一份 `扫描件001.pdf` 靠文件名是不行的。
  */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CandidateList from './CandidateList.vue'
 import { formatSize, iconOf, kindLabel, relativeTime } from '../core/format'
@@ -38,6 +38,8 @@ const emit = defineEmits<{
   (e: 'newDir'): void
   (e: 'defer'): void
   (e: 'park'): void
+  /** BUG-007：删除（移入隔离区，可撤销） */
+  (e: 'trash'): void
   (e: 'open'): void
   (e: 'reveal'): void
   /** 归档时改的名字；空串 = 恢复原名 */
@@ -73,6 +75,54 @@ const targetPath = computed(() => {
 
 /** 摘要默认只显示 4 行，够判断「这是哪一单」，又不会把候选和按钮顶出屏幕 */
 const expanded = ref(false)
+/** 实测 .pv-text 是否被 CSS 裁掉：按钮出现与否只认这个，不认后端 truncated */
+const textOverflowed = ref(false)
+const textEl = ref<HTMLElement | null>(null)
+
+function measureOverflow() {
+  // 展开态的高度已不是「4 行裁切」语义，不能用它覆盖已测得的溢出标记，否则「收起」会消失
+  if (expanded.value) return
+  const el = textEl.value
+  textOverflowed.value = !!el && el.scrollHeight > el.clientHeight
+}
+
+let resizeObserver: ResizeObserver | null = null
+/** happy-dom 没有 ResizeObserver：只在真实环境挂，窗口 resize 兜底 */
+function syncObserver() {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (typeof ResizeObserver !== 'undefined' && textEl.value) {
+    resizeObserver = new ResizeObserver(() => measureOverflow())
+    resizeObserver.observe(textEl.value)
+  }
+}
+/** DOM 更新后再量一次并同步监听目标 */
+function remeasure() {
+  measureOverflow()
+  syncObserver()
+}
+const onWindowResize = () => measureOverflow()
+
+onMounted(() => {
+  void nextTick(remeasure)
+  window.addEventListener('resize', onWindowResize)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
+
+/** 换文件 / 换了正文：收起并重新测量，不残留上一份的展开态 */
+watch(
+  () => [props.item.file.id, props.preview?.kind, props.preview?.text] as const,
+  () => {
+    expanded.value = false
+    textOverflowed.value = false
+    void nextTick(remeasure)
+  },
+)
+
 const thumb = computed(() =>
   props.preview?.kind === 'image' ? imageSrc(livePath(f.value)) : '',
 )
@@ -150,7 +200,7 @@ function cancelRename() {
 </script>
 
 <template>
-  <article class="card" :class="{ done: confirmed, aside: handledElsewhere }">
+  <article class="card file-entry" :class="{ done: confirmed, aside: handledElsewhere }">
     <header class="hd">
       <div class="ico"><AppIcon :name="iconOf(f.kind)" :size="18" /></div>
       <div class="nm">
@@ -279,13 +329,13 @@ function cancelRename() {
         </button>
         <p v-else class="pv-none">图片预览只在应用内可用，直接打开看</p>
       </template>
-      <p v-else-if="preview.kind === 'text'" class="pv-text" :class="{ full: expanded }">
+      <p v-else-if="preview.kind === 'text'" ref="textEl" class="pv-text" :class="{ full: expanded }">
         {{ preview.text }}
       </p>
       <p v-else class="pv-none">{{ preview.reason }}</p>
 
       <button
-        v-if="preview.kind === 'text' && preview.truncated"
+        v-if="preview.kind === 'text' && textOverflowed"
         class="pv-toggle"
         @click="expanded = !expanded"
       >
@@ -296,7 +346,10 @@ function cancelRename() {
 
     <p v-if="confirmed" class="result">
       <AppIcon name="check" :size="13" />
-      已归到 <b>{{ targetPath ?? '所选目录' }}</b>
+      <!-- BUG-005：长路径单独成块，两行后省略；title 永远是完整值 -->
+      <span class="dest" :title="targetPath ?? '所选目录'">
+        已归到 <b>{{ targetPath ?? '所选目录' }}</b>
+      </span>
       <span v-if="f.targetName" class="as">存为 {{ f.targetName }}</span>
     </p>
     <p v-else-if="handledElsewhere" class="result dim">
@@ -348,6 +401,17 @@ function cancelRename() {
       >
         <span class="kbd">P</span> 先放着
       </button>
+      <!-- BUG-007：待确认 / 已确认都能删。文案只说「移入隔离区，可撤销」，
+           由 Workspace 的二次确认真正执行 -->
+      <button
+        v-if="!handledElsewhere"
+        class="btn trash-btn"
+        :disabled="busy"
+        title="移入隔离区，可撤销（Delete）；原文件可取回"
+        @click="emit('trash')"
+      >
+        <span class="kbd">Del</span> 删除（移入隔离区）
+      </button>
       <span v-if="confirmed || handledElsewhere" class="hint">按 ↓ 看下一份，Ctrl+Z 撤销</span>
     </footer>
   </article>
@@ -357,15 +421,9 @@ function cancelRename() {
 .card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  background: var(--c-surface);
-  border: 0.5px solid var(--c-border);
-  border-radius: var(--r-card);
+  /* 底色 / 边框 / 圆角 / 内边距 / 间距 / 字号统一由全局 .file-entry + tokens 提供（BUG-008） */
   box-shadow: var(--sh-card);
-  /* 2026-11-20 反馈：「文字和边框间的距离有问题」—— 20/22 让内容离开边框，
-     同时卡片按内容高度收（不再拉满），下面那一大片空就没有了 */
-  padding: 20px 22px;
-  min-height: 0;
+  /* BUG-005：卡片不是滚动容器，不给它设最小高度为 0（项目踩坑：子项被压扁溢出） */
   /* 换一份文件 = 组件重挂（key 变了），这一下淡入就是「换张卡」的反馈 */
   animation: card-in var(--dur) var(--ease-out) both;
   transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
@@ -388,10 +446,14 @@ function cancelRename() {
   border-color: rgba(255, 149, 0, 0.3);
 }
 
+/* BUG-005：图标 / 标题 / 徽章分列。标题列 minmax(0,1fr) 保证长名省略而不被徽章顶破，
+   徽章列封顶 45% 迫使多徽章换行；显式 column-gap 保住标题与徽章的最小间距 */
 .hd {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) minmax(0, 45%);
+  align-items: start;
+  column-gap: 12px;
+  row-gap: 6px;
 }
 
 .ico {
@@ -412,9 +474,7 @@ function cancelRename() {
 
 .name {
   margin: 0;
-  font-size: 15px;
   font-weight: 600;
-  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -513,7 +573,6 @@ function cancelRename() {
 
 .meta {
   margin: 3px 0 0;
-  font-size: 12px;
   color: var(--c-text-2);
   display: flex;
   align-items: center;
@@ -530,7 +589,7 @@ function cancelRename() {
 }
 
 .tag {
-  font-size: 11px;
+  font-size: var(--fs-chip);
   padding: 1px 7px;
   border-radius: var(--r-pill);
   min-width: 0;
@@ -546,8 +605,12 @@ function cancelRename() {
   display: flex;
   align-items: center;
   gap: 6px;
+  row-gap: 4px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-content: start;
+  min-width: 0;
+  max-width: 45%;
   flex: 0 0 auto;
 }
 
@@ -648,8 +711,6 @@ function cancelRename() {
   display: flex;
   align-items: flex-start;
   gap: 5px;
-  font-size: 12.5px;
-  line-height: 1.7;
   color: var(--c-text-2);
   min-width: 0;
 }
@@ -671,8 +732,6 @@ function cancelRename() {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
-  line-height: 1.5;
   padding: 1px 8px;
   border-radius: var(--r-pill);
   background: var(--c-field);
@@ -767,6 +826,8 @@ function cancelRename() {
   overflow: hidden;
 }
 .pv-text.full {
+  /* -webkit-box + overflow:auto 在 WebView2 里滚不动，展开态改成普通块级 */
+  display: block;
   -webkit-line-clamp: unset;
   overflow: auto;
   max-height: 220px;
@@ -806,6 +867,9 @@ function cancelRename() {
   display: flex;
   align-items: center;
   gap: 6px;
+  row-gap: 2px;
+  flex-wrap: wrap;
+  min-width: 0;
   margin: 0;
   padding: 9px 12px;
   border-radius: var(--r-banner);
@@ -813,6 +877,20 @@ function cancelRename() {
   color: var(--c-success-deep);
   font-size: 13px;
   animation: result-in var(--dur) var(--ease-out) both;
+}
+/* BUG-005：归档路径最多两行后省略，绝不把绿色结果行撑成一大块 */
+.result .dest {
+  min-width: 0;
+  flex: 1 1 60%;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: var(--lh-file);
+}
+.result .dest b {
+  font-weight: 600;
 }
 @keyframes result-in {
   from {
@@ -838,9 +916,7 @@ function cancelRename() {
   white-space: nowrap;
 }
 
-.body {
-  min-height: 0;
-}
+/* BUG-005：.body 不是滚动容器，删掉 min-height:0，避免候选区被压扁溢出 */
 
 .ft {
   display: flex;
@@ -850,27 +926,6 @@ function cancelRename() {
   border-top: 0.5px solid var(--c-border);
   padding-top: 12px;
   margin-top: auto;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 7px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
-.btn.primary {
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-}
-.btn:disabled {
-  opacity: 0.55;
 }
 
 .kbd {
@@ -893,11 +948,11 @@ function cancelRename() {
   color: var(--c-text-3);
 }
 
-/* 窗口不高时，卡片自己先松一档内边距，把空间让给内容 */
-@media (max-height: 800px) {
-  .card {
-    padding: 16px 18px;
-    gap: 10px;
-  }
+/* BUG-007：删除入口压暗但常驻 —— 用危险色提示后果，又不像主按钮那样诱导误点 */
+.trash-btn {
+  color: var(--c-danger);
+}
+.trash-btn:hover {
+  background: var(--c-danger-bg);
 }
 </style>

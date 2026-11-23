@@ -1,0 +1,238 @@
+/**
+ * 块① Finder 式窗口框架（红→绿）
+ *
+ * 源码级契约 + 组件挂载断言：窗口灯、拖拽热区、尺寸 token、
+ * Sidebar 材质归属、检索胶囊、掩膜 alpha。真机 CDP 量测不在这里。
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import tokens from './styles/tokens.css?raw'
+import appWindow from './components/AppWindow.vue?raw'
+import sidebar from './components/Sidebar.vue?raw'
+import appSource from './App.vue?raw'
+import glassCss from './styles/glass.css?raw'
+// 窗口配置走 JSON 导入（项目无 @types/node，测试里不用 node:fs）
+import tauriConf from '../src-tauri/tauri.conf.json'
+
+/** getCurrentWindow() 的三个窗口操作，用 hoisted 保证 mock 工厂拿得到 */
+const winMocks = vi.hoisted(() => ({
+  close: vi.fn(),
+  minimize: vi.fn(),
+  toggleMaximize: vi.fn(),
+}))
+
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => winMocks }))
+
+// App.vue 在「检索胶囊」用例里只验证 slot 与点击派发，依赖全部给最小实现
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ meta: {}, path: '/workspace' }),
+  useRouter: () => ({ replace: vi.fn() }),
+}))
+vi.mock('./stores/app', () => ({
+  useAppStore: () => ({ ready: true, configured: true, error: '', refreshBoot: vi.fn() }),
+}))
+vi.mock('./stores/ui', () => ({
+  useUiStore: () => ({ glassEnabled: true }),
+}))
+
+const AppWindow = (await import('./components/AppWindow.vue')).default
+const App = (await import('./App.vue')).default
+
+function tokenMap(css: string) {
+  return new Map(
+    [...css.matchAll(/^\s*(--[\w-]+):\s*([^;]+);/gm)].map((m) => [m[1], m[2].trim()]),
+  )
+}
+
+/** AppWindow 的 isTauri 守卫在 setup 时读这个全局，挂载前先放好 */
+function fakeTauri() {
+  ;(window as unknown as { __TAURI_INTERNALS__?: Record<string, unknown> }).__TAURI_INTERNALS__ = {}
+}
+
+async function mountWindow(withSide = true) {
+  return mount(AppWindow, {
+    slots: {
+      ...(withSide ? { side: '<div class="fake-side" />' } : {}),
+      tail: '<button class="fake-tail" />',
+      default: '<div class="fake-body" />',
+    },
+  })
+}
+
+describe('块① · 窗口灯与右上角三键', () => {
+  beforeEach(() => {
+    fakeTauri()
+    winMocks.close.mockClear()
+    winMocks.minimize.mockClear()
+    winMocks.toggleMaximize.mockClear()
+  })
+
+  it('三个灯是 button，分别调用 close / minimize / toggleMaximize', async () => {
+    expect(appWindow).not.toMatch(/winbtns/)
+    const w = await mountWindow()
+    expect(w.find('.winbtns').exists()).toBe(false)
+
+    const lamps = w.findAll('.lamp')
+    expect(lamps).toHaveLength(3)
+    expect(lamps.map((l) => l.attributes('aria-label'))).toEqual([
+      '关闭窗口',
+      '最小化窗口',
+      '最大化或还原窗口',
+    ])
+    expect(lamps.map((l) => l.attributes('title'))).toEqual(['关闭', '最小化', '最大化/还原'])
+
+    await lamps[0].trigger('click')
+    expect(winMocks.close).toHaveBeenCalledTimes(1)
+    await lamps[1].trigger('click')
+    expect(winMocks.minimize).toHaveBeenCalledTimes(1)
+    await lamps[2].trigger('click')
+    expect(winMocks.toggleMaximize).toHaveBeenCalledTimes(1)
+  })
+
+  it('rail 与标题栏是拖拽区，灯按钮本身不是', async () => {
+    const w = await mountWindow()
+    expect(w.find('.side-rail').attributes('data-tauri-drag-region')).not.toBeUndefined()
+    expect(w.find('.titlebar').attributes('data-tauri-drag-region')).not.toBeUndefined()
+    for (const lamp of w.findAll('.lamp')) {
+      expect(lamp.attributes('data-tauri-drag-region')).toBeUndefined()
+    }
+  })
+
+  it('showSide 缺省时 rail 不渲染（用 $slots.side 判断）', async () => {
+    const w = await mountWindow(false)
+    expect(w.find('.side-rail').exists()).toBe(false)
+    expect(w.find('.titlebar').exists()).toBe(true)
+  })
+})
+
+describe('块① · 尺寸与材质归属', () => {
+  it('rail 宽取 --side-width(224px)，标题栏高取 --titlebar-h(52px)', () => {
+    const defs = tokenMap(tokens)
+    expect(defs.get('--side-width')).toBe('224px')
+    expect(defs.get('--titlebar-h')).toBe('52px')
+    expect(appWindow).toMatch(/var\(--side-width\)/)
+    expect(appWindow).toMatch(/var\(--titlebar-h\)/)
+  })
+
+  it('Sidebar 根不再自带 glass-side 与固定宽度/媒体查询', () => {
+    expect(sidebar).toMatch(/<div class="side">/)
+    expect(sidebar).not.toMatch(/glass-side/)
+    expect(sidebar).not.toMatch(/@media/)
+    // 只查根 .side 块：其余 width 是角标/状态点，不在禁用范围
+    const rootBlock = sidebar.match(/\.side\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rootBlock).not.toMatch(/width/)
+  })
+
+  it('rail 唯一挂 glass-side，标题栏挂 glass-title，主面板由 App.vue 挂', () => {
+    expect(appWindow).toMatch(/class="side-rail glass-side"/)
+    expect(appWindow).toMatch(/class="titlebar glass-title"/)
+    expect(appSource).toMatch(/class="main glass-panel"/)
+    expect(appWindow).not.toMatch(/class="body glass-panel"/)
+  })
+})
+
+describe('块① · 快速检索胶囊与掩膜 token', () => {
+  it('胶囊可见可点，文案含 Ctrl K，点击派发 Ctrl+K 键盘事件', async () => {
+    expect(appSource).toMatch(/#tail/)
+    const RouterViewStub = {
+      template: '<div class="router-view-stub"><slot :Component="Page" /></div>',
+      setup() {
+        return { Page: { template: '<div class="page-stub" />' } }
+      },
+    }
+    const w = mount(App, {
+      global: {
+        stubs: {
+          Sidebar: true,
+          SearchPanel: true,
+          RouterView: RouterViewStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const pill = w.find('.quick-search')
+    expect(pill.exists()).toBe(true)
+    expect(pill.text()).toContain('Ctrl K')
+
+    const seen: KeyboardEvent[] = []
+    const spy = (e: KeyboardEvent) => seen.push(e)
+    window.addEventListener('keydown', spy)
+    await pill.trigger('click')
+    window.removeEventListener('keydown', spy)
+    expect(seen.some((e) => e.ctrlKey && e.key.toLowerCase() === 'k')).toBe(true)
+  })
+
+  it('--c-mask 已定义且 alpha 在 0.14~0.18', () => {
+    const mask = tokenMap(tokens).get('--c-mask')
+    expect(mask, '--c-mask 必须在 tokens.css 定义').toBeTruthy()
+    const m = mask!.match(/rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)/)
+    expect(m, '--c-mask 必须是 rgba(...)').toBeTruthy()
+    const alpha = parseFloat(m![1])
+    expect(alpha).toBeGreaterThanOrEqual(0.14)
+    expect(alpha).toBeLessThanOrEqual(0.18)
+  })
+
+  it('侧栏无竖向分割亮线：材质态与实色回退态都不带 border-right', () => {
+    // design §2：侧栏从窗口顶贯通到底，「无断层、无竖向分割亮线」。
+    // BUG-011 遗留的 border-right 会让贯通侧栏右缘出现一条白线，两处回退都要去掉。
+    const blocks = [
+      ...glassCss.matchAll(/\.glass-side\s*\{([^}]*)\}/g),
+      ...glassCss.matchAll(/html\.no-glass\s+\.glass-side\s*\{([^}]*)\}/g),
+    ]
+    expect(blocks.length, 'glass.css 应含材质态与实色回退态两条 .glass-side 规则').toBeGreaterThanOrEqual(2)
+    for (const [, body] of blocks) {
+      expect(body, '.glass-side 不应有 border-right（竖向分割亮线）').not.toMatch(/border-right\s*:/)
+    }
+  })
+
+  it('窗口圆角必须 ≥24px：14px 时四角会露出直角（真机实测）', () => {
+    // 真机现象：--r-window:14px 时窗口左上角是直角、圆角外还有一圈白边。
+    // 根因：.side-rail/.titlebar 带 backdrop-filter，会独立合成，
+    // 祖先的 border-radius+overflow:hidden 裁不掉它们；14px 的圆弧太小，
+    // 盖不住这些直角矩形。实测 16/18/20/22 仍有残留，24px 才完全干净。
+    const r = tokenMap(tokens).get('--r-window')
+    expect(r, '--r-window 必须在 tokens.css 定义').toBeTruthy()
+    const px = parseFloat(r!)
+    expect(px, `--r-window 应 >= 24px（当前 ${r}），否则窗口四角露直角`).toBeGreaterThanOrEqual(24)
+  })
+
+  it('顶部两层材质各自带对应圆角，不依赖祖先裁剪', () => {
+    // 光放大 --r-window 不够稳：一旦有人改小，直角又会回来。
+    // 让贴窗口边的材质层自己带同半径圆角，才是根治。
+    // 侧栏：左上 + 左下；标题栏：右上；主面板底衬：右下。
+    expect(appWindow, '侧栏 rail 应自带左上/左下圆角').toMatch(
+      /\.side-rail\s*\{[^}]*border-top-left-radius\s*:\s*var\(--r-window\)/s,
+    )
+    expect(appWindow, '侧栏 rail 应自带左下圆角').toMatch(
+      /\.side-rail\s*\{[^}]*border-bottom-left-radius\s*:\s*var\(--r-window\)/s,
+    )
+    expect(appWindow, '标题栏应自带右上圆角').toMatch(
+      /\.titlebar\s*\{[^}]*border-top-right-radius\s*:\s*var\(--r-window\)/s,
+    )
+  })
+
+  it('没有侧栏时（引导页）标题栏横跨全宽，左上也要有圆角', () => {
+    // 引导页 route.meta.sidebar=false → 不传 #side slot → 无 rail，
+    // 标题栏从窗口最左开始。此时只剩右上圆角，左上会露直角。
+    // 真机实测：onboarding 页 titlebar 从 x=1 起、borderTopLeftRadius=0px。
+    expect(appWindow, '无侧栏时标题栏左上角也必须有圆角').toMatch(
+      /\.win\s*\.no-side[^{]*\.titlebar\s*\{[^}]*border-top-left-radius\s*:\s*var\(--r-window\)/s,
+    )
+  })
+
+  it('窗口必须关闭系统阴影：shadow 会让 tao 把窗口外扩 8px', () => {
+    // 真机实测：WindowRect 1176x749 vs ClientRect 1160x740，
+    // 左右各 8px、下 8px、上 1px 属于窗口但没有任何内容；
+    // 透明窗口下这圈直接显示为灰色阴影带（用户说的「透明的边」）。
+    // 来源是 tao 的 undecorated shadow：为画投影把窗口向外扩；
+    // 关掉 shadow 后窗口矩形回到客户区，边缘干净。
+    const win = tauriConf.app.windows[0]
+    expect(win.transparent, '窗口必须保持透明（毛玻璃采样需要）').toBe(true)
+    expect(win.decorations, '窗口必须无系统边框').toBe(false)
+    expect(
+      win.shadow,
+      'shadow:true 时 tao 把窗口外扩 8px 画阴影，透明窗口下露出灰色阴影带；必须设 false',
+    ).toBe(false)
+  })
+})

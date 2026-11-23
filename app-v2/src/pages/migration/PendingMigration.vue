@@ -164,7 +164,7 @@ async function reload() {
             <span class="gmeta">{{ g.files.length }} 份 · {{ formatSize(g.bytes) }}</span>
           </header>
           <ul class="flist-body">
-            <li v-for="f in g.files" :key="f.id" class="frow">
+            <li v-for="f in g.files" :key="f.id" class="frow file-entry">
               <input
                 type="checkbox"
                 :checked="store.isSelected(f.id)"
@@ -355,6 +355,7 @@ async function reload() {
   min-width: 0;
 }
 .flist .why {
+  font-size: var(--fs-meta);
   color: var(--c-danger);
 }
 
@@ -379,7 +380,7 @@ async function reload() {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 9px 14px;
+  padding: var(--pad-row-y) var(--pad-row-x);
   border-bottom: 0.5px solid var(--c-border);
   font-size: 13px;
 }
@@ -407,19 +408,16 @@ async function reload() {
 .flist-body {
   list-style: none;
   margin: 0;
-  padding: 4px 8px 6px;
+  padding: 6px 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
 .frow {
+  /* 底色 / 边框 / 圆角 / 内边距 / 间距 / 字号统一由全局 .file-entry + tokens 提供（BUG-008） */
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) 54px 48px;
   align-items: center;
-  column-gap: 8px;
-  padding: 4px 6px;
-  border-radius: var(--r-item);
-  font-size: 12px;
 }
 .frow:hover {
   background: var(--c-hover);
@@ -435,7 +433,6 @@ async function reload() {
 }
 .fsize,
 .fst {
-  font-size: 11px;
   color: var(--c-text-3);
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -477,31 +474,6 @@ async function reload() {
 }
 .foot .btn.primary {
   margin-left: auto;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 6px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
-}
-.btn.primary {
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-}
-.btn.small {
-  padding: 4px 10px;
-  font-size: 11px;
-}
-.btn:disabled {
-  opacity: 0.55;
 }
 
 .ellipsis {

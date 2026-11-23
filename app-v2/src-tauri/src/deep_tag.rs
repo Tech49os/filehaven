@@ -54,7 +54,7 @@ pub fn build_prompt(name: &str, kind: &str, text: &str) -> String {
          \n\
          要求：\n\
          1. 标签写「这件事属于哪一类工作或事项」，2~6 个字的通用名词短语，例如「安全检查」「人才培训」「招标采购」。\n\
-         2. **不要泛词**：文档、资料、文件、附件、材料、汇报、通知 这类不算标签。\n\
+         2. **不要泛词，也不要文档体裁/文件类型名**：文档、资料、文件、附件、材料、汇报、通知 这类泛词不算标签；委托书、说明书、通知书、合同、表格 这类体裁名也不算 —— 写它讲的具体事项。\n\
          3. **看不出来就不要猜**。正文里没有依据的内容一律不要写。真的判断不了就返回空数组 []。\n\
          4. summary 写清「是什么 + 什么时候的 + 和谁/哪个项目有关」，20~40 字。写不出就填空字符串。\n\
          5. 只输出 JSON，不要解释、不要 Markdown 代码块：\n\
@@ -75,6 +75,26 @@ const GENERIC: &[&str] = &[
     "文档", "文件", "资料", "材料", "附件", "汇报", "通知", "报告", "方案", "表格", "内容", "其他",
 ];
 
+/// 文档体裁/文件类型弱词（整词命中即过滤）。只列明确的公文/表格体裁，不引词库；
+/// 像「合同管理」这种以体裁词开头的主题词不受影响（不是整词）。
+const GENRE_WORDS: &[&str] = &[
+    "委托书", "说明书", "通知书", "合同", "协议", "清单", "名单", "手册", "指南", "批复", "纪要",
+    "决议", "证明", "申请表", "登记表", "审批表", "统计表",
+];
+/// 体裁后缀：带前缀仍判体裁（「服务委托书」「项目说明书」）。
+const GENRE_SUFFIXES: &[&str] = &[
+    "委托书", "说明书", "通知书", "申请表", "登记表", "审批表", "统计表", "意向书",
+];
+
+/// AI topic 弱标签判定：泛词 / 体裁整词 / 体裁后缀。
+/// 生成侧 `clean_tags` 与一次性清理命令共用，避免两处规则漂移。
+pub fn is_weak_topic(name: &str) -> bool {
+    let t = name.trim();
+    GENERIC.contains(&t)
+        || GENRE_WORDS.contains(&t)
+        || GENRE_SUFFIXES.iter().any(|s| t.ends_with(s))
+}
+
 fn clean_tags(raw: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in raw {
@@ -84,7 +104,7 @@ fn clean_tags(raw: Vec<String>) -> Vec<String> {
         if t.is_empty() || t.chars().count() > 12 {
             continue;
         }
-        if GENERIC.contains(&t) {
+        if is_weak_topic(&t) {
             continue;
         }
         if !out.iter().any(|x| x == t) {
@@ -628,11 +648,21 @@ mod tests {
     #[test]
     fn generic_tags_are_dropped_and_capped() {
         let d = parse(
-            r#"{"tags":["文档","资料","安全检查","消防验收","人才培训","招标采购","合同","附件"],"summary":"一份综合材料。"}"#,
+            r#"{"tags":["文档","资料","安全检查","消防验收","人才培训","招标采购","合同","附件","隐患排查"],"summary":"一份综合材料。"}"#,
         )
         .unwrap();
-        assert!(!d.tags.iter().any(|t| t == "文档" || t == "资料" || t == "附件"));
+        assert!(!d.tags.iter().any(|t| t == "文档" || t == "资料" || t == "附件" || t == "合同"));
         assert_eq!(d.tags.len(), 5, "最多 5 个：{:?}", d.tags);
+    }
+
+    // BUG-004（红）：AI 体裁/文档类型弱标签必须被过滤，真正的主题词要留下
+    #[test]
+    fn genre_tags_are_dropped() {
+        let d = parse(
+            r#"{"tags":["服务委托书","说明书","通知书","安全检查","消防验收"],"summary":"一份安全检查的安排。"}"#,
+        )
+        .unwrap();
+        assert_eq!(d.tags, vec!["安全检查", "消防验收"], "体裁词必须被过滤：{:?}", d.tags);
     }
 
     #[test]

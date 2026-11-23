@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { BatchView, Candidate } from '../../core/types'
+import workspaceSource from './Workspace.vue?raw'
+
+/** happy-dom 没有布局引擎：用 CSS 不变量 + DOM 数量守住「2 条与 10 条行高一致」 */
+function cssRule(css: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = css.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  return m ? m[1] : ''
+}
 
 const nextBatch = vi.fn()
 const bootState = vi.fn()
@@ -15,6 +23,8 @@ const openPath = vi.fn()
 const revealPath = vi.fn()
 const renameFile = vi.fn()
 const rescoreFiles = vi.fn()
+const trashFile = vi.fn()
+const undoTrash = vi.fn()
 
 vi.mock('../../core/ipc', () => ({
   nextBatch,
@@ -29,6 +39,8 @@ vi.mock('../../core/ipc', () => ({
   revealPath,
   renameFile,
   rescoreFiles,
+  trashFile,
+  undoTrash,
   listDirs: vi.fn().mockResolvedValue([]),
   previewDirName: vi.fn(),
 }))
@@ -517,5 +529,204 @@ describe('整理台渲染（T6.9 / T6.10 / §8.4）', () => {
     await flushPromises()
     expect(w.find('.rest').text()).toContain('全部整理完了')
     expect(w.find('.rest').text()).not.toContain('0')
+  })
+})
+
+// ------------------------------------- BUG-005：右侧已确认栏行高稳定
+describe('BUG-005 · 右侧已确认栏行高稳定', () => {
+  function matchMediaAs(matches: boolean) {
+    return vi.fn().mockImplementation(() => ({
+      matches,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('matchMedia', matchMediaAs(false))
+    decide.mockReset().mockResolvedValue({
+      fileId: 1,
+      status: 'confirmed',
+      confirmed: 1,
+      targetRelPath: '安全检查',
+      remainingInPool: 30,
+    })
+  })
+
+  async function confirmedRows(count: number) {
+    // 每次挂载用独立 Pinia，避免两个 wrapper 共享 store 互相改状态
+    setActivePinia(createPinia())
+    nextBatch.mockResolvedValue(
+      view({
+        items: Array.from({ length: 12 }, (_, i) =>
+          item(i + 1, `文件${i + 1}.docx`, [cand(7, '安全检查')]),
+        ),
+      }),
+    )
+    const w = mount(Workspace)
+    await flushPromises()
+    for (let i = 0; i < count; i++) {
+      await w.find('.mid .ft .btn.primary').trigger('click')
+      await flushPromises()
+    }
+    return w
+  }
+
+  it('2 条与 10 条时都是同一套 .drow，行高由固定基线决定而非列表长度', async () => {
+    const two = await confirmedRows(2)
+    const ten = await confirmedRows(10)
+    // VTU 默认把 <TransitionGroup> 换成 stub，所以用 aside + li 的限定后代选择器
+    expect(two.findAll('aside.right li.drow')).toHaveLength(2)
+    expect(ten.findAll('aside.right li.drow')).toHaveLength(10)
+    // 两种长度下节点结构一致（没有按索引加不同的高度类/内联样式）
+    const shape = (w: typeof two) =>
+      w
+        .findAll('aside.right li.drow')
+        .map((li) => [li.classes().join(' '), li.attributes('style') ?? ''])
+    const base = shape(two)
+    expect(shape(ten)).toEqual(base.concat(Array.from({ length: 8 }, () => base[0])))
+
+    const drow = cssRule(workspaceSource, '.drow')
+    expect(drow, '行高必须有固定下限，2 条和 10 条才一致').toMatch(/min-height:\s*\d+px/)
+    expect(drow, '行不能被 flex 容器压缩').toMatch(/flex:\s*0\s+0\s+auto/)
+    expect(drow, '图标 + 文件名的两列 grid 保证省略号不顶破').toMatch(
+      /grid-template-columns:\s*12px\s+minmax\(0,\s*1fr\)/,
+    )
+    const right = cssRule(workspaceSource, '.left,\n.right')
+    expect(right, '右栏是真正的滚动容器').toMatch(/overflow:\s*auto/)
+    expect(right, '滚动容器才允许 min-height:0').toMatch(/min-height:\s*0/)
+  })
+})
+
+describe('BUG-007：整理台删除 → 隔离区（二次确认 / 撤销入口 / Delete 键）', () => {
+  function matchMediaAs(matches: boolean) {
+    return vi.fn().mockImplementation(() => ({
+      matches,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('matchMedia', matchMediaAs(false))
+    undoDecide.mockReset()
+    nextBatch.mockReset().mockResolvedValue(
+      view({ items: [item(1, '报告.docx', [cand(7, '安全检查')])] }),
+    )
+    previewFile.mockReset().mockResolvedValue({ text: '', truncated: false, reason: '', kind: 'text' })
+    bootState.mockReset().mockResolvedValue({
+      configured: true,
+      archiveRoot: 'D:/归档',
+      sourceRoots: [{ id: 1, path: 'C:/桌面', enabled: true }],
+      counts: {
+        queued: 0,
+        labeled: 0,
+        pendingConfirm: 1,
+        confirmed: 0,
+        migrated: 0,
+        parked: 0,
+        skipped: 0,
+        missing: 0,
+      },
+      model: { reachable: true, model: 'qwen2.5:7b' },
+    })
+    trashFile.mockReset().mockResolvedValue({
+      fileId: 1,
+      migrationId: 7,
+      srcPath: 'C:/桌面/报告.docx',
+      dstPath: 'D:/归档/.filebutler/quarantine/7/报告.docx',
+      sha256: 'abc',
+    })
+    undoTrash.mockReset().mockResolvedValue({ restored: 1, skipped: 0, failed: [] })
+    decide.mockReset().mockResolvedValue({
+      fileId: 1,
+      status: 'confirmed',
+      confirmed: 1,
+      targetRelPath: '安全检查',
+      remainingInPool: 37,
+    })
+  })
+
+  async function press(key: string, ctrlKey = false) {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey, bubbles: true }))
+    await flushPromises()
+  }
+
+  // 红测：Delete 弹二次确认，写明目标路径与可撤销；取消零 IPC
+  it('Delete 弹确认框写明目标路径与「移入隔离区，可撤销」；取消零 IPC', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await press('Delete')
+
+    const dlg = w.find('[role="dialog"]')
+    expect(dlg.exists(), 'Delete 必须弹二次确认').toBe(true)
+    expect(dlg.text()).toContain('移入隔离区')
+    expect(dlg.text()).toContain('可撤销')
+    expect(dlg.text()).toContain('D:/归档')
+    expect(dlg.text()).toContain('.filebutler/quarantine')
+    expect(dlg.text()).not.toContain('永久删除')
+
+    const cancel = dlg.findAll('button').find((b) => b.text().includes('取消'))
+    expect(cancel).toBeTruthy()
+    await cancel!.trigger('click')
+    await flushPromises()
+    expect(trashFile).not.toHaveBeenCalled()
+    expect(w.find('[role="dialog"]').exists()).toBe(false)
+  })
+
+  // 红测：确认 → trash_file；成功提示带撤销入口；全链路无「永久删除」
+  it('确认后调用 trash_file，成功提示带「撤销」入口', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await press('Delete')
+    const ok = w
+      .find('[role="dialog"]')
+      .findAll('button')
+      .find((b) => b.text().includes('移入隔离区'))
+    expect(ok).toBeTruthy()
+    await ok!.trigger('click')
+    await flushPromises()
+
+    expect(trashFile).toHaveBeenCalledWith(1)
+    expect(w.find('[role="dialog"]').exists()).toBe(false)
+    expect(w.text()).toContain('撤销') // 成功提示里的撤销入口
+    expect(w.text()).not.toContain('永久删除')
+    // 从当前批次消失：最后一份删掉后 .cols 整块消失，只剩提示条
+    expect(w.find('.cols').exists()).toBe(false)
+    expect(w.find('.trash-notice').exists()).toBe(true)
+    expect(w.find('.trash-notice').text()).toContain('报告.docx')
+  })
+
+  // 红测：Ctrl+Z 走 undo_trash，不是 undo_decide
+  it('Ctrl+Z 调 undo_trash 而不是 undo_decide', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await press('Delete')
+    await w
+      .find('[role="dialog"]')
+      .findAll('button')
+      .find((b) => b.text().includes('移入隔离区'))!
+      .trigger('click')
+    await flushPromises()
+    expect(trashFile).toHaveBeenCalledWith(1)
+
+    await press('z', true)
+    expect(undoTrash).toHaveBeenCalledWith(7)
+    expect(w.find('.trash-notice').exists()).toBe(false)
+    expect(w.text()).not.toContain('永久删除')
+  })
+
+  // 红测：已确认条目也有删除入口
+  it('已确认条目与待确认卡片都有「删除（移入隔离区）」入口', async () => {
+    const w = mount(Workspace)
+    await flushPromises()
+    await w.find('.mid .ft .btn.primary').trigger('click')
+    await flushPromises()
+    const drow = w.find('aside.right li.drow')
+    expect(drow.exists()).toBe(true)
+    expect(drow.findAll('button').some((b) => /删除|隔离区/.test(b.text()))).toBe(true)
+    expect(w.text()).not.toContain('永久删除')
   })
 })

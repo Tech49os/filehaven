@@ -5,18 +5,29 @@ import Card from '../../components/Card.vue'
 import AppIcon from '../../components/AppIcon.vue'
 import DirTree from '../../components/DirTree.vue'
 import NewDirInput from '../../components/NewDirInput.vue'
+import DirHealth from './DirHealth.vue'
+import DirMerge from './DirMerge.vue'
 import { useAppStore } from '../../stores/app'
+import { useUiStore } from '../../stores/ui'
 import { useDirsStore } from '../../stores/dirs'
 import * as ipc from '../../core/ipc'
 import { onDeepTagProgress, onScanProgress } from '../../core/events'
 import { humanize, toCmdError } from '../../core/cmdError'
+import { collapsedBeyondDepth } from '../../core/dir-tree'
 import type { DeepTagStats, ScanProgress, ScanReport, TagCount } from '../../core/types'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const app = useAppStore()
+const ui = useUiStore()
 const dirs = useDirsStore()
 const router = useRouter()
 
+/** 材质效果（BUG-011）：默认开；关掉后整页回退实色，低性能设备用 */
+function toggleGlass() {
+  ui.setGlassEnabled(!ui.glassEnabled)
+}
+
+/** 折叠的目录 id（与浏览页共用默认策略：只展开前两层，避免目录变多时首帧挤坏卡片） */
 const collapsed = ref<Set<number>>(new Set())
 const adding = ref(false)
 
@@ -34,6 +45,11 @@ async function onCreateDir(input: string) {
   } catch (e) {
     err.value = humanize(toCmdError(e))
   }
+}
+
+/** 目录体检采纳/撤销后：重拉目录树，保持用户当前展开状态不动 */
+async function onDirsChanged() {
+  await dirs.load()
 }
 const scanning = ref(false)
 const report = ref<ScanReport | null>(null)
@@ -81,6 +97,8 @@ const tagBusy = ref(false)
 /** 正在改名的标签 id；null = 没有 */
 const renamingTag = ref<number | null>(null)
 const renameDraft = ref('')
+/** 一次性清理的结果提示 */
+const cleanNote = ref<string | null>(null)
 
 async function loadTags() {
   try {
@@ -122,6 +140,21 @@ async function commitRenameTag() {
     const mergedId = await ipc.renameTag(id, v)
     await loadTags()
     if (mergedId !== id) err.value = null
+  } catch (e) {
+    err.value = humanize(toCmdError(e))
+  } finally {
+    tagBusy.value = false
+  }
+}
+
+/** BUG-004：清理已落库的伪词/体裁弱标签，再重拉词表让界面同步 */
+async function onCleanBadTags() {
+  if (tagBusy.value) return
+  tagBusy.value = true
+  try {
+    const n = await ipc.cleanBadTags()
+    cleanNote.value = n > 0 ? `已清理 ${n} 条弱标签` : '没有需要清理的弱标签'
+    await loadTags()
   } catch (e) {
     err.value = humanize(toCmdError(e))
   } finally {
@@ -188,6 +221,8 @@ onMounted(async () => {
   if (!app.ready) await app.refreshBoot()
   if (app.archiveRoot) freeGb.value = await ipc.diskFreeGb(app.archiveRoot).catch(() => null)
   await dirs.load()
+  // 默认折叠与树数据同批落位（BUG-002/010）：避免首帧全展开把设置页卡片挤成嵌套滚动
+  collapsed.value = collapsedBeyondDepth(dirs.tree)
   await loadTags()
   unlisten = await onScanProgress((p) => {
     progress.value = p
@@ -263,7 +298,24 @@ async function removeRoot(id: number) {
 
 <template>
   <div class="grid">
-    <Card title="归档区">
+    <!-- 目录体检必须首屏可见：设置页多张卡会互相压缩，原先埋在「目录结构」卡底部，
+         那张卡内部滚动 3000px，用户根本找不到入口（BUG-003 入口可见性） -->
+    <Card class="health-card settings-card" title="目录体检">
+      <p class="hint">
+        扫描已有目录，逐条采纳「改名 / 调层级」建议；采纳后可按批次撤销。空目录与同义目录只报告，不会自动删。
+      </p>
+      <DirHealth @changed="onDirsChanged" />
+    </Card>
+
+    <!-- BUG-006：独立可见入口，不与体检卡混在一起；只在用户点按钮时扫描 -->
+    <Card class="health-card settings-card" title="同义目录合并">
+      <p class="hint">
+        识别「2026年9月 / 2026年/9月」这类同义目录，逐组给出合并建议；可改选保留方，采纳后按批次撤销。
+      </p>
+      <DirMerge @changed="onDirsChanged" />
+    </Card>
+
+    <Card class="settings-card" title="归档区">
       <div class="row">
         <AppIcon name="drive" :size="16" />
         <span class="mono ellipsis">{{ app.archiveRoot ?? '未设置' }}</span>
@@ -275,13 +327,13 @@ async function removeRoot(id: number) {
       </p>
     </Card>
 
-    <Card title="源区">
+    <Card class="settings-card" title="源区">
       <template #action>
         <div class="acts">
           <button class="btn ghost" :disabled="picking || scanning" @click="addRoot">
             <AppIcon name="plus" :size="12" /> 添加源区
           </button>
-          <button class="btn" :disabled="scanning || picking" @click="rescan">
+          <button class="btn primary" :disabled="scanning || picking" @click="rescan">
             {{ scanning ? '扫描中…' : '重新扫描' }}
           </button>
         </div>
@@ -303,7 +355,7 @@ async function removeRoot(id: number) {
       <p v-if="err" class="hint bad">{{ err }}</p>
     </Card>
 
-    <Card title="目录结构">
+    <Card class="settings-card" title="目录结构">
       <template #action>
         <div class="acts">
           <!-- 目录建议以前只在引导里出现一次，之后再也回不去：想换个分法只能手动一条条建。
@@ -311,30 +363,33 @@ async function removeRoot(id: number) {
           <button class="btn ghost" @click="router.push('/onboarding/dirs')">
             <AppIcon name="sparkle" :size="12" /> AI 建议目录
           </button>
-          <button class="btn" @click="adding = true">新建目录</button>
+          <button class="btn primary" @click="adding = true">新建目录</button>
         </div>
       </template>
-      <DirTree
-        v-if="dirs.tree.length > 0"
-        :nodes="dirs.tree"
-        :selected-id="dirs.selectedId"
-        :collapsed="collapsed"
-        @select="dirs.select($event)"
-        @toggle="toggleDir"
-      />
+      <!-- BUG-010：目录树自己滚动，不再让整张卡 / 整页跟着撑成嵌套滚动。
+           只有这个容器拿 max-height + overflow:auto + min-height:0；卡片本身保持内容高度。 -->
+      <div v-if="dirs.tree.length > 0" class="tree-scroll">
+        <DirTree
+          :nodes="dirs.tree"
+          :selected-id="dirs.selectedId"
+          :collapsed="collapsed"
+          @select="dirs.select($event)"
+          @toggle="toggleDir"
+        />
+      </div>
       <p v-else class="hint">还没有目录。整理台里按 N，或这里点「新建目录」。</p>
       <div v-if="adding" class="newdir">
         <NewDirInput @confirm="onCreateDir" @cancel="adding = false" />
       </div>
     </Card>
 
-    <Card title="深度解读">
+    <Card class="settings-card" title="深度解读">
       <template #action>
         <div class="acts">
           <button class="btn ghost" @click="togglePauseDeep" :disabled="!deep?.enabled">
             {{ deep?.paused ? '继续' : '暂停' }}
           </button>
-          <button class="btn" :class="{ ghost: !deep?.enabled }" @click="toggleDeep">
+          <button class="btn primary" :class="{ ghost: !deep?.enabled }" @click="toggleDeep">
             {{ deep?.enabled ? '关闭' : '开启' }}
           </button>
         </div>
@@ -372,16 +427,22 @@ async function removeRoot(id: number) {
       </p>
     </Card>
 
-    <Card title="标签词表">
+    <Card class="settings-card" title="标签词表">
       <template #action>
-        <button class="btn ghost" :disabled="tagBusy" @click="loadTags">
-          刷新
-        </button>
+        <div class="acts">
+          <button class="btn ghost" :disabled="tagBusy" @click="onCleanBadTags">
+            清理弱标签
+          </button>
+          <button class="btn ghost" :disabled="tagBusy" @click="loadTags">
+            刷新
+          </button>
+        </div>
       </template>
       <p class="hint">
         AI 深读给的主题标签和你自己加的标签都在这里。删掉一个标签，所有文件上的它一起摘掉；
         改名撞上已有标签时两边合并 —— 用来收拾「同一件事被写成不同词」的情况。
       </p>
+      <p v-if="cleanNote" class="hint ok">{{ cleanNote }}</p>
       <p v-if="Array.isArray(tagList) && tagList.length === 0" class="hint dim">
         还没有标签：开一次深度解读，或直接在文件的卡片上加一个。
       </p>
@@ -410,9 +471,9 @@ async function removeRoot(id: number) {
       </ul>
     </Card>
 
-    <Card title="新文件监听">
+    <Card class="settings-card" title="新文件监听">
       <template #action>
-        <button class="btn" :class="{ ghost: app.watchEnabled }" :disabled="watchBusy" @click="toggleWatch">
+        <button class="btn primary" :class="{ ghost: app.watchEnabled }" :disabled="watchBusy" @click="toggleWatch">
           {{ app.watchEnabled ? '暂停监听' : '开启监听' }}
         </button>
       </template>
@@ -430,7 +491,26 @@ async function removeRoot(id: number) {
       </p>
     </Card>
 
-    <Card title="本地模型">
+    <Card class="settings-card" title="材质效果">
+      <template #action>
+        <button class="btn primary" :class="{ ghost: ui.glassEnabled }" @click="toggleGlass">
+          {{ ui.glassEnabled ? '关闭材质' : '开启材质' }}
+        </button>
+      </template>
+      <div class="row">
+        <i class="dot" :class="{ on: ui.glassEnabled }" />
+        <span>{{ ui.glassEnabled ? '毛玻璃已开启' : '已关闭，界面使用实色' }}</span>
+      </div>
+      <p class="hint">
+        标题栏、侧栏、主内容区与浮层使用半透明材质（苹果风），文字有底衬保证可读。
+        默认开启；若机器较老、窗口拖动掉帧，关掉即可完整回退实色，功能不变。
+      </p>
+      <p class="hint">
+        该偏好保存在本机，下次启动仍生效。列表每一行不使用毛玻璃，避免逐行模糊拖慢滚动。
+      </p>
+    </Card>
+
+    <Card class="settings-card" title="本地模型">
       <template #action>
         <button class="btn ghost" :disabled="probing" @click="probeModel">
           {{ probing ? '检测中…' : '重新检测' }}
@@ -453,6 +533,26 @@ async function removeRoot(id: number) {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow: auto;
+  min-height: 0;
+}
+
+/* BUG-010：设置页的卡片一律保持内容高度，不许被 flex 列压扁。
+   参考 PendingMigration.vue 的 .groups —— 只约束这里的直接子卡，
+   不在 Card.vue 全局强制，免得影响真正需要弹性伸缩的场景。 */
+.grid > .card {
+  flex: 0 0 auto;
+}
+
+/* 首屏入口不许被其他卡片压扁，否则按钮又变成「看不见」（BUG-003） */
+.health-card {
+  flex: 0 0 auto;
+}
+
+/* BUG-010：目录树独立滚动容器。max-height 用 min() 兼顾矮窗口；
+   min-height:0 只给这个真正的滚动容器，卡片本身不给（给了内容会溢出画到别处）。 */
+.tree-scroll {
+  max-height: min(360px, 40vh);
   overflow: auto;
   min-height: 0;
 }
@@ -520,23 +620,7 @@ async function removeRoot(id: number) {
   margin-left: auto;
 }
 
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 5px 12px;
-  font-size: 12px;
-  background: var(--c-primary);
-  color: #fff;
-  box-shadow: var(--sh-primary);
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease,
-    box-shadow var(--dur-fast) ease;
-}
-.btn:active:not(:disabled) {
-  transform: scale(0.96);
-}
+/* 基线在全局 shared.css；设置页的按钮默认是主色，故模板显式标 primary；ghost 为场景特化 */
 .btn.ghost {
   background: var(--c-field);
   color: var(--c-text);

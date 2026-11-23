@@ -17,6 +17,7 @@ import FileList from '../../components/FileList.vue'
 import { useNarrow } from '../../core/useNarrow'
 import { iconOf } from '../../core/format'
 import { toCmdError } from '../../core/cmdError'
+import { collapsedBeyondDepth } from '../../core/dir-tree'
 import { livePath } from '../../core/types'
 import type { DirNode, FileRow } from '../../core/types'
 import * as ipc from '../../core/ipc'
@@ -34,7 +35,7 @@ const tree = ref<DirNode[]>([])
 const rows = ref<FileRow[]>([])
 const pool = ref<FileRow[]>([])
 const parkedRows = ref<FileRow[]>([])
-/** 折叠的目录 id */
+/** 折叠的目录 id（进页面默认折到第 2 层，BUG-002） */
 const collapsed = ref<Set<number>>(new Set())
 /** 是否含子目录 */
 const includeSub = ref(false)
@@ -59,6 +60,11 @@ function toggle(id: number) {
   if (next.has(id)) next.delete(id)
   else next.add(id)
   collapsed.value = next
+}
+
+/** 一键恢复「只看前两层」：丢弃本次会话里的手动展开，重置为默认折叠 */
+function collapseToDefault() {
+  collapsed.value = collapsedBeyondDepth(tree.value)
 }
 
 async function loadList() {
@@ -88,16 +94,23 @@ async function select(sel: Sel) {
   await loadList()
 }
 
-async function refreshAll() {
+async function refreshAll(applyDefaultFold = false) {
   const [t, p, pk] = await Promise.all([ipc.browseTree(), ipc.poolRows(), ipc.listParked()])
   tree.value = t
+  // 默认折叠与树数据同批落位：否则列表 IPC 未返回时会先闪一帧全展开（BUG-002）
+  if (applyDefaultFold) collapsed.value = collapsedBeyondDepth(t)
   pool.value = p
   // listParked 给的是带候选的 ParkedItem，虚拟视图只要文件行
   parkedRows.value = pk.map((x) => x.file)
   await loadList()
 }
 
-onMounted(refreshAll)
+/** 首次进页面加载树并套用默认折叠；后续 refresh（如重新归类后）不动用户的手动展开 */
+function boot() {
+  return refreshAll(true)
+}
+
+onMounted(boot)
 
 /* ---- 打开 / 定位 / 复制 ---- */
 async function openRow(r: FileRow) {
@@ -257,7 +270,10 @@ async function onSubToggle() {
         <span class="cnt">{{ parkedRows.length }}</span>
       </div>
 
-      <div class="vhead">归档目录</div>
+      <div class="vhead tree-head">
+        <span>归档目录</span>
+        <button class="fold-btn" title="折叠到第 2 层" @click="collapseToDefault">仅看前两层</button>
+      </div>
       <DirTree
         :nodes="tree"
         :selected-id="selected.kind === 'dir' ? selected.id : null"
@@ -428,6 +444,27 @@ async function onSubToggle() {
   color: var(--c-text-3);
   padding: 8px 8px 4px;
 }
+/* 「归档目录」标题行 + 一键折叠按钮（BUG-002） */
+.tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.fold-btn {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--c-primary);
+  font-size: 10px;
+  font-family: var(--font);
+  padding: 0 2px;
+  cursor: default;
+}
+.fold-btn:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .vrow {
   display: flex;
   align-items: center;
@@ -559,87 +596,8 @@ async function onSubToggle() {
   text-underline-offset: 2px;
 }
 
-.list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  min-height: 0;
-  overflow: auto;
-  flex: 1;
-  background: var(--c-surface);
-  border: 0.5px solid var(--c-border);
-  border-radius: var(--r-card);
-}
-.row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 52px 72px 92px minmax(0, 1.1fr) 72px;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 10px;
-  font-size: 12.5px;
-  border-bottom: 0.5px solid var(--c-border);
-  cursor: default;
-}
-.row:last-child {
-  border-bottom: 0;
-}
-.row:hover {
-  background: var(--c-hover);
-}
-.row.on {
-  background: var(--c-primary-bg);
-}
-.cell {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cell.name {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--c-text);
-}
-.cell.kind,
-.cell.size,
-.cell.time,
-.cell.st {
-  color: var(--c-text-2);
-  font-size: 11.5px;
-}
-.cell.time,
-.cell.size {
-  font-variant-numeric: tabular-nums;
-}
-
-.tchip {
-  display: inline-block;
-  font-size: 10px;
-  line-height: 1.5;
-  padding: 0 6px;
-  margin-right: 3px;
-  border-radius: var(--r-pill);
-  background: var(--c-field);
-  color: var(--c-text-2);
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: middle;
-}
-.tchip.topic {
-  background: var(--c-indigo-bg);
-  color: var(--c-indigo);
-}
-.tchip.user {
-  background: transparent;
-  border: 1px dashed var(--c-border-strong);
-}
-.tchip.more {
-  background: transparent;
-  color: var(--c-text-3);
-}
+/* 浏览页列表样式全部在 FileList.vue（scoped）；此处旧有的一份 .list/.row/.cell/.tchip
+   因 scoped 不作用于子组件而从未生效，BUG-009 删除，避免两套字号标准。 */
 
 /* 详情条 */
 .detail {
@@ -719,15 +677,6 @@ async function onSubToggle() {
 .dacts {
   display: flex;
   gap: 8px;
-}
-.btn {
-  border: 0;
-  border-radius: var(--r-btn);
-  padding: 5px 12px;
-  font-size: 12px;
-  background: var(--c-field);
-  color: var(--c-text);
-  font-family: var(--font);
 }
 .btn:hover {
   color: var(--c-primary);

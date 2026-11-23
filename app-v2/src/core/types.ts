@@ -14,6 +14,7 @@ export type FileStatus =
   | 'parked'
   | 'skipped'
   | 'missing'
+  | 'trashed'
 
 /** 目录来源：导入的、模型方案采纳的、用户自建的、卡片里顺手建的 */
 export type DirOrigin = 'imported' | 'model_approved' | 'user' | 'inline'
@@ -279,8 +280,8 @@ export interface MigrationSummary {
   fileCount: number
   bytes: number
   finishedAt: number | null
-  /** migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4） */
-  kind: 'migrate' | 'recategorize'
+  /** migrate = 源区→归档区；recategorize = 归档区内二次迁移（P4）；trash = BUG-007 删除进隔离区 */
+  kind: 'migrate' | 'recategorize' | 'trash'
 }
 
 /** 重新归类结果（P4）：renamed=true 表示目标撞名自动错开成了 `_2` */
@@ -301,6 +302,15 @@ export interface UndoReport {
   restored: number
   skipped: number
   failed: { fileId: number; name: string; reason: string }[]
+}
+
+/** BUG-007：删除（移入隔离区）回执；撤销靠 migrationId */
+export interface TrashOutcome {
+  fileId: number
+  migrationId: number
+  srcPath: string
+  dstPath: string
+  sha256: string
 }
 
 /** 深度标签队列的实时状态（`deep-tag-progress` 事件与 `deep_tag_status` 命令同一个形状） */
@@ -351,4 +361,92 @@ export interface MigrateProgress {
   total: number
   name: string
   stage: 'copy' | 'verify' | 'quarantine'
+}
+
+// ---- BUG-003 目录体检 ----
+
+export type DirHealthKind = 'rename' | 'merge' | 'move' | 'empty'
+
+export interface DirHealthIssue {
+  id: string
+  kind: DirHealthKind
+  dirId: number
+  dirName: string
+  relPath: string
+  targetPath: string | null
+  reason: string
+  confidence: number
+  affectedFiles: number
+  source: 'rule' | 'model'
+}
+
+export interface DirHealthReport {
+  issues: DirHealthIssue[]
+  modelReviewed: boolean
+  note: string
+  elapsedMs: number
+}
+
+export interface DirHealthStage {
+  stage: 'scan' | 'rule' | 'model' | 'done'
+  elapsedMs: number
+  note: string
+}
+
+export interface DirHealthApplyReq {
+  issueId: string
+  kind: string
+  dirId: number
+  targetPath: string
+}
+
+export interface DirHealthApplyAck {
+  migrationId: number
+  newRelPath: string
+  renamed: boolean
+  affectedDirs: number
+  affectedFiles: number
+}
+
+// ---- BUG-006 同义目录合并 ----
+
+/** 阶段事件载荷沿用体检的形状（scan → rule → model → done / copy → verify → quarantine） */
+export type DirMergeStage = DirHealthStage
+
+export interface DirMergeCandidate {
+  id: string
+  signature: string
+  dirIds: number[]
+  dirPaths: string[]
+  sourceDirIds: number[]
+  sourceDirPaths: string[]
+  targetDirId: number
+  targetPath: string
+  suggestedTargetId: number
+  reason: string
+  fileCount: number
+  confidence: number
+  source: 'rule' | 'model'
+}
+
+export interface DirMergeReport {
+  candidates: DirMergeCandidate[]
+  modelReviewed: boolean
+  note: string
+  elapsedMs: number
+}
+
+export interface DirMergeApplyReq {
+  candidateId: string
+  sourceDirIds: number[]
+  targetDirId: number
+}
+
+export interface DirMergeApplyAck {
+  migrationId: number
+  affectedFiles: number
+  renamed: number
+  failed: { fileId: number; name: string; reason: string }[]
+  sourceDirIds: number[]
+  targetDirId: number
 }

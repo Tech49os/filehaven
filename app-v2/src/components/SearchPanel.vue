@@ -139,7 +139,7 @@ const emptyState = computed(() => searched.value && rows.value.length === 0 && !
 <template>
   <Teleport to="body">
     <div v-if="open" class="wrap" @click.self="hide">
-      <div class="panel" role="dialog" aria-label="快速检索">
+      <div class="panel glass-float" role="dialog" aria-label="快速检索">
         <div class="phead">
           <AppIcon name="info" :size="14" />
           <input
@@ -151,7 +151,7 @@ const emptyState = computed(() => searched.value && rows.value.length === 0 && !
             spellcheck="false"
             @input="onInput"
           />
-          <span class="esc">Esc 关闭</span>
+          <span class="esc glass-text">Esc 关闭</span>
         </div>
 
         <ul v-if="rows.length > 0" class="list">
@@ -170,12 +170,12 @@ const emptyState = computed(() => searched.value && rows.value.length === 0 && !
           </li>
         </ul>
 
-        <p v-else-if="loading" class="hint">正在搜…</p>
-        <p v-else-if="emptyState" class="hint">
+        <p v-else-if="loading" class="hint glass-text">正在搜…</p>
+        <p v-else-if="emptyState" class="hint glass-text">
           没有匹配的文件。
           <button class="link" @click="goAdvanced">去高级筛选</button>
         </p>
-        <p v-else class="hint">输入关键词，按文件名与路径找（不搜正文）</p>
+        <p v-else class="hint glass-text">输入关键词，按文件名与路径找（不搜正文）</p>
       </div>
     </div>
   </Teleport>
@@ -204,10 +204,7 @@ const emptyState = computed(() => searched.value && rows.value.length === 0 && !
 /* 克制的入场：120ms 淡入，不做缩放弹跳 */
 .panel {
   width: min(560px, calc(100vw - 48px));
-  background: var(--c-surface);
-  border: 0.5px solid var(--c-border);
-  border-radius: var(--r-card);
-  box-shadow: var(--sh-card);
+  /* 材质背景 / 边框 / 阴影由 glass.css 的 .glass-float 提供 */
   overflow: hidden;
   animation: rise var(--dur-fast) ease both;
 }

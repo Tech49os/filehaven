@@ -19,6 +19,12 @@ import type {
   DirNode,
   DeepTagStats,
   DirSuggestion,
+  DirHealthReport,
+  DirHealthApplyReq,
+  DirHealthApplyAck,
+  DirMergeReport,
+  DirMergeApplyReq,
+  DirMergeApplyAck,
   FilePreview,
   FileRow,
   FileKind,
@@ -31,6 +37,7 @@ import type {
   SourceRoot,
   TagCount,
   TagRef,
+  TrashOutcome,
   UndoReport,
 } from './types'
 
@@ -154,6 +161,19 @@ export function unpark(fileId: number) {
 
 export function dropFile(fileId: number) {
   return invoke<void>('drop_file', { fileId })
+}
+
+/**
+ * BUG-007：删除 = 移入隔离区（可撤销）。
+ * 返回值带 migrationId，撤销入口和 Ctrl+Z 都拿它调 undoTrash。
+ */
+export function trashFile(fileId: number) {
+  return invoke<TrashOutcome>('trash_file', { fileId })
+}
+
+/** BUG-007：撤销删除（隔离区原件 → 原路径，哈希校验 + 同名拒绝） */
+export function undoTrash(migrationId: number) {
+  return invoke<UndoReport>('undo_trash', { migrationId })
 }
 
 export function saveNote(fileId: number, note: string) {
@@ -281,6 +301,11 @@ export function renameTag(tagId: number, name: string) {
   return invoke<number>('rename_tag', { tagId, name })
 }
 
+/** BUG-004：一次性清理 2-gram 伪词与 AI 体裁弱标签（幂等），返回清掉的挂载行数 */
+export function cleanBadTags() {
+  return invoke<number>('clean_bad_tags')
+}
+
 /** 浏览页目录树：归档目录 + 直属已迁移份数 */
 export function browseTree() {
   return invoke<DirNode[]>('browse_tree')
@@ -323,4 +348,38 @@ export interface SearchResult {
 /** 检索（三个入口共用同一查询层） */
 export function searchFiles(req: SearchReq) {
   return invoke<SearchResult>('search_files', { req })
+}
+
+// ---- BUG-003 目录体检 ----
+
+/** 手动触发目录体检（规则预筛 + 可选模型复核，降级不报错） */
+export function dirHealthScan() {
+  return invoke<DirHealthReport>('dir_health_scan')
+}
+
+/** 采纳一条 rename/move 建议 */
+export function applyDirHealth(req: DirHealthApplyReq) {
+  return invoke<DirHealthApplyAck>('apply_dir_health', { req })
+}
+
+/** 按批次撤销一次目录修正 */
+export function undoDirHealth(migrationId: number) {
+  return invoke<UndoReport>('undo_dir_health', { migrationId })
+}
+
+// ---- BUG-006 同义目录合并 ----
+
+/** 手动触发同义目录扫描（规则预筛 + 可选模型复核，降级不报错） */
+export function dirMergeScan() {
+  return invoke<DirMergeReport>('dir_merge_scan')
+}
+
+/** 采纳一组同义目录合并 */
+export function applyDirMerge(req: DirMergeApplyReq) {
+  return invoke<DirMergeApplyAck>('apply_dir_merge', { req })
+}
+
+/** 按批次撤销一次同义目录合并 */
+export function undoDirMerge(migrationId: number) {
+  return invoke<UndoReport>('undo_dir_merge', { migrationId })
 }

@@ -147,9 +147,10 @@ mod index {
         assert_eq!(db::count_by_status(&conn).unwrap().len(), 1);
     }
 
-    // T1.7 状态机守卫：8 × 8 = 64 组全覆盖（P1 最重要的单测，不许抽查）
+    // T1.7 状态机守卫：9 × 9 = 81 组全覆盖（P1 最重要的单测，不许抽查）
+    // BUG-007 新增 trashed：来源 3 态 + 撤销还原 3 态，合法转移 17 → 23
     #[test]
-    fn status_machine_all_64_transitions() {
+    fn status_machine_all_81_transitions() {
         let (_d, conn) = fresh_db();
         let root = db::add_source_root(&conn, "C:/r").unwrap();
         let fid = db::insert_test_file(&conn, root.id, "x.docx", db::Status::Queued).unwrap();
@@ -183,7 +184,7 @@ mod index {
                 }
             }
         }
-        assert_eq!((ok, bad), (17, 47), "转移表条目数变了？");
+        assert_eq!((ok, bad), (23, 58), "转移表条目数变了？");
     }
 
     // T4.6 批次落库：关批次把未确认的退回池，且暂缓过的文件必须能再进池
@@ -284,27 +285,25 @@ mod tag {
     // T2.1 五条正向
     #[test]
     fn tokenize_basic_cases() {
-        // ① 2~3 字段直接保留整段；4 字段是整段 + 2-gram（§7.1 规则 4）
+        // ① 2~3 字段直接保留整段；BUG-004 后 4 字段也只保留整段（不再切 2-gram）
         let t = tk::tokenize("安全检查");
-        assert_eq!(t.first().map(|s| s.as_str()), Some("安全检查"), "{t:?}");
-        assert!(t.contains(&"安全".to_string()), "{t:?}");
+        assert_eq!(t, vec!["安全检查".to_string()], "{t:?}");
 
-        // ② 长段：整段 + 2-gram（详设 §7.1 规则 4）。
-        //    注意 `安全检查通知` 是 6 字段，产出里没有 3 字整词 `安全检查`，
-        //    但有 `安全`/`检查`；推荐是双向对称分词，匹配不受影响。
+        // ② 长段同样只留整段：不再有 2-gram 兜底，也不硬造 3 字整词。
+        //    推荐仍走双向对称分词（文件与目录名同一个函数），匹配不受影响。
         let t = tk::tokenize("安全检查通知");
-        for want in ["安全", "检查", "通知", "安全检查通知"] {
-            assert!(t.contains(&want.to_string()), "缺 {want}：{t:?}");
-        }
+        assert_eq!(t, vec!["安全检查通知".to_string()], "{t:?}");
 
         // ③ 相机默认名全丢（T2.1 要求的「空」）
         assert!(tk::tokenize("IMG_2034").is_empty(), "{:?}", tk::tokenize("IMG_2034"));
 
-        // ④ 停用词与纯数字段不进词元
+        // ④ 停用词与纯数字段不进词元；长汉字段只留整段
         let t = tk::tokenize("关于2026年度安全检查的通知");
-        for want in ["安全", "检查", "通知"] {
-            assert!(t.contains(&want.to_string()), "缺 {want}：{t:?}");
-        }
+        assert_eq!(
+            t,
+            vec!["关于".to_string(), "年度安全检查的通知".to_string()],
+            "{t:?}"
+        );
         assert!(!t.iter().any(|x| x == "的"), "{t:?}");
         assert!(!t.iter().any(|x| x.contains("2026")), "{t:?}");
 
@@ -312,6 +311,19 @@ mod tag {
         let t = tk::tokenize("AB测试_v2");
         assert!(t.contains(&"测试".to_string()), "{t:?}");
         assert!(!t.iter().any(|x| x == "ab" || x == "v2"), "{t:?}");
+    }
+
+    // BUG-004（红）：长汉字段只保留整段，不许再切出跨词 2-gram 伪词
+    #[test]
+    fn tokenize_no_2gram_pseudoword() {
+        let t = tk::tokenize("服务要求说明书");
+        assert!(t.contains(&"服务要求说明书".to_string()), "整段词元要保留：{t:?}");
+        assert!(!t.iter().any(|x| x == "务要"), "跨词伪词「务要」必须消失：{t:?}");
+        assert!(!t.iter().any(|x| x == "要求"), "2-gram「要求」也不该再产出：{t:?}");
+
+        // 2~3 字整段规则不变；纯数字与单汉字继续丢弃
+        let t = tk::tokenize("要求_2026_的");
+        assert_eq!(t, vec!["要求".to_string()], "2 字整段保留、数字/单汉字丢弃：{t:?}");
     }
 
     // T2.2 真实语料冒烟
@@ -333,15 +345,14 @@ mod tag {
         let avg = total as f64 / files.len() as f64;
         println!("平均词元数 {avg:.2}，空词元文件 {empty} 份");
 
-        // 详设写「平均 2~8」。2-gram 展开后长文件名必然超过 8，
-        // 实测见输出；这里的上限是「别爆炸」的护栏，不是原 8 的硬指标。
-        assert!(avg >= 2.0, "平均词元太少：{avg}");
+        // BUG-004：去掉 2-gram 后词元数整体下降，这里只守「别为空 / 别爆炸」的护栏
+        assert!(avg >= 1.0, "平均词元太少：{avg}");
         assert!(avg <= 15.0, "平均词元太多：{avg}");
 
-        // 人工核对样本：必须认出业务词，必须扔掉版本噪声
+        // 人工核对样本：长段整词与 2~3 字整段要留下，版本噪声要丢掉
         let sample = stem_of("04生产工艺设备服务器等硬件设备支撑（二期）_初版草稿_完.docx");
         let t = tk::tokenize(sample);
-        for want in ["生产", "工艺", "硬件", "设备", "二期"] {
+        for want in ["生产工艺设备服务器等硬件设备支撑", "二期"] {
             assert!(t.contains(&want.to_string()), "缺 {want}：{t:?}");
         }
         for bad in ["初版", "草稿", "完", "04"] {
@@ -402,7 +413,7 @@ mod tag {
             .map(|(n, _, _)| n.as_str())
             .collect();
         assert!(kw.len() <= 3, "{kw:?}");
-        assert!(kw.contains(&"安全"), "{kw:?}");
+        assert!(kw.contains(&"安全检查报告"), "整段关键词要保留：{kw:?}");
 
         let (y, q) = tk::year_quarter(1_768_435_200_000); // 2026-01-15
         assert_eq!((y, q), (2026, 1));
@@ -721,7 +732,7 @@ mod recommend {
     /// 按真实分词器造文件特征（名字 → 词元），避免手写字面量和分词逻辑漂移
     fn ft(stem: &str) -> rc::FileFeature {
         rc::FileFeature {
-            tokens: tag::tokenize(stem),
+            tokens: tag::tokenize_for_match(stem),
             stem: stem.into(),
             kind: "word".into(),
             ..Default::default()
@@ -740,7 +751,7 @@ mod recommend {
     fn seg(name: &str) -> rc::DirSeg {
         rc::DirSeg {
             name: name.into(),
-            tokens: tag::tokenize(name),
+            tokens: tag::tokenize_for_match(name),
         }
     }
 
@@ -774,8 +785,8 @@ mod recommend {
 
     fn with_confirmed(mut dd: rc::DirFeature, names: &[&str]) -> rc::DirFeature {
         for n in names {
-            dd.confirmed_files.push(tag::tokenize(stem_of(n)));
-            for t in tag::tokenize(stem_of(n)) {
+            dd.confirmed_files.push(tag::tokenize_for_match(stem_of(n)));
+            for t in tag::tokenize_for_match(stem_of(n)) {
                 if !dd.confirmed_tokens.contains(&t) {
                     dd.confirmed_tokens.push(t);
                 }
@@ -1130,7 +1141,7 @@ mod recommend {
                 _ => &raw.name,
             };
             let feat = rc::FileFeature {
-                tokens: tag::tokenize(stem),
+                tokens: tag::tokenize_for_match(stem),
                 stem: stem.to_string(),
                 kind: k.to_string(),
                 mtime: raw.mtime,
@@ -1191,7 +1202,7 @@ mod recommend {
                 _ => &raw.name,
             };
             let feat = rc::FileFeature {
-                tokens: tag::tokenize(stem),
+                tokens: tag::tokenize_for_match(stem),
                 stem: stem.to_string(),
                 ..Default::default()
             };
@@ -3692,6 +3703,65 @@ mod p3_m1 {
         assert_eq!(n, 0, "连 tags 表都不该被写进模型词");
     }
 
+    // BUG-004（红）：一次性清理落库脏标签，幂等且尊重 tag_locked
+    #[test]
+    fn clean_bad_tags_removes_dirty_and_keeps_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+        let root = db::add_source_root(&conn, "C:/scan").unwrap();
+        let f1 = db::insert_test_file(&conn, root.id, "服务要求说明书.docx", db::Status::Labeled).unwrap();
+        let f2 = db::insert_test_file(&conn, root.id, "安全检查.docx", db::Status::Labeled).unwrap();
+
+        // f1：keyword 伪词「务要」+ 合法整段；topic 体裁词「服务委托书」+ 合法主题词
+        db::apply_basic_labels(
+            &mut conn,
+            &[(
+                f1,
+                vec![
+                    ("服务要求说明书".into(), "keyword".into(), 0.9),
+                    ("务要".into(), "keyword".into(), 0.8),
+                ],
+            )],
+        )
+        .unwrap();
+        db::apply_deep_tag(&mut conn, f1, &["服务委托书".into(), "安全检查".into()], None).unwrap();
+
+        // f2：人工锁定，挂着同样的脏标签，一个都不许被清
+        db::apply_basic_labels(
+            &mut conn,
+            &[(f2, vec![("务要".into(), "keyword".into(), 0.8)])],
+        )
+        .unwrap();
+        db::apply_deep_tag(&mut conn, f2, &["通知书".into()], None).unwrap();
+        conn.execute("UPDATE files SET tag_locked=1 WHERE id=?1", [f2]).unwrap();
+
+        let changed = db::clean_bad_tags(&mut conn).unwrap();
+        assert_eq!(changed, 2, "只该清掉 f1 上的伪词与体裁词：{changed}");
+
+        fn names_of(conn: &rusqlite::Connection, id: i64) -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT t.name FROM file_tags ft JOIN tags t ON t.id=ft.tag_id WHERE ft.file_id=?1")
+                .unwrap();
+            stmt.query_map([id], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        }
+        let f1_names = names_of(&conn, f1);
+        assert!(f1_names.contains(&"服务要求说明书".to_string()), "整段词要留下：{f1_names:?}");
+        assert!(f1_names.contains(&"安全检查".to_string()), "真主题词要留下：{f1_names:?}");
+        assert!(!f1_names.iter().any(|x| x == "务要" || x == "服务委托书"), "脏标签要清掉：{f1_names:?}");
+
+        let f2_names = names_of(&conn, f2);
+        assert!(f2_names.iter().any(|x| x == "务要"), "锁定文件的伪词不许动：{f2_names:?}");
+        assert!(f2_names.iter().any(|x| x == "通知书"), "锁定文件的体裁词不许动：{f2_names:?}");
+
+        // 幂等：重复跑返回 0，锁定的标签原样还在
+        assert_eq!(db::clean_bad_tags(&mut conn).unwrap(), 0, "重复清理不该再动任何行");
+        assert!(names_of(&conn, f2).iter().any(|x| x == "务要"));
+
+        // 回归防护：重扫同一文件不再产出「务要」
+        let fresh = crate::tag::basic_tags("服务要求说明书.docx", "word", 1_789_207_200_000);
+        assert!(!fresh.iter().any(|(n, _, _)| n == "务要"), "重扫不得再生成伪词：{fresh:?}");
+    }
+
     // T1.5 ①：delete_tag 级联清 file_tags
     #[test]
     fn delete_tag_cascades_file_tags() {
@@ -4670,5 +4740,873 @@ mod p4_m1 {
         let report = mig::undo(&mut s.conn, &s.arc_path, m.id, &mut |_, _, _, _| {}).unwrap();
         assert_eq!(report.restored, 0, "内容对不上就不许撤");
         assert_eq!(report.failed.len(), 1);
+    }
+}
+
+// ================================================================ BUG-003：目录体检规则层
+mod dir_health {
+    use crate::dir_health::{analyze, DirFact};
+
+    fn f(id: i64, parent: Option<i64>, name: &str, depth: i64, files: usize, kids: usize) -> DirFact {
+        DirFact {
+            id,
+            parent_id: parent,
+            name: name.to_string(),
+            rel_path: name.to_string(),
+            depth,
+            file_count: files,
+            child_count: kids,
+        }
+    }
+
+    #[test]
+    fn flags_empty_dir_with_no_files_and_no_children() {
+        let facts = vec![
+            f(1, None, "归档", 1, 0, 1),
+            f(2, Some(1), "空文件夹", 2, 0, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.iter().any(|x| x.kind == "empty" && x.dir_id == 2), "空目录应被识别");
+        assert!(!issues.iter().any(|x| x.dir_id == 1), "有子目录的父不该报空");
+    }
+
+    #[test]
+    fn flags_overdeep_dir_and_suggests_lifting_one_level() {
+        let mut facts = vec![
+            f(1, None, "A", 1, 0, 1),
+            f(2, Some(1), "B", 2, 0, 1),
+            f(3, Some(2), "C", 3, 0, 1),
+            f(4, Some(3), "D", 4, 0, 1),
+            f(5, Some(4), "深层目录", 5, 3, 0),
+        ];
+        // 真实 rel_path 带父路径段（辅助函数默认只填 name）
+        facts[4].rel_path = "A/B/C/D/深层目录".to_string();
+        let issues = analyze(&facts);
+        let deep = issues.iter().find(|x| x.kind == "move" && x.dir_id == 5);
+        assert!(deep.is_some(), "depth=5 应报层级过深");
+        assert_eq!(deep.unwrap().target_path.as_deref(), Some("A/B/C/深层目录"), "上提一层=移到祖父下，保留目录名");
+    }
+
+    #[test]
+    fn flags_version_and_draft_suffix_dirs() {
+        let facts = vec![
+            f(1, None, "合同_初稿", 1, 2, 0),
+            f(2, None, "报告（最终版）", 1, 1, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.iter().any(|x| x.kind == "rename" && x.dir_id == 1), "版本后缀应报 rename");
+        assert!(issues.iter().any(|x| x.kind == "rename" && x.dir_id == 2), "草稿后缀应报 rename");
+        assert!(issues.iter().filter(|x| x.kind == "rename").all(|x| x.target_path.is_some()));
+    }
+
+    #[test]
+    fn flags_near_duplicate_dirs_under_same_parent() {
+        let facts = vec![
+            f(1, None, "项目资料", 1, 2, 0),
+            f(2, None, "项目资料(1)", 1, 1, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.iter().any(|x| x.kind == "merge"), "同父下近似同义应报 merge");
+    }
+
+    #[test]
+    fn no_false_positive_on_normal_baseline_dirs() {
+        // 项目既有教训：这些是刻意设计的基础目录，绝不能被当成问题
+        let facts = vec![
+            f(1, None, "2026", 1, 5, 0),
+            f(2, None, "2026-Q4", 1, 3, 0),
+            f(3, None, "智能工厂平台", 1, 8, 0),
+            f(4, None, "合同", 1, 6, 0),
+            f(5, Some(4), "采购合同", 2, 4, 0),
+        ];
+        let issues = analyze(&facts);
+        assert!(issues.is_empty(), "正常目录树不该产生任何建议，实际：{issues:?}");
+    }
+
+    #[test]
+    fn caps_output_at_twenty_sorted_by_confidence() {
+        let mut facts = Vec::new();
+        for i in 1..=30 {
+            facts.push(f(i, None, &format!("空{i}"), 1, 0, 0));
+        }
+        let issues = analyze(&facts);
+        assert!(issues.len() <= 20, "输出上限 20 条");
+        for w in issues.windows(2) {
+            assert!(w[0].confidence >= w[1].confidence, "按置信度降序");
+        }
+    }
+}
+
+#[cfg(test)]
+mod dir_health_degrade {
+    use crate::dir_health::{scan_report, DirFact, Reviewer};
+    use crate::model::DirHealthIssue;
+
+    fn f(id: i64, name: &str) -> DirFact {
+        DirFact {
+            id,
+            parent_id: None,
+            name: name.to_string(),
+            rel_path: name.to_string(),
+            depth: 1,
+            file_count: 0,
+            child_count: 0,
+        }
+    }
+
+    #[test]
+    fn model_unavailable_degrades_to_rule_only_without_error() {
+        let facts = vec![f(1, "空目录")];
+        let deny: &Reviewer = &|_| -> Result<Vec<DirHealthIssue>, String> {
+            panic!("模型不可用时不该调用 reviewer")
+        };
+        let mut stages: Vec<String> = Vec::new();
+        let mut on_stage = |s: &str, _: u64, _: &str| stages.push(s.to_string());
+
+        let report = scan_report(
+            &facts,
+            deny,
+            false,
+            "本地模型未启动",
+            &mut on_stage,
+        );
+
+        assert!(!report.model_reviewed, "必须标注未经模型复核");
+        assert!(report.note.contains("未经模型复核"));
+        assert_eq!(report.issues.len(), 1, "降级也要给规则候选");
+        assert_eq!(report.issues[0].source, "rule");
+        assert_eq!(
+            stages,
+            vec!["scan", "rule", "model", "done"],
+            "四个阶段都要发事件（model 阶段标跳过）"
+        );
+    }
+
+    #[test]
+    fn gate_busy_degrades_instead_of_deadlock_or_error() {
+        let mut dir = f(1, "报告_草稿");
+        dir.file_count = 3; // 非空，避免先命中 empty 规则
+        let facts = vec![dir];
+        let deny: &Reviewer = &|_| -> Result<Vec<DirHealthIssue>, String> {
+            panic!("闸占用时不该调模型")
+        };
+        let report = scan_report(
+            &facts,
+            deny,
+            false,
+            "模型正忙",
+            &mut |_: &str, _: u64, _: &str| {},
+        );
+        assert!(!report.model_reviewed);
+        assert!(report.note.contains("模型正忙"));
+        assert!(report.note.contains("未经模型复核"));
+        assert!(report.issues.iter().any(|x| x.kind == "rename"));
+    }
+
+    #[test]
+    fn model_review_success_marks_source_and_reviewed() {
+        let facts = vec![f(1, "空目录")];
+        // 假 reviewer 原样返回（不打 source）——source=model 应由 scan_report 统一打，
+        // 这样真 reviewer 与测试走同一条标记逻辑，不会假绿
+        let ok: &Reviewer = &|issues| -> Result<Vec<DirHealthIssue>, String> { Ok(issues.to_vec()) };
+        let report = scan_report(
+            &facts,
+            ok,
+            true,
+            "",
+            &mut |_: &str, _: u64, _: &str| {},
+        );
+        assert!(report.model_reviewed);
+        assert!(report.issues.iter().all(|x| x.source == "model"));
+    }
+
+    #[test]
+    fn model_review_failure_also_degrades_without_error() {
+        let facts = vec![f(1, "空目录")];
+        let fail: &Reviewer = &|_| -> Result<Vec<DirHealthIssue>, String> {
+            Err("模型返回乱码".to_string())
+        };
+        let report = scan_report(
+            &facts,
+            fail,
+            true,
+            "",
+            &mut |_: &str, _: u64, _: &str| {},
+        );
+        assert!(!report.model_reviewed, "模型返回坏数据 → 降级");
+        assert!(report.note.contains("未经模型复核"));
+        assert_eq!(report.issues.len(), 1, "仍保留规则候选");
+        assert!(report.issues[0].source == "rule");
+    }
+}
+
+#[cfg(test)]
+mod dir_health_apply {
+    use crate::dir_health::{apply_rename, undo_dir_health};
+    use crate::index as db;
+    use crate::tests::index::fresh_db;
+
+    /// 构造：归档根/顶层「旧名」/子「子目录」，2 份已归档文件落在子目录
+    fn seed() -> (tempfile::TempDir, rusqlite::Connection, i64, i64, std::path::PathBuf) {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let parent = db::insert_dir(&conn, None, "旧名", "user").unwrap();
+        let child = db::insert_dir(&conn, Some(parent.id), "子目录", "user").unwrap();
+        // 磁盘上建出对应目录 + 文件
+        let dir_path = arc.path().join("旧名/子目录");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        let archived = dir_path.join("a.docx");
+        std::fs::write(&archived, b"data").unwrap();
+        let ap = archived.to_string_lossy().to_string();
+        // 直接插一份已迁移文件（绕过扫描/迁移流程，聚焦路径改写）
+        conn.execute(
+            "INSERT INTO files(abs_path, rel_path, name, ext, kind, size, mtime, status, archived_path, archive_dir_id, discovered_at, last_seen_at)
+             VALUES(?1,?2,'a.docx','docx','word',4,1,'migrated',?3,?4,1,1)",
+            rusqlite::params![ap, "a.docx", ap, child.id],
+        ).unwrap();
+        let arc_path = arc.path().to_path_buf();
+        (arc, conn, parent.id, child.id, arc_path)
+    }
+
+    fn archived_of(conn: &rusqlite::Connection, id: i64) -> String {
+        conn.query_row("SELECT archived_path FROM files WHERE id=?1", [id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn apply_rename_updates_dir_tree_and_file_paths() {
+        let (arc, mut conn, parent, child, _) = seed();
+        let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
+        assert_eq!(out.new_rel_path, "新名");
+        let d = db::get_dir(&conn, parent).unwrap().unwrap();
+        assert_eq!(d.rel_path, "新名", "目标目录路径已改");
+        let c = db::get_dir(&conn, child).unwrap().unwrap();
+        assert_eq!(c.rel_path, "新名/子目录", "后代路径前缀同步改");
+        assert_eq!(c.depth, 2, "层级不变");
+        let ap: String = conn.query_row("SELECT archived_path FROM files", [], |r| r.get(0)).unwrap();
+        assert!(ap.contains("新名/子目录"), "文件归档路径同步：{ap}");
+        assert!(arc.path().join("新名/子目录/a.docx").is_file(), "磁盘文件跟着目录改名");
+        assert!(!out.migration_id.to_string().is_empty());
+    }
+
+    #[test]
+    fn undo_restores_dir_tree_and_file_paths_fully() {
+        let (arc, mut conn, parent, child, _) = seed();
+        let before = archived_of(&conn, 1);
+        let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
+        let report = undo_dir_health(&mut conn, arc.path(), out.migration_id).unwrap();
+        assert_eq!(report.restored, 2, "父目录+子目录都还原");
+        assert!(report.failed.is_empty(), "撤销不该有失败：{:?}", report.failed);
+        let d = db::get_dir(&conn, parent).unwrap().unwrap();
+        assert_eq!(d.rel_path, "旧名", "目录路径完全还原");
+        let c = db::get_dir(&conn, child).unwrap().unwrap();
+        assert_eq!(c.rel_path, "旧名/子目录", "后代路径还原");
+        assert_eq!(archived_of(&conn, 1), before, "文件路径完全还原");
+        assert!(arc.path().join("旧名/子目录/a.docx").is_file(), "磁盘目录名还原");
+        assert!(arc.path().join("旧名").is_dir(), "旧目录整体回来");
+        assert!(!arc.path().join("新名").exists(), "新目录无残留（评审 Major1：嵌套撤销曾留下空壳）");
+    }
+
+    #[test]
+    fn rename_avoids_overwriting_existing_disk_dir() {
+        let (arc, mut conn, parent, _child, _) = seed();
+        // 磁盘上已有一个「新名」目录 → 必须错开，不能覆盖
+        std::fs::create_dir_all(arc.path().join("新名")).unwrap();
+        std::fs::write(arc.path().join("新名/keep.txt"), b"keep").unwrap();
+        let out = apply_rename(&mut conn, arc.path(), parent, "新名", "rule").unwrap();
+        assert_eq!(out.new_rel_path, "新名_2", "撞名应错开 _2");
+        assert!(arc.path().join("新名/keep.txt").is_file(), "原目录内容未被覆盖");
+    }
+}
+
+#[cfg(test)]
+mod dir_health_review_fixes {
+    use crate::dir_health::apply_rename;
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::UndoReport;
+    use crate::tests::index::fresh_db;
+
+    /// 采纳 move 后目标及后代的 depth 必须随 rel_path 段数一起更新
+    #[test]
+    fn apply_move_updates_depth_along_with_rel_path() {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let a = db::insert_dir(&conn, None, "A", "user").unwrap();
+        let b = db::insert_dir(&conn, Some(a.id), "B", "user").unwrap();
+        let c = db::insert_dir(&conn, Some(b.id), "C", "user").unwrap();
+        let deep = db::insert_dir(&conn, Some(c.id), "深层目录", "user").unwrap();
+        // 把深层目录从 A/B/C/深层目录 移到 A/B/深层目录（少一层）
+        apply_rename(&mut conn, arc.path(), deep.id, "A/B/深层目录", "move").unwrap();
+        let d = db::get_dir(&conn, deep.id).unwrap().unwrap();
+        assert_eq!(d.rel_path, "A/B/深层目录");
+        assert_eq!(d.depth, 3, "depth 从 4 降到 3");
+    }
+
+    /// 通用迁移撤销入口必须拒绝 dir_health 批次（file_id=0，无文件可退），
+    /// 否则会错误地标成 undone，堵死专用撤销
+    #[test]
+    fn generic_undo_refuses_dir_health_batch() {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let parent = db::insert_dir(&conn, None, "旧名", "user").unwrap();
+        apply_rename(&mut conn, arc.path(), parent.id, "新名", "rule").unwrap();
+        let mig_row = db::latest_migration(&conn).unwrap().unwrap();
+        assert_eq!(mig_row.kind, "dir_health");
+        let result: Result<UndoReport, _> = mig::undo(&mut conn, arc.path(), mig_row.id, &mut |_, _, _, _| {});
+        assert!(result.is_err(), "通用撤销必须拒绝 dir_health 批次");
+        assert!(result.unwrap_err().message.contains("目录体检"));
+    }
+}
+
+#[cfg(test)]
+mod dir_health_parent_file {
+    use crate::dir_health::{apply_rename, undo_dir_health};
+    use crate::index as db;
+    use crate::tests::index::fresh_db;
+
+    /// 父目录直属文件 + 子目录文件都在：整树改名/还原后两份都要归位（评审覆盖缺口）
+    #[test]
+    fn undo_restores_files_directly_in_parent_dir() {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, mut conn) = fresh_db();
+        let parent = db::insert_dir(&conn, None, "旧名", "user").unwrap();
+        let child = db::insert_dir(&conn, Some(parent.id), "子目录", "user").unwrap();
+        let parent_disk = arc.path().join("旧名");
+        let child_disk = parent_disk.join("子目录");
+        std::fs::create_dir_all(&child_disk).unwrap();
+        let p_file = parent_disk.join("parent.docx");
+        let c_file = child_disk.join("child.docx");
+        std::fs::write(&p_file, b"p").unwrap();
+        std::fs::write(&c_file, b"c").unwrap();
+        let pa = p_file.to_string_lossy().to_string();
+        let ca = c_file.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO files(abs_path,rel_path,name,ext,kind,size,mtime,status,archived_path,archive_dir_id,discovered_at,last_seen_at)
+             VALUES(?1,'p.docx','p.docx','docx','word',1,1,'migrated',?1,?2,1,1)",
+            rusqlite::params![pa, parent.id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO files(abs_path,rel_path,name,ext,kind,size,mtime,status,archived_path,archive_dir_id,discovered_at,last_seen_at)
+             VALUES(?1,'c.docx','c.docx','docx','word',1,1,'migrated',?1,?2,1,1)",
+            rusqlite::params![ca, child.id],
+        ).unwrap();
+
+        let out = apply_rename(&mut conn, arc.path(), parent.id, "新名", "rule").unwrap();
+        // 采纳后两份都在新路径
+        assert!(arc.path().join("新名/parent.docx").is_file());
+        assert!(arc.path().join("新名/子目录/child.docx").is_file());
+
+        undo_dir_health(&mut conn, arc.path(), out.migration_id).unwrap();
+        // 撤销后两份都归位，新目录无残留
+        assert!(arc.path().join("旧名/parent.docx").is_file(), "父直属文件归位");
+        assert!(arc.path().join("旧名/子目录/child.docx").is_file(), "子目录文件归位");
+        assert!(!arc.path().join("新名").exists(), "新目录无残留");
+        let paths: Vec<String> = conn
+            .prepare("SELECT archived_path FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert!(paths.iter().all(|p| p.contains("旧名")), "DB 路径全还原：{paths:?}");
+    }
+}
+
+// ================================================================ BUG-006 同语义目录合并
+#[cfg(test)]
+mod dir_merge {
+    use crate::dir_merge::{
+        analyze_groups, apply_merge, scan_report, undo_merge, MergeFact, MergeReviewer,
+    };
+    use crate::dir_norm::{difference_note, signature};
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::UndoReport;
+    use crate::tests::index::fresh_db;
+    use std::collections::HashMap;
+
+    const P_A: &str = "信科/生产智能化项目组/汇报/月度汇报/2026年9月";
+    const P_B: &str = "信科/生产智能化项目组/汇报/月度汇报/2026年/9月";
+    const P_OTHER: &str = "信科/生产智能化项目组/汇报/月度汇报/2026年10月";
+    const P_REVERSED: &str = "信科/生产智能化项目组/汇报/月度汇报/9月/2026年";
+
+    fn fact(id: i64, rel: &str, files: usize, created: i64) -> MergeFact {
+        MergeFact {
+            id,
+            rel_path: rel.to_string(),
+            depth: rel.split('/').filter(|s| !s.is_empty()).count() as i64,
+            file_count: files,
+            created_at: created,
+        }
+    }
+
+    struct Seed {
+        arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        src: i64,
+        dst: i64,
+        before: Vec<(i64, String, i64)>,
+        before_hash: HashMap<i64, String>,
+    }
+
+    /// 源目录 `2026年9月` 与规范目录 `2026年/9月` 各 2 份；`a.docx` 两边同名（内容不同）。
+    fn seed() -> Seed {
+        let arc = tempfile::tempdir().unwrap();
+        let (_d, conn) = fresh_db();
+        let src = db::insert_dir(&conn, None, "2026年9月", "user").unwrap();
+        let year = db::insert_dir(&conn, None, "2026年", "user").unwrap();
+        let dst = db::insert_dir(&conn, Some(year.id), "9月", "user").unwrap();
+        let src_d = arc.path().join("2026年9月");
+        let dst_d = arc.path().join("2026年/9月");
+        std::fs::create_dir_all(&src_d).unwrap();
+        std::fs::create_dir_all(&dst_d).unwrap();
+
+        let entries = [
+            (src.id, src_d.join("a.docx"), "src-a"),
+            (src.id, src_d.join("c.docx"), "src-c"),
+            (dst.id, dst_d.join("a.docx"), "dst-a"),
+            (dst.id, dst_d.join("d.docx"), "dst-d"),
+        ];
+        let mut before = Vec::new();
+        let mut before_hash = HashMap::new();
+        for (dir, path, content) in entries {
+            std::fs::write(&path, content).unwrap();
+            let ap = path.to_string_lossy().to_string();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            conn.execute(
+                "INSERT INTO files(abs_path,rel_path,name,ext,kind,size,mtime,status,archived_path,archive_dir_id,discovered_at,last_seen_at)
+                 VALUES(?1,?2,?3,'docx','word',?4,1,'migrated',?5,?6,1,1)",
+                rusqlite::params![ap, name, name, content.len() as i64, ap, dir],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            before.push((id, ap, dir));
+            before_hash.insert(id, crate::migrate::sha256_of(&path).unwrap());
+        }
+        Seed { arc, conn, src: src.id, dst: dst.id, before, before_hash }
+    }
+
+    fn archived_of(conn: &rusqlite::Connection, id: i64) -> (String, i64) {
+        conn.query_row(
+            "SELECT archived_path, archive_dir_id FROM files WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    // ---- 红测 1：归一化签名 ----
+
+    #[test]
+    fn signature_equal_for_equivalent_date_levels() {
+        assert_eq!(signature(P_A), signature(P_B), "2026年9月 ≡ 2026年/9月");
+    }
+
+    #[test]
+    fn signature_differs_for_other_month_and_reversed_hierarchy() {
+        assert_ne!(signature(P_A), signature(P_OTHER), "不同月份不得成组");
+        assert_ne!(signature(P_A), signature(P_REVERSED), "层级顺序颠倒不得成组");
+    }
+
+    #[test]
+    fn signature_normalizes_fullwidth_space_and_version_suffix() {
+        assert_eq!(
+            signature("项目_草稿／2026年 9月"),
+            signature("项目/2026年9月"),
+            "全角斜杠/空格/草稿后缀都要归一"
+        );
+        assert!(difference_note(P_A, P_B).contains("2026年9月"), "理由要写差异点");
+    }
+
+    #[test]
+    fn analyze_groups_only_groups_equivalent_dirs_and_recommends_clearer_hierarchy() {
+        let facts = vec![
+            fact(1, P_A, 2, 300),
+            fact(2, P_B, 3, 200),
+            fact(3, P_OTHER, 2, 100),
+            fact(4, P_REVERSED, 2, 100),
+        ];
+        let groups = analyze_groups(&facts);
+        assert_eq!(groups.len(), 1, "只有一组同义，实际：{:?}", groups.iter().map(|g| &g.signature).collect::<Vec<_>>());
+        let g = &groups[0];
+        assert_eq!(g.source_dir_ids, vec![1], "只搬不推荐的那一方");
+        assert_eq!(g.suggested_target_id, 2, "2026年/9月 层级更清晰，应推荐为目标");
+        assert!(g.reason.contains(&g.signature), "理由要写归一化签名");
+    }
+
+    // ---- 红测 2：批量三段式合并 + 撤销 ----
+
+    #[test]
+    fn apply_merge_moves_all_files_and_undo_restores_each_by_hash() {
+        let mut s = seed();
+        let ack = apply_merge(&mut s.conn, s.arc.path(), &[s.src], s.dst, &mut |_, _, _| {}).unwrap();
+        assert_eq!(ack.affected_files, 2, "只搬源目录的 2 份");
+        let mig = db::latest_migration(&s.conn).unwrap().unwrap();
+        assert_eq!(mig.kind, "dir_merge", "台账 kind 必须是 dir_merge");
+
+        // 四份文件全部指向目标目录
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM files WHERE archive_dir_id=?1", [s.dst], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4, "源与目标的文件都归到目标目录");
+        // 同名不覆盖
+        assert_eq!(std::fs::read(s.arc.path().join("2026年/9月/a.docx")).unwrap(), b"dst-a");
+        assert!(s.arc.path().join("2026年/9月/a_2.docx").is_file(), "撞名错开 _2");
+        assert_eq!(std::fs::read(s.arc.path().join("2026年/9月/a_2.docx")).unwrap(), b"src-a");
+        // 源文件进隔离区（永不直删）
+        let q = s.arc.path().join(".filebutler/quarantine").join(mig.id.to_string());
+        assert!(q.exists(), "隔离区批次目录必须存在");
+        // 源目录标记 empty 但记录保留
+        let empty: i64 = s
+            .conn
+            .query_row("SELECT is_empty FROM archive_dirs WHERE id=?1", [s.src], |r| r.get(0))
+            .unwrap();
+        assert_eq!(empty, 1, "合并后源目录标记 empty");
+        assert!(db::get_dir(&s.conn, s.src).unwrap().is_some(), "不删目录记录");
+
+        let report = undo_merge(&mut s.conn, s.arc.path(), mig.id).unwrap();
+        assert!(report.failed.is_empty(), "撤销不该失败：{:?}", report.failed);
+        assert_eq!(report.restored, 2);
+        for (id, ap, adir) in &s.before {
+            let (now_ap, now_adir) = archived_of(&s.conn, *id);
+            assert_eq!((&now_ap, now_adir), (ap, *adir), "逐份还原 archived_path/archive_dir_id");
+            assert_eq!(
+                crate::migrate::sha256_of(std::path::Path::new(&now_ap)).unwrap(),
+                s.before_hash[id],
+                "SHA-256 一致"
+            );
+        }
+        let empty_after: i64 = s
+            .conn
+            .query_row("SELECT is_empty FROM archive_dirs WHERE id=?1", [s.src], |r| r.get(0))
+            .unwrap();
+        assert_eq!(empty_after, 0, "撤销后取消 empty 标记");
+    }
+
+    #[test]
+    fn generic_undo_refuses_dir_merge_batch() {
+        let mut s = seed();
+        apply_merge(&mut s.conn, s.arc.path(), &[s.src], s.dst, &mut |_, _, _| {}).unwrap();
+        let mig = db::latest_migration(&s.conn).unwrap().unwrap();
+        let r: Result<UndoReport, _> =
+            mig::undo(&mut s.conn, s.arc.path(), mig.id, &mut |_, _, _, _| {});
+        assert!(r.is_err(), "通用 undo 必须拒绝 dir_merge 批次，不能误标 undone");
+        assert!(r.unwrap_err().message.contains("合并"));
+    }
+
+    // ---- 红测 3：模型不可用 / 闸占用降级 ----
+
+    #[test]
+    fn model_unavailable_still_returns_rule_candidates() {
+        let facts = vec![fact(1, P_A, 2, 300), fact(2, P_B, 3, 200)];
+        let deny: &MergeReviewer = &|_| -> Result<Vec<_>, String> {
+            panic!("模型不可用时不该调用 reviewer")
+        };
+        let mut stages = Vec::new();
+        let report = scan_report(
+            &facts,
+            deny,
+            false,
+            "本地模型未启动",
+            &mut |st, _, _| stages.push(st.to_string()),
+        );
+        assert!(!report.model_reviewed);
+        assert!(report.note.contains("未经模型复核"));
+        assert_eq!(report.candidates.len(), 1, "降级仍输出确定性规则候选");
+        assert_eq!(stages, vec!["scan", "rule", "model", "done"]);
+    }
+
+    #[test]
+    fn gate_busy_does_not_steal_and_degrades() {
+        use crate::model_gate::{ModelGate, Owner};
+        let gate = ModelGate::default();
+        assert!(gate.acquire(Owner::Text, 0));
+        assert!(
+            !gate.acquire(Owner::Suggest, 0),
+            "深读占闸时合并扫描必须避让，绝不抢闸"
+        );
+        let facts = vec![fact(1, P_A, 2, 300), fact(2, P_B, 3, 200)];
+        let deny: &MergeReviewer = &|_| -> Result<Vec<_>, String> {
+            panic!("闸被占用时不该调模型")
+        };
+        let report = scan_report(&facts, deny, false, "模型正忙", &mut |_, _, _| {});
+        assert!(report.note.contains("模型正忙"));
+        assert_eq!(report.candidates.len(), 1);
+    }
+}
+
+// ================================================================ BUG-007：整理台删除 → 隔离区可撤销（红测）
+
+#[cfg(test)]
+mod bug007_trash {
+    use crate::index as db;
+    use crate::migration as mig;
+    use crate::model::ScannedFile;
+    use crate::plan;
+    use crate::tests::index::fresh_db;
+    use std::path::{Path, PathBuf};
+
+    struct Seeded {
+        _src: tempfile::TempDir,
+        _arc: tempfile::TempDir,
+        conn: rusqlite::Connection,
+        file_id: i64,
+        src_file: PathBuf,
+        arc: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    /// 造一份真实磁盘文件 + 库里记录（abs_path 与磁盘一致），状态可指定
+    fn seed(status: db::Status, rel: &str, bytes: &[u8]) -> Seeded {
+        let src = tempfile::tempdir().unwrap();
+        let arc = tempfile::tempdir().unwrap();
+        let arc_path = arc.path().to_path_buf();
+        let (_d, mut conn) = fresh_db();
+        let root = db::add_source_root(&conn, &src.path().to_string_lossy()).unwrap();
+
+        let p = src.path().join(rel);
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(&p, bytes).unwrap();
+        let m = std::fs::metadata(&p).unwrap();
+        let sf = ScannedFile {
+            name: p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path: p.to_string_lossy().to_string(),
+            ext: "docx".into(),
+            kind: "word".into(),
+            size: m.len(),
+            mtime: plan::mtime_ms(&m),
+        };
+        db::upsert_files(&mut conn, root.id, &[sf]).unwrap();
+        let file_id = db::list_queued(&conn, Some(root.id)).unwrap()[0].0;
+        db::force_status(&conn, file_id, status).unwrap();
+
+        Seeded {
+            _src: src,
+            _arc: arc,
+            conn,
+            file_id,
+            src_file: p,
+            arc: arc_path,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn mig_count(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM migrations", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    // 红测 1：删除后原路径不存在，隔离区副本哈希一致，台账记 src/dst/sha256，状态 trashed
+    #[test]
+    fn trash_moves_to_quarantine_with_matching_hash_and_records_item() {
+        let mut s = seed(db::Status::PendingConfirm, "子目录/报告.docx", b"to-be-trashed");
+        let rel = "子目录/报告.docx";
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+
+        assert!(!s.src_file.exists(), "源文件必须离开原位置");
+        let q = plan::quarantine_path(&s.arc, out.migration_id, rel);
+        assert!(q.is_file(), "隔离区副本必须在：{}", q.display());
+        assert_eq!(std::fs::read(&q).unwrap(), s.bytes);
+        assert_eq!(out.dst_path, q.to_string_lossy().to_string());
+        assert_eq!(out.sha256.len(), 64);
+
+        let items = db::migration_items(&s.conn, out.migration_id).unwrap();
+        assert_eq!(items.len(), 1);
+        let (item, result) = &items[0];
+        assert_eq!(result, "ok");
+        assert_eq!(item.src_path, s.src_file.to_string_lossy().to_string());
+        assert_eq!(item.dst_path, q.to_string_lossy().to_string());
+        assert_eq!(item.sha256.as_deref(), Some(out.sha256.as_str()));
+
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Trashed)
+        );
+        assert_eq!(
+            db::get_prev_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::PendingConfirm)
+        );
+        let m = db::get_migration(&s.conn, out.migration_id).unwrap().unwrap();
+        assert_eq!(m.kind, "trash");
+        assert_eq!(m.status, "done");
+    }
+
+    // 红测 2：撤销 → 字节级还原、状态回到删除前、隔离区副本清理、批次标 undone
+    #[test]
+    fn undo_trash_restores_bytes_and_previous_status() {
+        let mut s = seed(db::Status::Confirmed, "子目录/报告.docx", b"undo-me-bytes");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        let q = plan::quarantine_path(&s.arc, out.migration_id, "子目录/报告.docx");
+
+        let report = mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap();
+        assert_eq!(report.restored, 1, "{:?}", report.failed);
+        assert!(s.src_file.is_file(), "原路径必须还原");
+        assert_eq!(std::fs::read(&s.src_file).unwrap(), s.bytes);
+        assert!(!q.exists(), "隔离区副本必须清理");
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Confirmed),
+            "状态回到删除前的 confirmed"
+        );
+        assert_eq!(db::get_prev_status(&s.conn, s.file_id).unwrap(), None);
+        assert_eq!(
+            db::get_migration(&s.conn, out.migration_id).unwrap().unwrap().status,
+            "undone"
+        );
+    }
+
+    // 红测 3：三个合法来源态都能删、都能还原到各自的删除前状态
+    #[test]
+    fn trash_accepts_all_legal_source_statuses() {
+        for from in [
+            db::Status::PendingConfirm,
+            db::Status::Confirmed,
+            db::Status::Parked,
+        ] {
+            let mut s = seed(from, "报告.docx", format!("bytes-{from:?}").as_bytes());
+            let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+            assert_eq!(db::get_prev_status(&s.conn, s.file_id).unwrap(), Some(from));
+            mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap();
+            assert_eq!(db::get_file_status(&s.conn, s.file_id).unwrap(), Some(from));
+            assert_eq!(std::fs::read(&s.src_file).unwrap(), s.bytes);
+        }
+    }
+
+    // 红测 4：隔离区撞名 → _2 错开，绝不覆盖既有文件
+    #[test]
+    fn trash_never_overwrites_existing_quarantine_name() {
+        let mut s = seed(db::Status::PendingConfirm, "子目录/报告.docx", b"new-bytes");
+        // 新库第一次插入迁移的 id 是 1：先占住它要用的隔离区路径
+        let occupied = plan::quarantine_path(&s.arc, 1, "子目录/报告.docx");
+        write(&occupied, b"existing-untouched");
+
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        assert_eq!(out.migration_id, 1);
+        assert!(
+            Path::new(&out.dst_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("_2"),
+            "应错开成 _2：{}",
+            out.dst_path
+        );
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-untouched");
+        assert_eq!(std::fs::read(&out.dst_path).unwrap(), s.bytes);
+        assert!(!s.src_file.exists());
+        // _2 错开的副本也必须能按台账落点准确撤销，且不碰原有的那份
+        assert_eq!(
+            mig::undo_trash(&mut s.conn, &s.arc, out.migration_id)
+                .unwrap()
+                .restored,
+            1
+        );
+        assert_eq!(std::fs::read(&s.src_file).unwrap(), s.bytes);
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-untouched");
+    }
+
+    // 红测 5：隔离区原件被篡改 → 拒绝撤销，原文件不动，状态/批次不变
+    #[test]
+    fn undo_trash_refuses_tampered_quarantine_file() {
+        let mut s = seed(db::Status::PendingConfirm, "报告.docx", b"original-bytes");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        let q = PathBuf::from(&out.dst_path);
+        write(&q, b"tampered!!!");
+
+        let err = mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap_err();
+        assert!(
+            err.message.contains("不一致") || err.message.contains("修改"),
+            "要明确说明拒绝原因：{}",
+            err.message
+        );
+        assert!(!s.src_file.exists(), "原文件不动");
+        assert_eq!(std::fs::read(&q).unwrap(), b"tampered!!!", "不覆盖被篡改的副本");
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Trashed)
+        );
+        assert_eq!(
+            db::get_migration(&s.conn, out.migration_id).unwrap().unwrap().status,
+            "done",
+            "撤销失败不能把批次标成 undone"
+        );
+    }
+
+    // 红测 6：原路径出现同名 → 拒绝撤销，既不还原也不覆盖
+    #[test]
+    fn undo_trash_refuses_when_source_path_taken() {
+        let mut s = seed(db::Status::PendingConfirm, "报告.docx", b"original-bytes");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        write(&s.src_file, b"newcomer");
+
+        let err = mig::undo_trash(&mut s.conn, &s.arc, out.migration_id).unwrap_err();
+        assert!(
+            err.message.contains("同名") || err.message.contains("覆盖"),
+            "要明确说明拒绝原因：{}",
+            err.message
+        );
+        assert_eq!(std::fs::read(&s.src_file).unwrap(), b"newcomer", "同名文件不许被覆盖");
+        assert!(Path::new(&out.dst_path).is_file(), "隔离区副本仍在");
+        assert_eq!(
+            db::get_file_status(&s.conn, s.file_id).unwrap(),
+            Some(db::Status::Trashed)
+        );
+    }
+
+    // 红测 7：非法来源态 → 明确报错、不写磁盘、不产生批次
+    #[test]
+    fn illegal_source_status_produces_no_batch() {
+        for from in [db::Status::Queued, db::Status::Migrated, db::Status::Skipped] {
+            let mut s = seed(from, "报告.docx", b"do-not-touch");
+            let before = mig_count(&s.conn);
+            let err = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap_err();
+            assert_eq!(err.code, crate::error::BAD_TRANSITION);
+            assert_eq!(mig_count(&s.conn), before, "非法转移不许产生批次");
+            assert!(s.src_file.is_file(), "源文件不动");
+            assert_eq!(db::get_file_status(&s.conn, s.file_id).unwrap(), Some(from));
+        }
+    }
+
+    // 红测 8：通用 undo 必须拒绝 trash 批次（BUG-003/006 的坑：不能误标 undone）
+    #[test]
+    fn generic_undo_refuses_trash_batch() {
+        let mut s = seed(db::Status::PendingConfirm, "报告.docx", b"generic-undo-guard");
+        let out = mig::trash_file(&mut s.conn, &s.arc, s.file_id).unwrap();
+        let r = mig::undo(
+            &mut s.conn,
+            &s.arc,
+            out.migration_id,
+            &mut |_, _, _, _| {},
+        );
+        assert!(r.is_err(), "通用 undo 必须按 kind 拒绝 trash 批次");
+        assert!(
+            r.unwrap_err().message.contains("撤销"),
+            "错误要指向专用撤销入口"
+        );
+        assert_eq!(
+            db::get_migration(&s.conn, out.migration_id).unwrap().unwrap().status,
+            "done",
+            "不能被通用 undo 误标成 undone"
+        );
+        // 专用入口仍然撤得回来
+        assert_eq!(
+            mig::undo_trash(&mut s.conn, &s.arc, out.migration_id)
+                .unwrap()
+                .restored,
+            1
+        );
     }
 }

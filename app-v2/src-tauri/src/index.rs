@@ -45,10 +45,12 @@ pub enum Status {
     Parked,
     Skipped,
     Missing,
+    /// BUG-007：整理台删除 = 移入隔离区，仍可撤销；不是永久删除
+    Trashed,
 }
 
 impl Status {
-    pub const ALL: [Status; 8] = [
+    pub const ALL: [Status; 9] = [
         Status::Queued,
         Status::Labeled,
         Status::PendingConfirm,
@@ -57,6 +59,7 @@ impl Status {
         Status::Parked,
         Status::Skipped,
         Status::Missing,
+        Status::Trashed,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -69,6 +72,7 @@ impl Status {
             Status::Parked => "parked",
             Status::Skipped => "skipped",
             Status::Missing => "missing",
+            Status::Trashed => "trashed",
         }
     }
 
@@ -88,6 +92,7 @@ pub static ALLOWED: &[(Status, &[Status])] = &[
             Status::Queued,
             Status::Parked,
             Status::Missing,
+            Status::Trashed,
         ],
     ),
     (
@@ -97,15 +102,26 @@ pub static ALLOWED: &[(Status, &[Status])] = &[
             Status::Confirmed,
             Status::Skipped,
             Status::Missing,
+            Status::Trashed,
         ],
     ),
     (
         Status::Confirmed,
-        &[Status::Migrated, Status::Queued, Status::Missing],
+        &[
+            Status::Migrated,
+            Status::Queued,
+            Status::Missing,
+            Status::Trashed,
+        ],
     ),
     (Status::Migrated, &[Status::Confirmed]),
     (Status::Missing, &[Status::Queued]),
     (Status::Skipped, &[]),
+    // BUG-007：撤销删除时只回到删除前记下的那个状态（由台账 prev_status 指定）
+    (
+        Status::Trashed,
+        &[Status::PendingConfirm, Status::Confirmed, Status::Parked],
+    ),
 ];
 
 pub fn allowed(from: Status, to: Status) -> bool {
@@ -139,6 +155,10 @@ pub fn open(path: &Path) -> Result<Connection, CmdError> {
     // P4：重新归类台账——kind 区分普通迁移与归档区内二次迁移；old_dir_id 记撤销要还原的旧目录
     ensure_column(&conn, "migrations", "kind", "TEXT NOT NULL DEFAULT 'migrate'")?;
     ensure_column(&conn, "migration_items", "old_dir_id", "INTEGER")?;
+    // BUG-006：同义目录合并后源目录标记 empty（保留目录记录，不删磁盘空目录）
+    ensure_column(&conn, "archive_dirs", "is_empty", "INTEGER NOT NULL DEFAULT 0")?;
+    // BUG-007：删除前状态（pending_confirm / confirmed / parked），撤销时按它还原
+    ensure_column(&conn, "files", "prev_status", "TEXT")?;
     Ok(conn)
 }
 
@@ -371,6 +391,25 @@ pub fn accept_dirs(conn: &Connection, names: &[String]) -> Result<Vec<ArchiveDir
         }
     }
     Ok(out)
+}
+
+/// BUG-006：标记/取消源目录的「已搬空」状态。只改标记，绝不删目录记录或磁盘目录。
+pub fn set_dir_empty(conn: &Connection, id: i64, empty: bool) -> Result<(), CmdError> {
+    conn.execute(
+        "UPDATE archive_dirs SET is_empty=?1 WHERE id=?2",
+        params![if empty { 1 } else { 0 }, id],
+    )?;
+    Ok(())
+}
+
+/// BUG-006：该目录是否还有已归档文件（判断能否取消 empty 标记）
+pub fn dir_has_archived_files(conn: &Connection, id: i64) -> Result<bool, CmdError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE archive_dir_id=?1 AND status='migrated'",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 pub fn dir_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<ArchiveDir>, CmdError> {
@@ -649,6 +688,73 @@ pub fn set_status(conn: &Connection, file_id: i64, to: Status) -> Result<(), Cmd
         params![to.as_str(), file_id],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------- BUG-007：删除（隔离区）
+//
+// 这几个函数是所有 `trashed` 状态写入的唯一入口：先查转移表，再写状态 + 删除前状态。
+// 调用方（migration.rs）把整个批次的操作包在一个事务里，失败整笔回滚。
+
+/// 删除前状态（只有 trashed 的文件才有）
+pub fn get_prev_status(conn: &Connection, file_id: i64) -> Result<Option<Status>, CmdError> {
+    // prev_status 是可空列：闭包里必须显式取 Option<String>，否则外层 optional() 会把
+    // T 推成 String，NULL 就会报「Invalid column type Null」。
+    let s: Option<Option<String>> = conn
+        .query_row("SELECT prev_status FROM files WHERE id=?1", [file_id], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?;
+    Ok(s.flatten().and_then(|s| Status::parse(&s)))
+}
+
+/// 转 trashed 并记下删除前状态（一次 UPDATE，调用方在事务里）
+pub fn mark_trashed(conn: &Connection, file_id: i64, prev: Status) -> Result<(), CmdError> {
+    let from = get_file_status(conn, file_id)?
+        .ok_or_else(|| CmdError::new("NOT_FOUND", format!("文件不存在：{file_id}")))?;
+    if !allowed(from, Status::Trashed) {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!("不允许的状态转换：{} → trashed", from.as_str()),
+        ));
+    }
+    conn.execute(
+        "UPDATE files SET status=?1, prev_status=?2 WHERE id=?3",
+        params![Status::Trashed.as_str(), prev.as_str(), file_id],
+    )?;
+    Ok(())
+}
+
+/// 撤销删除：只从 trashed 回到 prev_status，并清空 prev_status。
+/// 带 `status='trashed'` 守卫，重复撤销/中途被改过时直接拒绝，不做半吊子写入。
+pub fn restore_trashed(conn: &Connection, file_id: i64) -> Result<Status, CmdError> {
+    let (status, prev): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, prev_status FROM files WHERE id=?1",
+            [file_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CmdError::new("NOT_FOUND", format!("文件不存在：{file_id}")))?;
+    if status != Status::Trashed.as_str() {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!("文件当前不是隔离区状态（{status}），不能撤销删除"),
+        ));
+    }
+    let prev = prev
+        .and_then(|s| Status::parse(&s))
+        .ok_or_else(|| CmdError::new(BAD_TRANSITION, "删除前状态缺失，无法撤销"))?;
+    if !allowed(Status::Trashed, prev) {
+        return Err(CmdError::new(
+            BAD_TRANSITION,
+            format!("删除前状态不允许还原：{}", prev.as_str()),
+        ));
+    }
+    conn.execute(
+        "UPDATE files SET status=?1, prev_status=NULL WHERE id=?2 AND status='trashed'",
+        params![prev.as_str(), file_id],
+    )?;
+    Ok(prev)
 }
 
 pub fn count_by_status(conn: &Connection) -> Result<Vec<(String, i64)>, CmdError> {
@@ -1126,16 +1232,17 @@ pub fn pool_rows(conn: &Connection) -> Result<Vec<crate::model::FileRow>, CmdErr
     Ok(out)
 }
 
-/// 目录建议的抽样输入：除 skipped / missing 之外的所有文件（详设 §7.6）
+/// 目录建议的抽样输入：除 skipped / missing / trashed 之外的所有文件（详设 §7.6）
 ///
 /// 已迁移的也算进来 —— 它们同样是「这个人在管什么」的证据，
 /// 只是不再需要被整理。`source` 取路径最后两层，用来告诉模型文件原本散在哪。
+/// BUG-007：已被移入隔离区的文件不该继续影响目录建议。
 pub fn suggest_input_rows(
     conn: &Connection,
 ) -> Result<Vec<crate::suggest_dirs::SampleInput>, CmdError> {
     let mut stmt = conn.prepare(
         "SELECT name, kind, abs_path, mtime FROM files
-         WHERE status NOT IN ('skipped','missing')
+         WHERE status NOT IN ('skipped','missing','trashed')
          ORDER BY mtime DESC, id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1639,6 +1746,84 @@ pub fn rename_tag(conn: &mut Connection, tag_id: i64, raw: &str) -> Result<i64, 
     };
     tx.commit()?;
     Ok(final_id)
+}
+
+/// 一次性清理已落库的脏标签：keyword 2-gram 伪词 + AI 体裁弱 topic。
+///
+/// 幂等：重复运行返回 0；尊重 `tag_locked=1`，锁定文件的标签一个都不碰。
+/// 判定与生成侧共用：`tag::tokenize` 重算合法 keyword 整段词，
+/// `deep_tag::is_weak_topic` 判 topic 体裁词。返回清掉的 `file_tags` 行数。
+pub fn clean_bad_tags(conn: &mut Connection) -> Result<usize, CmdError> {
+    let tx = conn.transaction()?;
+    let mut removed = 0usize;
+
+    // ① keyword：按文件名重算合法整段词，删掉不在其中的（含跨词 2-gram）
+    let files: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare("SELECT id, name FROM files WHERE COALESCE(tag_locked, 0)=0")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
+        }
+        v
+    };
+    for (file_id, name) in files {
+        let stem = match name.rfind('.') {
+            Some(i) if i > 0 => &name[..i],
+            _ => name.as_str(),
+        };
+        let valid = crate::tag::tokenize(stem);
+        let tagged: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT t.id, t.name FROM file_tags ft JOIN tags t ON t.id=ft.tag_id
+                 WHERE ft.file_id=?1 AND t.kind='keyword'",
+            )?;
+            let rows = stmt.query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r?);
+            }
+            v
+        };
+        for (tag_id, tag_name) in tagged {
+            if !valid.iter().any(|x| x == &tag_name) {
+                removed += tx.execute(
+                    "DELETE FROM file_tags WHERE file_id=?1 AND tag_id=?2",
+                    params![file_id, tag_id],
+                )?;
+            }
+        }
+    }
+
+    // ② topic 体裁弱词：跳过锁定文件的挂载
+    let weak: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id, name FROM tags WHERE kind='topic'")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut v = Vec::new();
+        for r in rows {
+            let (id, name): (i64, String) = r?;
+            if crate::deep_tag::is_weak_topic(&name) {
+                v.push(id);
+            }
+        }
+        v
+    };
+    for tag_id in weak {
+        removed += tx.execute(
+            "DELETE FROM file_tags WHERE tag_id=?1
+               AND file_id IN (SELECT id FROM files WHERE COALESCE(tag_locked,0)=0)",
+            [tag_id],
+        )?;
+    }
+
+    // ③ 清掉没人挂的标签行（第二次跑到这里已经没有脏数据）
+    tx.execute(
+        "DELETE FROM tags WHERE kind IN ('keyword','topic')
+           AND id NOT IN (SELECT tag_id FROM file_tags)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(removed)
 }
 
 /// 某个绝对路径属于哪个源区（取最长前缀，多个源区嵌套时不会挑错）
