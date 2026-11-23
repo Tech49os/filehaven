@@ -27,7 +27,7 @@
   background: var(--glass-bg-side);
   backdrop-filter: blur(var(--glass-blur-side)) saturate(var(--glass-saturate));
   -webkit-backdrop-filter: blur(var(--glass-blur-side)) saturate(var(--glass-saturate));
-  border-right: 0.5px solid var(--glass-border);
+  /* design §2：侧栏贯通到顶，无竖向分割亮线——不加 border-right */
 }
 
 .glass-panel {
@@ -104,7 +104,7 @@ html.no-glass .glass-side {
   background: var(--c-sidebar);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  border-right: 0.5px solid var(--c-border);
+  /* 与材质态一致：无竖向分割亮线 */
 }
 html.no-glass .glass-panel {
   background: var(--c-surface);

@@ -10,6 +10,7 @@ import tokens from './styles/tokens.css?raw'
 import appWindow from './components/AppWindow.vue?raw'
 import sidebar from './components/Sidebar.vue?raw'
 import appSource from './App.vue?raw'
+import glassCss from './styles/glass.css?raw'
 
 /** getCurrentWindow() 的三个窗口操作，用 hoisted 保证 mock 工厂拿得到 */
 const winMocks = vi.hoisted(() => ({
@@ -168,5 +169,18 @@ describe('块① · 快速检索胶囊与掩膜 token', () => {
     const alpha = parseFloat(m![1])
     expect(alpha).toBeGreaterThanOrEqual(0.14)
     expect(alpha).toBeLessThanOrEqual(0.18)
+  })
+
+  it('侧栏无竖向分割亮线：材质态与实色回退态都不带 border-right', () => {
+    // design §2：侧栏从窗口顶贯通到底，「无断层、无竖向分割亮线」。
+    // BUG-011 遗留的 border-right 会让贯通侧栏右缘出现一条白线，两处回退都要去掉。
+    const blocks = [
+      ...glassCss.matchAll(/\.glass-side\s*\{([^}]*)\}/g),
+      ...glassCss.matchAll(/html\.no-glass\s+\.glass-side\s*\{([^}]*)\}/g),
+    ]
+    expect(blocks.length, 'glass.css 应含材质态与实色回退态两条 .glass-side 规则').toBeGreaterThanOrEqual(2)
+    for (const [, body] of blocks) {
+      expect(body, '.glass-side 不应有 border-right（竖向分割亮线）').not.toMatch(/border-right\s*:/)
+    }
   })
 })

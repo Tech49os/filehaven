@@ -82,9 +82,11 @@ RED 结果：**7 失败 / 1 通过**（通过的是「无 side slot 时 rail 不
 
 ## 六、边界与遗留风险
 
-1. `glass.css` 的 `.glass-side` 仍带 `border-right: 0.5px solid var(--glass-border)`，
-   与标准 §2「无竖向分割亮线」存在视觉张力；因 BUG-011 材质规则冻结（一行不许删），
-   本块未改，留待主代理 CDP 截图后裁决是否单独处理。
+1. ~~`glass.css` 的 `.glass-side` 仍带 `border-right`~~ —— **主代理 CDP 复核后已修**：
+   截图确认贯通侧栏右缘存在 1px 白线，与标准 §2「无竖向分割亮线」冲突。
+   追加红测（`ui-window.test.ts`「侧栏无竖向分割亮线」，先跑见 RED：抓到材质态的 border-right），
+   随后删除 `glass.css` 材质态与 `html.no-glass` 回退态两处的 `border-right`，复查 20/20 绿、
+   vue-tsc 0。BUG-011 的四层 blur/saturate 与双回退未动，只去掉这一条线。
 2. 测试为源码契约 + happy-dom mount，能证明 DOM/绑定/token 正确，**不能证明**真实窗口的
    拖拽手感、Tauri 拖拽区与灯点击的互斥行为、以及模糊层的实际观感，需真机 CDP 复核。
 3. `SearchPanel` 的遮罩仍保留 `var(--c-mask, rgba(0,0,0,0.28))` 旧 fallback；
