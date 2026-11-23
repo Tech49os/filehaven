@@ -6,10 +6,28 @@ import workspaceSource from './Workspace.vue?raw'
 
 /** happy-dom 没有布局引擎：用 CSS 不变量 + DOM 数量守住「2 条与 10 条行高一致」 */
 function cssRule(css: string, selector: string): string {
+  // 行尾归一化：仓库 core.autocrlf=true 且无 .gitattributes，
+  // 检出后 .vue 里的换行是 CRLF，而多选择器断言写的是 '\n'。
+  // 不归一化时 '.left,\n.right' 永远匹配不到（BUG-005 在合并后误报）。
+  // 行尾归一化：仓库 core.autocrlf=true 且无 .gitattributes，
+  // 检出后 .vue 里的换行是 CRLF，而多选择器断言写的是 '\n'。
+  // 不归一化时 '.left,\n.right' 永远匹配不到（BUG-005 在合并后误报）。
+  const normalized = css.replace(/\r\n/g, '\n')
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const m = css.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  const m = normalized.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'm'))
   return m ? m[1] : ''
 }
+
+describe('cssRule helper · 行尾健壮性', () => {
+  const rule = '.left,\n.right {\n  overflow: auto;\n}'
+  it('CRLF 源码里的多选择器规则也必须能取到', () => {
+    // 仓库 core.autocrlf=true → 检出后是 CRLF；helper 不归一化就会静默返回 ''
+    expect(cssRule(rule.replace(/\n/g, '\r\n'), '.left,\n.right')).toMatch(/overflow:\s*auto/)
+  })
+  it('LF 源码同样能取到（别人机器可能是 LF）', () => {
+    expect(cssRule(rule, '.left,\n.right')).toMatch(/overflow:\s*auto/)
+  })
+})
 
 const nextBatch = vi.fn()
 const bootState = vi.fn()
