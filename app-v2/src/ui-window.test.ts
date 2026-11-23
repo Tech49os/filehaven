@@ -11,6 +11,8 @@ import appWindow from './components/AppWindow.vue?raw'
 import sidebar from './components/Sidebar.vue?raw'
 import appSource from './App.vue?raw'
 import glassCss from './styles/glass.css?raw'
+// 窗口配置走 JSON 导入（项目无 @types/node，测试里不用 node:fs）
+import tauriConf from '../src-tauri/tauri.conf.json'
 
 /** getCurrentWindow() 的三个窗口操作，用 hoisted 保证 mock 工厂拿得到 */
 const winMocks = vi.hoisted(() => ({
@@ -217,5 +219,20 @@ describe('块① · 快速检索胶囊与掩膜 token', () => {
     expect(appWindow, '无侧栏时标题栏左上角也必须有圆角').toMatch(
       /\.win\s*\.no-side[^{]*\.titlebar\s*\{[^}]*border-top-left-radius\s*:\s*var\(--r-window\)/s,
     )
+  })
+
+  it('窗口必须关闭系统阴影：shadow 会让 tao 把窗口外扩 8px', () => {
+    // 真机实测：WindowRect 1176x749 vs ClientRect 1160x740，
+    // 左右各 8px、下 8px、上 1px 属于窗口但没有任何内容；
+    // 透明窗口下这圈直接显示为灰色阴影带（用户说的「透明的边」）。
+    // 来源是 tao 的 undecorated shadow：为画投影把窗口向外扩；
+    // 关掉 shadow 后窗口矩形回到客户区，边缘干净。
+    const win = tauriConf.app.windows[0]
+    expect(win.transparent, '窗口必须保持透明（毛玻璃采样需要）').toBe(true)
+    expect(win.decorations, '窗口必须无系统边框').toBe(false)
+    expect(
+      win.shadow,
+      'shadow:true 时 tao 把窗口外扩 8px 画阴影，透明窗口下露出灰色阴影带；必须设 false',
+    ).toBe(false)
   })
 })
