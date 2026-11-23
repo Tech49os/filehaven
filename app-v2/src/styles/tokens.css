@@ -75,7 +75,11 @@
   --c-divider: rgba(0, 0, 0, 0.04);
   --c-hover: rgba(0, 0, 0, 0.035);
   /* 圆角 */
-  --r-window: 14px;
+  /* 窗口圆角 24px：真机实测 14px 时四角会露直角（见 ui-window.test.ts）。
+     根因是 .side-rail/.titlebar 带 backdrop-filter 会独立合成，
+     祖先的 border-radius+overflow:hidden 裁不掉它们；圆弧必须足够大
+     才能盖住这些直角矩形。16/18/20/22 仍有残留，24 才完全干净。 */
+  --r-window: 24px;
   --r-card: 14px;
   --r-banner: 12px;
   --r-btn: 10px;

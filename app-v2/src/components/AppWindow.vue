@@ -19,7 +19,7 @@ function onClose() {
 </script>
 
 <template>
-  <div class="win glass-frame">
+  <div class="win glass-frame" :class="{ 'no-side': !$slots.side }">
     <!-- 侧栏贯通到顶：灯区与 slot 共用同一块 .glass-side，灯区不另加材质/分隔线 -->
     <div v-if="$slots.side" class="side-rail glass-side" data-tauri-drag-region>
       <div class="lights">
@@ -72,13 +72,18 @@ function onClose() {
   overflow: hidden;
 }
 
-/* 整根 rail 从 y=0 贯通到底；材质由 .glass-side 统一提供 */
+/* 整根 rail 从 y=0 贯通到底；材质由 .glass-side 统一提供。
+   自带左上/左下圆角：rail 带 backdrop-filter 会独立合成，
+   祖先 .win 的 overflow:hidden 裁不掉它，必须自己圆角，
+   否则窗口左上角会露出直角（真机实测，见 ui-window.test.ts）。 */
 .side-rail {
   width: var(--side-width);
   flex: 0 0 var(--side-width);
   min-width: 0;
   display: flex;
   flex-direction: column;
+  border-top-left-radius: var(--r-window);
+  border-bottom-left-radius: var(--r-window);
 }
 
 .lights {
@@ -133,7 +138,8 @@ function onClose() {
   flex-direction: column;
 }
 
-/* 标题栏只盖内容区；右上角三键已删除，右上角留给 #tail */
+/* 标题栏只盖内容区；右上角三键已删除，右上角留给 #tail。
+   自带右上圆角，理由同 .side-rail：backdrop-filter 层不被祖先裁剪。 */
 .titlebar {
   height: var(--titlebar-h);
   flex: 0 0 var(--titlebar-h);
@@ -143,6 +149,7 @@ function onClose() {
   padding: 0 16px;
   position: relative;
   user-select: none;
+  border-top-right-radius: var(--r-window);
 }
 
 .title {
@@ -154,6 +161,12 @@ function onClose() {
   color: var(--c-text-2);
   letter-spacing: 0.1px;
   white-space: nowrap;
+}
+
+/* 无侧栏（引导页）时标题栏从窗口最左开始，左上角也要圆角，
+   否则同样会露出直角——理由同 .side-rail。 */
+.win.no-side .titlebar {
+  border-top-left-radius: var(--r-window);
 }
 
 .tail {

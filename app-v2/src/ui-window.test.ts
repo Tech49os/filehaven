@@ -183,4 +183,39 @@ describe('块① · 快速检索胶囊与掩膜 token', () => {
       expect(body, '.glass-side 不应有 border-right（竖向分割亮线）').not.toMatch(/border-right\s*:/)
     }
   })
+
+  it('窗口圆角必须 ≥24px：14px 时四角会露出直角（真机实测）', () => {
+    // 真机现象：--r-window:14px 时窗口左上角是直角、圆角外还有一圈白边。
+    // 根因：.side-rail/.titlebar 带 backdrop-filter，会独立合成，
+    // 祖先的 border-radius+overflow:hidden 裁不掉它们；14px 的圆弧太小，
+    // 盖不住这些直角矩形。实测 16/18/20/22 仍有残留，24px 才完全干净。
+    const r = tokenMap(tokens).get('--r-window')
+    expect(r, '--r-window 必须在 tokens.css 定义').toBeTruthy()
+    const px = parseFloat(r!)
+    expect(px, `--r-window 应 >= 24px（当前 ${r}），否则窗口四角露直角`).toBeGreaterThanOrEqual(24)
+  })
+
+  it('顶部两层材质各自带对应圆角，不依赖祖先裁剪', () => {
+    // 光放大 --r-window 不够稳：一旦有人改小，直角又会回来。
+    // 让贴窗口边的材质层自己带同半径圆角，才是根治。
+    // 侧栏：左上 + 左下；标题栏：右上；主面板底衬：右下。
+    expect(appWindow, '侧栏 rail 应自带左上/左下圆角').toMatch(
+      /\.side-rail\s*\{[^}]*border-top-left-radius\s*:\s*var\(--r-window\)/s,
+    )
+    expect(appWindow, '侧栏 rail 应自带左下圆角').toMatch(
+      /\.side-rail\s*\{[^}]*border-bottom-left-radius\s*:\s*var\(--r-window\)/s,
+    )
+    expect(appWindow, '标题栏应自带右上圆角').toMatch(
+      /\.titlebar\s*\{[^}]*border-top-right-radius\s*:\s*var\(--r-window\)/s,
+    )
+  })
+
+  it('没有侧栏时（引导页）标题栏横跨全宽，左上也要有圆角', () => {
+    // 引导页 route.meta.sidebar=false → 不传 #side slot → 无 rail，
+    // 标题栏从窗口最左开始。此时只剩右上圆角，左上会露直角。
+    // 真机实测：onboarding 页 titlebar 从 x=1 起、borderTopLeftRadius=0px。
+    expect(appWindow, '无侧栏时标题栏左上角也必须有圆角').toMatch(
+      /\.win\s*\.no-side[^{]*\.titlebar\s*\{[^}]*border-top-left-radius\s*:\s*var\(--r-window\)/s,
+    )
+  })
 })

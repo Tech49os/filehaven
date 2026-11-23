@@ -217,6 +217,9 @@ button:not(:disabled):active {
   padding: var(--pad-content);
   gap: var(--gap-grid);
   overflow: hidden;
+  /* 右下圆角：.main 挂 .glass-panel，带 backdrop-filter 会独立合成，
+     祖先 .win 的 overflow:hidden 裁不掉它，必须自己圆角（同 .side-rail） */
+  border-bottom-right-radius: var(--r-window);
 }
 
 .err {
